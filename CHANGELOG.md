@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.3.0] - 2026-06-01
+
+### Fixed
+- **Smart router now detects JS-only shells and escalates** (#1): When HTTP returns a 200 with content like "You need to enable JavaScript", smart_fetch now escalates to dynamic. When dynamic returns a JS-disabled placeholder (e.g. Twitter), escalates to stealthy. Previously accepted these as successful results.
+- **Error field now signals content quality issues** (#7, #8): The `error` field is set when content is a JS shell (`js_shell_detected`), a geo/region redirect (`geo_redirect_detected`), or a bot challenge page (`bot_challenge_detected`). Downstream agents can now detect failures without parsing content strings.
+- **Bulk output now respects max_content_chars** (#3): All bulk operations (`bulk_get`, `bulk_fetch`, `bulk_stealthy_fetch`) now accept a `max_content_chars` parameter (default 40000) that truncates each result. Prevents 300KB+ output that overwhelms tool runtimes.
+- **Bulk `successful` count now excludes results with content issues**: A result with an error field is no longer counted as successful.
+
+### Changed
+- **Domain intelligence expanded**: Added known-safe domains (httpbin.org, wikipedia.org, github.com, stackoverflow.com, etc.) to prevent over-escalation of static sites. Added YouTube, Uniswap, Spotify, Notion, and other SPA domains as known-dynamic. Moved Twitter/X from dynamic to stealthy (dynamic returns JS-disabled placeholder for these).
+- **All smart_fetch return paths now run content quality annotation**: Every exit point (Phase A/B/C, force_fetcher, escalation results) calls `_annotate_quality()` to ensure the error field is populated when content is bad.
+- **All-tiers-failed error now includes failure trace**: The `error` field shows which tiers were tried and what failed.
+
+### Added
+- 15 new unit tests covering JS shell detection, content quality, geo redirect, domain intelligence routing
+
 ## [2.0.0] - 2026-06-02: Hound
 
 Renamed product from "Master Fetch" to **Hound**: web research for AI agents.

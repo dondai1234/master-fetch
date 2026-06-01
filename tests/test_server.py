@@ -5,7 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import pytest
 from master_fetch.server import (
     ResponseModel, _apply_chunking, _is_cloudflare_from_response,
-    _is_cloudflare_challenge, MAX_CONTENT_CHARS,
+    _is_cloudflare_challenge, _is_js_shell, _detect_content_issue,
+    _annotate_quality, MAX_CONTENT_CHARS,
 )
 from master_fetch.domain_intel import _extract_domain
 
@@ -55,6 +56,66 @@ class TestChunking:
         result = _apply_chunking(r)
         assert result.content == [content]
         assert "Content truncated" not in result.content[0]
+
+
+class TestJsShellDetection:
+    def test_uniswap_js_shell(self):
+        """Bug #1: Uniswap returns 'You need to enable JavaScript to run this app.' via HTTP."""
+        r = ResponseModel(status=200, content=["You need to enable JavaScript to run this app."], url="https://app.uniswap.org/")
+        assert _is_js_shell(r) is True
+
+    def test_twitter_js_disabled(self):
+        """Dynamic fetcher returns JS-disabled placeholder for Twitter."""
+        r = ResponseModel(status=200, content=["We've detected that JavaScript is disabled in this browser. Please enable JavaScript"], url="https://twitter.com/AnthropicAI")
+        assert _is_js_shell(r) is True
+
+    def test_normal_content_not_shell(self):
+        r = ResponseModel(status=200, content=["Buy and sell crypto with zero app fees on 19+ networks"], url="https://app.uniswap.org/")
+        assert _is_js_shell(r) is False
+
+    def test_empty_content_is_shell(self):
+        r = ResponseModel(status=200, content=[""], url="https://example.com")
+        assert _is_js_shell(r) is True
+
+    def test_javascript_required_variants(self):
+        for text in [
+            "JavaScript is required to view this site",
+            "Please enable JavaScript",
+            "JavaScript must be enabled",
+            "Requires JavaScript",
+            "JavaScript is disabled",
+        ]:
+            r = ResponseModel(status=200, content=[text], url="https://example.com")
+            assert _is_js_shell(r) is True, f"Failed for: {text}"
+
+
+class TestContentQuality:
+    def test_js_shell_sets_error(self):
+        r = ResponseModel(status=200, content=["You need to enable JavaScript to run this app."], url="https://app.uniswap.org/")
+        assert _detect_content_issue(r).startswith("js_shell_detected")
+
+    def test_geo_redirect_sets_error(self):
+        """Bug: BestBuy returns country selector via HTTP, no error signal."""
+        r = ResponseModel(status=200, content=["Hello! Choose a country. Shopping in the U.S.?"], url="https://www.bestbuy.com/")
+        assert _detect_content_issue(r).startswith("geo_redirect_detected")
+
+    def test_cloudflare_sets_error(self):
+        r = ResponseModel(status=200, content=["Checking your browser cloudflare ray id"], url="https://example.com")
+        assert _detect_content_issue(r).startswith("bot_challenge_detected")
+
+    def test_normal_content_no_error(self):
+        r = ResponseModel(status=200, content=["This is a normal article about Python programming."], url="https://example.com")
+        assert _detect_content_issue(r) == ""
+
+    def test_annotate_quality_sets_error_field(self):
+        r = ResponseModel(status=200, content=["You need to enable JavaScript to run this app."], url="https://app.uniswap.org/")
+        result = _annotate_quality(r)
+        assert result.error.startswith("js_shell_detected")
+
+    def test_annotate_quality_preserves_existing_error(self):
+        r = ResponseModel(status=500, content=["server error"], url="https://example.com", error="network_timeout")
+        result = _annotate_quality(r)
+        assert result.error == "network_timeout"  # Don't overwrite
 
 
 class TestCloudflareDetection:
@@ -112,6 +173,27 @@ class TestBinaryDetection:
     def test_empty_data(self):
         from master_fetch.trafilatura_extractor import _is_probably_binary
         assert _is_probably_binary(b"") is False
+
+
+class TestDomainIntel:
+    def test_known_safe_domain(self):
+        from master_fetch.domain_intel import guess_protection_level
+        assert guess_protection_level("https://httpbin.org/html") == "none"
+        assert guess_protection_level("https://en.wikipedia.org/wiki/Python") == "none"
+
+    def test_known_stealthy_domain(self):
+        from master_fetch.domain_intel import guess_protection_level
+        assert guess_protection_level("https://twitter.com/AnthropicAI") == "high"
+        assert guess_protection_level("https://x.com/AnthropicAI") == "high"
+
+    def test_known_dynamic_domain(self):
+        from master_fetch.domain_intel import guess_protection_level
+        assert guess_protection_level("https://www.youtube.com/results?search_query=test") == "low"
+        assert guess_protection_level("https://app.uniswap.org/") == "low"
+
+    def test_unknown_domain_defaults_none(self):
+        from master_fetch.domain_intel import guess_protection_level
+        assert guess_protection_level("https://some-unknown-site-12345.com/") == "none"
 
 
 class TestRobots:
