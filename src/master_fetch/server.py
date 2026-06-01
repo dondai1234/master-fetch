@@ -115,6 +115,15 @@ class _SessionEntry:
     _alive: bool = True  # True from creation; set False only on explicit close or crash
 
 
+def _annotate_quality(result: ResponseModel) -> ResponseModel:
+    """Check content quality and set error field if issues detected. Returns same result."""
+    if not result.error:  # Don't overwrite existing errors
+        issue = _detect_content_issue(result)
+        if issue:
+            result.error = issue
+    return result
+
+
 def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS) -> ResponseModel:
     """Truncate content if it exceeds max_chars. Adds continuation info."""
     total = sum(len(c) for c in result.content)
@@ -509,6 +518,7 @@ class MasterFetchServer:
         verify: Optional[bool] = True,
         http3: Optional[bool] = False,
         stealthy_headers: Optional[bool] = True,
+        max_content_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Async parallel GET requests with browser fingerprint impersonation.
         Fast, but only works for low-protection sites.
@@ -533,6 +543,7 @@ class MasterFetchServer:
         :param verify: Verify HTTPS certificates (default True).
         :param http3: Use HTTP/3 (default False).
         :param stealthy_headers: Generate real browser headers (default True).
+        :param max_content_chars: Max chars per result before truncation (default 40000). Prevents huge bulk output.
         """
         normalized_proxy_auth = _normalize_credentials(proxy_auth)
         normalized_auth = _normalize_credentials(auth)
@@ -551,10 +562,15 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks)
             results = [
-                _translate_response(page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed)
+                _apply_chunking(
+                    _annotate_quality(
+                        _translate_response(page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed)
+                    ),
+                    max_chars=max_content_chars,
+                )
                 for page, elapsed in timed_responses
             ]
-            successful = sum(1 for r in results if r.status < 400)
+            successful = sum(1 for r in results if r.status < 400 and not r.error)
             return BulkResponseModel(results=results, total=len(results), successful=successful)
 
     # ─── Dynamic Fetcher (Playwright) ────────────────────────────────
@@ -649,6 +665,7 @@ class MasterFetchServer:
         network_idle: bool = False,
         wait_selector_state: SelectorWaitStates = "attached",
         session_id: Optional[str] = None,
+        max_content_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Async parallel dynamic fetch via Playwright. Handles JS-rendered pages.
 
@@ -674,6 +691,7 @@ class MasterFetchServer:
         :param network_idle: Wait for no network connections for 500ms.
         :param wait_selector_state: Selector wait state.
         :param session_id: Reuse existing browser session.
+        :param max_content_chars: Max chars per result before truncation (default 40000). Prevents huge bulk output.
         """
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
@@ -703,8 +721,8 @@ class MasterFetchServer:
                 timed_tasks = [_timed(session.fetch(url)) for url in urls]
                 timed_responses = await gather(*timed_tasks)
 
-        results = [_translate_response(page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed) for page, elapsed in timed_responses]
-        successful = sum(1 for r in results if r.status < 400)
+        results = [_apply_chunking(_annotate_quality(_translate_response(page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed)), max_chars=max_content_chars) for page, elapsed in timed_responses]
+        successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
     # ─── Stealthy Fetcher (Patchright) ───────────────────────────────
@@ -815,6 +833,7 @@ class MasterFetchServer:
         solve_cloudflare: bool = False,
         additional_args: Optional[Dict] = None,
         session_id: Optional[str] = None,
+        max_content_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Async parallel stealthy fetch with anti-bot bypass.
 
@@ -844,6 +863,7 @@ class MasterFetchServer:
         :param wait_selector_state: Selector wait state.
         :param additional_args: Extra Playwright context args.
         :param session_id: Reuse existing browser session.
+        :param max_content_chars: Max chars per result before truncation (default 40000). Prevents huge bulk output.
         """
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
@@ -875,8 +895,8 @@ class MasterFetchServer:
                 timed_tasks = [_timed(session.fetch(url)) for url in urls]
                 timed_responses = await gather(*timed_tasks)
 
-        results = [_translate_response(page, extraction_type, css_selector, main_content_only, use_tf, "stealthy", elapsed) for page, elapsed in timed_responses]
-        successful = sum(1 for r in results if r.status < 400)
+        results = [_apply_chunking(_annotate_quality(_translate_response(page, extraction_type, css_selector, main_content_only, use_tf, "stealthy", elapsed)), max_chars=max_content_chars) for page, elapsed in timed_responses]
+        successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
     # ─── SMART FETCH (The One Tool To Rule Them All) ──────────────────
@@ -990,6 +1010,7 @@ class MasterFetchServer:
                 headers=extra_headers, cookies=_http_cookies, timeout=30,
                 stealthy_headers=True)
             await record_result(url, "none", True)
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1004,6 +1025,7 @@ class MasterFetchServer:
                 extra_headers=extra_headers, useragent=useragent, cookies=cookies,
                 session_id=dsid)
             await record_result(url, "low", True)
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1021,6 +1043,7 @@ class MasterFetchServer:
                 useragent=useragent, cookies=cookies,
                 session_id=ssid)
             await record_result(url, "high", True)
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1045,6 +1068,7 @@ class MasterFetchServer:
             elapsed = (now() - start_time) * 1000
             result.duration_ms = elapsed
             await record_result(url, "high", result.status < 400, elapsed)
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1061,12 +1085,17 @@ class MasterFetchServer:
                 extra_headers=extra_headers, useragent=useragent, cookies=cookies,
                 session_id=dsid)
             if result.status < 400 and not _is_cloudflare_from_response(result):
-                elapsed = (now() - start_time) * 1000
-                result.duration_ms = elapsed
-                await record_result(url, "low", True, elapsed)
-                if cache_ttl > 0:
-                    await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                return _apply_chunking(result)
+                if _is_js_shell(result):
+                    # Dynamic returned JS-disabled placeholder: escalate to stealthy
+                    logger.info(f"Dynamic returned JS shell for {url}, escalating to stealthy")
+                else:
+                    elapsed = (now() - start_time) * 1000
+                    result.duration_ms = elapsed
+                    await record_result(url, "low", True, elapsed)
+                    result = _annotate_quality(result)
+                    if cache_ttl > 0:
+                        await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+                    return _apply_chunking(result)
             # Escalate to stealthy
             ssid = await self._ensure_auto_session("stealthy")
             result = await self.stealthy_fetch(url, extraction_type=extraction_type,
@@ -1082,6 +1111,7 @@ class MasterFetchServer:
             elapsed = (now() - start_time) * 1000
             result.duration_ms = elapsed
             await record_result(url, "high", result.status < 400, elapsed)
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1098,18 +1128,25 @@ class MasterFetchServer:
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
 
-        # Success with HTTP: done, fastest path
+        # Success with HTTP: check if content is a JS-only shell
         if result.status < 400:
-            await record_result(url, "none", True, elapsed)
-            if cache_ttl > 0:
-                await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            if _is_js_shell(result):
+                # JS-only placeholder: escalate to dynamic fetcher
+                logger.info(f"HTTP returned JS shell for {url}, escalating to dynamic")
+            else:
+                # Real content: done, fastest path
+                await record_result(url, "none", True, elapsed)
+                result = _annotate_quality(result)
+                if cache_ttl > 0:
+                    await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+                return _apply_chunking(result)
 
         # Failed with HTTP: check if it's a bot challenge or just an error page
         if not _is_cloudflare_from_response(result):
             # Not a bot challenge. Don't waste time escalating. Return the error.
             await record_result(url, "none", False, elapsed)
             result.duration_ms = elapsed
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1129,10 +1166,15 @@ class MasterFetchServer:
         result.duration_ms = elapsed
 
         if result.status < 400 and not _is_cloudflare_from_response(result):
-            await record_result(url, "low", True, elapsed)
-            if cache_ttl > 0:
-                await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            if _is_js_shell(result):
+                # Dynamic returned JS-disabled placeholder: escalate to stealthy
+                logger.info(f"Dynamic returned JS shell for {url}, escalating to stealthy")
+            else:
+                await record_result(url, "low", True, elapsed)
+                result = _annotate_quality(result)
+                if cache_ttl > 0:
+                    await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+                return _apply_chunking(result)
 
         # Failed with dynamic: escalate to stealthy
         errors.append(f"Dynamic tier failed (status {result.status})")
@@ -1152,6 +1194,7 @@ class MasterFetchServer:
 
         if result.status < 400 and not _is_cloudflare_from_response(result):
             await record_result(url, "high", True, elapsed)
+            result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
@@ -1166,6 +1209,7 @@ class MasterFetchServer:
         ]
         await record_result(url, "high", False, elapsed)
         result.duration_ms = elapsed
+        result.error = f"all_tiers_failed: {('; '.join(errors))}"
         if cache_ttl > 0:
             await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
         return _apply_chunking(result)
@@ -1255,6 +1299,25 @@ class MasterFetchServer:
         server.run(transport="stdio" if not http else "streamable-http")
 
 
+# Signals that the fetched content is a JS-only placeholder, not real content.
+_JS_SHELL_SIGNALS = [
+    "enable javascript", "you need to enable javascript",
+    "javascript is required", "javascript is disabled",
+    "javascript to run this app", "javascript must be enabled",
+    "please enable javascript", "requires javascript",
+    "we've detected that javascript is disabled",
+    "javascript is disabled in this browser",
+    "enable javascript to run this app",
+]
+
+# Signals that the fetched content is a geo/region redirect page.
+_GEO_REDIRECT_SIGNALS = [
+    "choose a country", "select your country", "select your region",
+    "shopping in the u.s.", "choose your country",
+    "country selector", "region selector",
+]
+
+
 def _is_cloudflare_from_response(result: ResponseModel) -> bool:
     """Check if a ResponseModel indicates a bot challenge page (Cloudflare, DataDome, etc.)."""
     content_str = " ".join(result.content).lower()
@@ -1266,6 +1329,38 @@ def _is_cloudflare_from_response(result: ResponseModel) -> bool:
     generic_signals = ["please verify you are a human", "are you a robot", "checking your browser"]
     all_signals = cf_signals + dd_signals + generic_signals
     return any(signal in content_str for signal in all_signals)
+
+
+def _is_js_shell(result: ResponseModel) -> bool:
+    """Check if a response contains only a JS-only placeholder, not real content.
+
+    Used by smart_fetch to decide whether to escalate from HTTP→dynamic or dynamic→stealthy.
+    """
+    content_str = " ".join(result.content).lower().strip()
+    if not content_str:
+        return True  # Empty content after extraction = JS shell or blank page
+    return any(signal in content_str for signal in _JS_SHELL_SIGNALS)
+
+
+def _detect_content_issue(result: ResponseModel) -> str:
+    """Detect content quality issues in a response. Returns error string or ''.
+
+    Called on the final result to give the caller a signal that content may be unusable,
+    even when HTTP status is 200. Sets the error field so AI agents can detect failures
+    without having to parse content strings themselves.
+    """
+    content_str = " ".join(result.content).lower().strip()
+
+    if _is_js_shell(result):
+        return "js_shell_detected: page requires JavaScript rendering but fetcher returned placeholder"
+
+    if any(signal in content_str for signal in _GEO_REDIRECT_SIGNALS):
+        return "geo_redirect_detected: page returned region/country selector instead of content"
+
+    if _is_cloudflare_from_response(result):
+        return "bot_challenge_detected: page returned bot challenge/verification page"
+
+    return ""
 
 
 def main():

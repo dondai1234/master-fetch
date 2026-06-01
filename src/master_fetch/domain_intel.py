@@ -13,17 +13,35 @@ _CACHE_DIR = Path.home() / ".master_fetch_cache"
 _DB_NAME = "domains.db"
 
 PROTECTION_LEVELS = ("none", "low", "high")
-# Domains known to need stealth
+# Domains known to be static (HTTP works fine). Prevents over-escalation.
+_KNOWN_SAFE_DOMAINS = {
+    "httpbin.org", "example.com", "wikipedia.org", "wikimedia.org",
+    "github.com", "gist.github.com", "pypi.org", "npmjs.com",
+    "stackoverflow.com", "serverfault.com", "superuser.com",
+    "docs.python.org", "docs.rs", "pkg.go.dev",
+    "jsonplaceholder.typicode.com", "httpstat.us",
+    "news.ycombinator.com", "lobste.rs",
+    "raw.githubusercontent.com",
+}
+# Domains known to need stealth (anti-bot blocks even dynamic/Playwright)
 _KNOWN_STEALTHY_DOMAINS = {
     "cloudflare.com", "nowsecure.nl", "nopecha.com",
     "bot.sannysoft.com", "abrahamjuliot.github.io",
     "datadome.co", "kasada.io", "arkoselabs.com",
     "perimeterx.com", "shape.com", "f5.com",
+    "twitter.com", "x.com",
 }
 # Domains known to need dynamic (JS rendering) but not full stealth
 _KNOWN_DYNAMIC_DOMAINS = {
-    "twitter.com", "x.com", "reddit.com", "facebook.com",
-    "instagram.com", "linkedin.com", "tiktok.com",
+    "reddit.com", "facebook.com", "instagram.com",
+    "linkedin.com", "tiktok.com",
+    "youtube.com", "youtu.be",
+    "uniswap.org", "app.uniswap.org",
+    "opensea.io", "dune.com",
+    "notion.so", "notion.site",
+    "figma.com", "airtable.com",
+    "vercel.app", "netlify.app",
+    "spotify.com", "open.spotify.com",
 }
 
 
@@ -78,6 +96,8 @@ async def _ensure_db() -> Path:
 def guess_protection_level(url: str) -> str:
     """Guess protection level from known domain lists."""
     domain = _extract_domain(url)
+    if domain in _KNOWN_SAFE_DOMAINS:
+        return "none"
     if domain in _KNOWN_STEALTHY_DOMAINS:
         return "high"
     if domain in _KNOWN_DYNAMIC_DOMAINS:
