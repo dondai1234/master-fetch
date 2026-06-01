@@ -24,6 +24,14 @@ from scrapling.parser import Selector
 logger = logging.getLogger("master_fetch.trafilatura_extractor")
 
 
+def _is_probably_binary(data: bytes) -> bool:
+    """Check if data looks like binary content (PDF, image, etc.) rather than text."""
+    if not data:
+        return False
+    printable = sum(1 for b in data if 32 <= b <= 126 or b in (9, 10, 13))
+    return (printable / len(data)) < 0.1
+
+
 def _get_html_from_page(page) -> str | None:
     """Extract raw HTML string from a Scrapling Response object."""
     if hasattr(page, 'body') and page.body:
@@ -214,6 +222,13 @@ def extract_with_trafilatura(
     Falls back to Scrapling's own extraction only if ALL Trafilatura methods fail.
     """
     try:
+        # Check for binary content before decoding
+        raw = getattr(page, 'body', None) or getattr(page, 'content', None)
+        if raw:
+            raw_bytes = raw if isinstance(raw, bytes) else str(raw).encode('latin-1', errors='replace')
+            if b'\x00' in raw_bytes[:1000] or _is_probably_binary(raw_bytes[:4096]):
+                return [f"[Binary content detected. Cannot extract text from this URL. Content type may be PDF, image, or other non-text format. Size: {len(raw_bytes):,} bytes]"]
+
         html = _get_html_from_page(page)
         if html is None:
             logger.warning("Cannot extract HTML from page object, falling back to Scrapling extractor")

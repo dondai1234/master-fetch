@@ -1011,7 +1011,15 @@ class MasterFetchServer:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result)
 
-        # Failed with HTTP — try dynamic
+        # Failed with HTTP — check if it's a bot challenge or just an error page
+        if not _is_cloudflare_from_response(result):
+            # Not a bot challenge. Don't waste time escalating. Return the error.
+            await record_result(url, "none", False, elapsed)
+            if cache_ttl > 0:
+                await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+            return _apply_chunking(result)
+
+        # Bot challenge detected — try dynamic
         dsid = await self._ensure_auto_session("dynamic")
         result = await self.fetch(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,

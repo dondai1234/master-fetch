@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.4] - 2026-06-02
+
+### Fixed
+- PDF and binary content handling: returns clean error instead of crashing with decode error
+- HTTP error pages no longer trigger unnecessary browser escalation. If the response contains no bot challenge text, the error is returned directly.
+
 ## [1.0.3] - 2026-06-02
 
 ### Fixed
