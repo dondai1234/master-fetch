@@ -9,7 +9,7 @@ Forks Scrapling's built-in MCP server and adds:
 - extract_article and extract_structured modes
 """
 from uuid import uuid4
-from asyncio import gather
+from asyncio import gather, sleep as asyncio_sleep
 from datetime import datetime, timezone
 from time import time as now
 from dataclasses import dataclass, field
@@ -36,6 +36,7 @@ from scrapling.core._types import (
 from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
 from master_fetch.domain_intel import get_domain_level, record_result, guess_protection_level
 from master_fetch.trafilatura_extractor import extract_with_trafilatura
+from master_fetch.robots import is_allowed, clear_robots_cache
 
 # Extended extraction types (beyond Scrapling's markdown/html/text)
 ExtendedExtractionType = Literal["markdown", "html", "text", "article", "structured"]
@@ -52,6 +53,10 @@ class ResponseModel(BaseModel):
     url: str = Field(description="The URL given by the user that resulted in this response.")
     cached: bool = Field(default=False, description="Whether this response was served from cache.")
     fetcher_used: str = Field(default="", description="Which fetcher was used: 'http', 'dynamic', or 'stealthy'.")
+    extracted_type: str = Field(default="markdown", description="The extraction type used.")
+    session_id: str = Field(default="", description="Browser session ID used for this request.")
+    duration_ms: float = Field(default=0, description="Request duration in milliseconds.")
+    error: str = Field(default="", description="Error message if the request failed.")
 
 
 class ArticleModel(BaseModel):
@@ -829,6 +834,30 @@ class MasterFetchServer:
 
     # ─── SMART FETCH (The One Tool To Rule Them All) ──────────────────
 
+    async def _http_with_retry(self, url: str, **kwargs) -> ResponseModel:
+        """HTTP fetch with retry logic for transient network failures."""
+        max_retries = 3
+        base_delay = 1.0
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await self.get(url, **kwargs)
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"HTTP fetch attempt {attempt + 1} failed for {url}: {e}. Retrying in {delay:.0f}s...")
+                    await asyncio_sleep(delay)
+                else:
+                    logger.error(f"HTTP fetch failed after {max_retries + 1} attempts for {url}: {e}")
+        return ResponseModel(
+            url=url,
+            content=[f"[Network error] Failed to fetch {url} after {max_retries + 1} attempts: {last_error}"],
+            status=0, fetcher_used="none", cached=False,
+            extracted_type=kwargs.get("extraction_type", "markdown"),
+            session_id="", duration_ms=0, error=str(last_error)
+        )
+
     async def smart_fetch(
         self,
         url: str,
@@ -838,6 +867,7 @@ class MasterFetchServer:
         use_trafilatura: bool = True,
         cache_ttl: int = DEFAULT_TTL,
         force_fetcher: Optional[Literal["http", "dynamic", "stealthy"]] = None,
+        respect_robots: bool = False,
         headless: bool = True,
         real_chrome: bool = False,
         wait: int | float = 0,
@@ -884,7 +914,18 @@ class MasterFetchServer:
         :param useragent: Custom user agent.
         :param cookies: Cookies to set.
         """
-        # 1. Check cache
+        # 1. Check robots.txt compliance
+        if respect_robots and not is_allowed(url):
+            disallowed = ResponseModel(
+                url=url,
+                content=[f"[Blocked by robots.txt] The URL '{url}' is disallowed by the site's robots.txt policy. Set respect_robots=False to bypass."],
+                status=403, fetcher_used="none", cached=False,
+                extracted_type=extraction_type, session_id="",
+                duration_ms=0, error="robots_txt_disallowed"
+            )
+            return _apply_chunking(disallowed)
+
+        # 2. Check cache
         if cache_ttl > 0:
             cached = await get_cached(url, extraction_type, css_selector, ttl=cache_ttl)
             if cached is not None:
@@ -995,13 +1036,14 @@ class MasterFetchServer:
             return _apply_chunking(result)
 
         # Phase C: Unknown domain — try HTTP first (fastest), then escalate
+        errors = []  # Collect errors for better diagnostics
         _http_cookies = {c["name"]: c["value"] for c in cookies} if cookies else None
-        result = await self.get(url, extraction_type=extraction_type,
+
+        result = await self._http_with_retry(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
             use_trafilatura=use_trafilatura,
             proxy=proxy if isinstance(proxy, str) else None,
-            headers=extra_headers, cookies=_http_cookies, timeout=30,
-            stealthy_headers=True)
+            headers=extra_headers, cookies=_http_cookies, stealthy_headers=True)
         elapsed = (now() - start_time) * 1000
 
         # Success with HTTP — done, fastest path
@@ -1020,6 +1062,7 @@ class MasterFetchServer:
             return _apply_chunking(result)
 
         # Bot challenge detected — try dynamic
+        errors.append(f"HTTP tier blocked (status {result.status})")
         dsid = await self._ensure_auto_session("dynamic")
         result = await self.fetch(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
@@ -1038,6 +1081,7 @@ class MasterFetchServer:
             return _apply_chunking(result)
 
         # Failed with dynamic — escalate to stealthy
+        errors.append(f"Dynamic tier failed (status {result.status})")
         ssid = await self._ensure_auto_session("stealthy")
         result = await self.stealthy_fetch(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
@@ -1050,7 +1094,22 @@ class MasterFetchServer:
             useragent=useragent, cookies=cookies,
             session_id=ssid)
         elapsed = (now() - start_time) * 1000
-        await record_result(url, "high", result.status < 400, elapsed)
+
+        if result.status < 400 and not _is_cloudflare_from_response(result):
+            await record_result(url, "high", True, elapsed)
+            if cache_ttl > 0:
+                await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+            return _apply_chunking(result)
+
+        # All tiers failed — return with diagnostic info
+        errors.append(f"Stealthy tier also failed (status {result.status})")
+        result.content = [
+            f"[All fetch tiers failed for {url}]\n"
+            f"Tried: HTTP (curl_cffi with Chrome impersonation) → Dynamic (Playwright browser) → Stealthy (Cloudflare solver)\n"
+            f"Failures: {'; '.join(errors)}\n"
+            f"Final status: {result.status}"
+        ]
+        await record_result(url, "high", False, elapsed)
         if cache_ttl > 0:
             await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
         return _apply_chunking(result)
@@ -1067,6 +1126,7 @@ class MasterFetchServer:
             return CacheInfoModel(message=f"Cleared all {count} cache entries.", purged=count)
         else:
             count = await clear_cache()
+            clear_robots_cache()
             return CacheInfoModel(message=f"Cleared {count} expired cache entries.", purged=count)
 
     # ─── Serve ────────────────────────────────────────────────────────

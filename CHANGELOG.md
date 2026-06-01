@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0] - 2026-06-02
+
+### Added
+- Robots.txt compliance: respects site scraping policies by default. `respect_robots=False` to bypass.
+- HTTP retry logic: exponential backoff (1s/2s/4s) on transient network failures
+- Comprehensive test suite: 22 unit tests covering models, chunking, CF detection, domain extraction, binary detection, robots.txt
+- GitHub Actions CI: cross-platform testing on Ubuntu and Windows (Python 3.11, 3.12)
+- Proper PyPI metadata: classifiers, dev dependencies, pytest config
+
+### Changed
+- ResponseModel now includes `extracted_type`, `session_id`, `duration_ms`, `error` fields
+- Error messages: all-tiers-failed returns diagnostic trace showing what was tried
+
+### Fixed
+- Binary content (PDF) no longer crashes the extractor, returns clean error
+- HTTP error pages (non-challenge) no longer trigger wasteful browser escalation
+
 ## [1.0.4] - 2026-06-02
 
 ### Fixed

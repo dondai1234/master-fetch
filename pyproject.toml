@@ -1,6 +1,6 @@
 [project]
 name = "master-fetch"
-version = "1.0.0"
+version = "1.1.0"
 description = "One MCP server to rule them all — web fetching with anti-bot bypass, smart routing, Trafilatura extraction, and content caching"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
 requires-python = ">=3.11"
@@ -10,17 +10,28 @@ dependencies = [
     "aiosqlite>=0.20.0",
 ]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Intended Audience :: Developers",
+    "Environment :: Console",
+    "Framework :: AsyncIO",
 ]
 keywords = ["mcp", "web-scraping", "cloudflare-bypass", "anti-bot", "content-extraction", "ai-agent", "mcp-server"]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.urls]
 Repository = "https://github.com/dondai1234/master-fetch"
+Issues = "https://github.com/dondai1234/master-fetch/issues"
+Changelog = "https://github.com/dondai1234/master-fetch/blob/master/CHANGELOG.md"
 
 [project.scripts]
 master-fetch = "master_fetch.server:main"
@@ -31,3 +42,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/master_fetch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -54,12 +54,21 @@ Content goes through Trafilatura for clean markdown extraction. Results are cach
 - Chromium (installed via `playwright install chromium`)
 - No API keys, no accounts, no Docker.
 
+## Features
+
+- **Smart auto-escalation** — HTTP → Dynamic → Stealthy based on domain intelligence
+- **Persistent browser sessions** — reuse sessions across requests (2x faster repeat fetches)
+- **Content caching** — SQLite backend, 1hr TTL, instant cache hits
+- **Content chunking** — 40KB limit per response with continuation notices
+- **Robots.txt compliance** — opt-in via `respect_robots=True`. Off by default (fetch everything).
+- **Retry logic** — exponential backoff on transient network failures
+- **Binary detection** — PDFs and other non-text content return clean errors instead of crashing
+
 ## Limits
 
 - DataDome + Cloudflare dual protection blocks all fetchers
 - Reddit returns first-load content only (no infinite scroll)
-- Dynamic/Stealthy tiers are slow due to browser startup
-- Domain extraction uses simple heuristic (doesn't handle .co.uk/.com.au)
+- Dynamic/Stealthy tiers are slower due to browser startup (~10-40s)
 
 ## License
 
