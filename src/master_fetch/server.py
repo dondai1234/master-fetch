@@ -124,24 +124,43 @@ def _annotate_quality(result: ResponseModel) -> ResponseModel:
     return result
 
 
-def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS) -> ResponseModel:
-    """Truncate content if it exceeds max_chars. Adds continuation info."""
-    total = sum(len(c) for c in result.content)
-    if total <= max_chars:
-        return result
-    truncated = []
-    budget = max_chars
-    for c in result.content:
-        if budget <= 0:
-            break
-        truncated.append(c[:budget])
-        budget -= len(truncated[-1])
-    if truncated:
-        remaining = total - max_chars
-        truncated[-1] += f"\n\n[Content truncated: {remaining:,} more chars available. Re-fetch with offset parameter to continue.]"
+def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, offset: int = 0) -> ResponseModel:
+    """Truncate content if it exceeds max_chars, starting from offset.
+
+    When content is truncated, the response includes a continuation notice telling
+    the caller exactly how to get the next chunk (offset value to use).
+    Preserves all ResponseModel fields.
+    """
+    # Flatten content into one string, apply offset
+    full_text = "\n".join(result.content)
+    total_len = len(full_text)
+
+    if offset >= total_len:
+        return ResponseModel(
+            status=result.status, content=["[Offset exceeds content length. No more content available.]"],
+            url=result.url, cached=result.cached, fetcher_used=result.fetcher_used,
+            extracted_type=result.extracted_type, session_id=result.session_id,
+            duration_ms=result.duration_ms, error=result.error,
+        )
+
+    chunk = full_text[offset:offset + max_chars]
+    chunk_len = len(chunk)
+    remaining = total_len - offset - chunk_len
+
+    if remaining > 0:
+        next_offset = offset + chunk_len
+        chunk += (
+            f"\n\n[Content truncated: received {chunk_len:,} of {total_len:,} chars "
+            f"(offset {offset:,}-{next_offset:,}). "
+            f"{remaining:,} chars remaining. "
+            f"Call smart_fetch again with offset={next_offset} to get the next chunk.]"
+        )
+
     return ResponseModel(
-        status=result.status, content=truncated, url=result.url,
+        status=result.status, content=[chunk], url=result.url,
         cached=result.cached, fetcher_used=result.fetcher_used,
+        extracted_type=result.extracted_type, session_id=result.session_id,
+        duration_ms=result.duration_ms, error=result.error,
     )
 
 
@@ -947,6 +966,7 @@ class MasterFetchServer:
         extra_headers: Optional[Dict[str, str]] = None,
         useragent: Optional[str] = None,
         cookies: Sequence[SetCookieParam] | None = None,
+        offset: int = 0,
     ) -> ResponseModel:
         """THE ONE TOOL TO RULE THEM ALL. Automatically picks the best fetcher for the URL.
 
@@ -957,6 +977,8 @@ class MasterFetchServer:
         4. Otherwise, try HTTP first (fastest). If blocked/403/503, escalate to dynamic.
         5. If dynamic also fails, escalate to stealthy (full anti-bot bypass).
         6. Cache successful results and record domain intelligence for future routing.
+        7. If content exceeds 40KB, truncate and include a continuation notice with the
+           offset value to use for the next call.
 
         This is the tool you want 95% of the time. Use the specific fetchers only when you
         need fine-grained control over browser settings.
@@ -980,6 +1002,7 @@ class MasterFetchServer:
         :param extra_headers: Extra request headers.
         :param useragent: Custom user agent.
         :param cookies: Cookies to set.
+        :param offset: Character offset for content continuation. When content is truncated (exceeds 40KB), the response includes the offset value to use for the next call. Default 0 = start from beginning.
         """
         # 1. Check robots.txt compliance
         if respect_robots and not is_allowed(url):
@@ -999,7 +1022,8 @@ class MasterFetchServer:
                 return _apply_chunking(ResponseModel(
                     url=cached["url"], status=cached["status"], content=cached["content"],
                     cached=True, fetcher_used="cache", duration_ms=0,
-                ))
+                    extracted_type=extraction_type,
+                ), offset=offset)
 
         # 2. Force specific fetcher
         if force_fetcher == "http":
@@ -1013,7 +1037,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         if force_fetcher == "dynamic":
             dsid = await self._ensure_auto_session("dynamic")
@@ -1028,7 +1052,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         if force_fetcher == "stealthy":
             ssid = await self._ensure_auto_session("stealthy")
@@ -1046,7 +1070,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         # 3. Auto-escalation logic
         domain_level = await get_domain_level(url)
@@ -1071,7 +1095,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         # Phase B: If domain needs dynamic, try dynamic then escalate
         if domain_level == "low":
@@ -1095,7 +1119,7 @@ class MasterFetchServer:
                     result = _annotate_quality(result)
                     if cache_ttl > 0:
                         await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                    return _apply_chunking(result)
+                    return _apply_chunking(result, offset=offset)
             # Escalate to stealthy
             ssid = await self._ensure_auto_session("stealthy")
             result = await self.stealthy_fetch(url, extraction_type=extraction_type,
@@ -1114,7 +1138,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         # Phase C: Unknown domain: try HTTP first (fastest), then escalate
         errors = []  # Collect errors for better diagnostics
@@ -1139,7 +1163,7 @@ class MasterFetchServer:
                 result = _annotate_quality(result)
                 if cache_ttl > 0:
                     await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                return _apply_chunking(result)
+                return _apply_chunking(result, offset=offset)
 
         # Failed with HTTP: check if it's a bot challenge or just an error page
         if not _is_cloudflare_from_response(result):
@@ -1149,7 +1173,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         # Bot challenge detected: try dynamic
         errors.append(f"HTTP tier blocked (status {result.status})")
@@ -1174,7 +1198,7 @@ class MasterFetchServer:
                 result = _annotate_quality(result)
                 if cache_ttl > 0:
                     await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                return _apply_chunking(result)
+                return _apply_chunking(result, offset=offset)
 
         # Failed with dynamic: escalate to stealthy
         errors.append(f"Dynamic tier failed (status {result.status})")
@@ -1197,7 +1221,7 @@ class MasterFetchServer:
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-            return _apply_chunking(result)
+            return _apply_chunking(result, offset=offset)
 
         # All tiers failed: return with diagnostic info
         errors.append(f"Stealthy tier also failed (status {result.status})")
@@ -1212,7 +1236,7 @@ class MasterFetchServer:
         result.error = f"all_tiers_failed: {('; '.join(errors))}"
         if cache_ttl > 0:
             await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-        return _apply_chunking(result)
+        return _apply_chunking(result, offset=offset)
 
     # ─── Cache Management Tools ───────────────────────────────────────
 

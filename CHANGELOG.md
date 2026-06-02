@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.3.1] - 2026-06-02
+
+### Fixed
+- **Content continuation actually works now**: The 40KB truncation message previously said "re-fetch with offset parameter" but no offset parameter existed. Now `smart_fetch` has an `offset` parameter (default 0). When content is truncated, the response tells the agent exactly what offset to use: "Call smart_fetch again with offset=40000 to get the next chunk." The cached full content is used, so continuation calls are instant.
+- **Chunking preserves all ResponseModel fields**: Previously dropped extracted_type, session_id, duration_ms, error during truncation. Now all fields survive.
+- **Offset beyond content returns clean end message**: "No more content available" instead of empty or error.
+
+### Changed
+- **Continuation message is agent-friendly**: Shows exact char range ("received 40,000 of 60,000 chars, offset 0-40,000, 20,000 chars remaining") and the exact next call to make.
+
 ## [2.3.0] - 2026-06-01
 
 ### Fixed

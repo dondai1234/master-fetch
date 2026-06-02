@@ -31,24 +31,77 @@ class TestChunking:
         r = ResponseModel(status=200, content=["hello"], url="https://x.com")
         result = _apply_chunking(r)
         assert result.content == ["hello"]
+        assert result.error == ""
+        assert result.fetcher_used == ""
 
     def test_over_limit_truncated(self):
         content = "x" * (MAX_CONTENT_CHARS + 100)
-        r = ResponseModel(status=200, content=[content], url="https://x.com")
+        r = ResponseModel(status=200, content=[content], url="https://x.com", fetcher_used="http")
         result = _apply_chunking(r)
-        total = sum(len(c) for c in result.content)
-        assert total <= MAX_CONTENT_CHARS + 200  # account for truncation message
+        assert len(result.content[0]) <= MAX_CONTENT_CHARS + 300  # account for continuation message
         assert "Content truncated" in result.content[0]
+        assert f"offset=40000" in result.content[0]  # tells agent exactly what offset to use next
 
-    def test_multiple_chunks_truncation(self):
-        chunk1 = "a" * 20000
-        chunk2 = "b" * 30000
-        r = ResponseModel(status=200, content=[chunk1, chunk2], url="https://x.com")
+    def test_offset_continuation(self):
+        """Calling with offset returns the next chunk of content."""
+        content = "A" * 30000 + "B" * 30000  # 60KB total
+        r = ResponseModel(status=200, content=[content], url="https://x.com", fetcher_used="http")
+
+        # First call: offset=0, gets first 40KB
+        chunk1 = _apply_chunking(r, offset=0)
+        assert chunk1.content[0].startswith("A" * 30000 + "B" * 10000)
+        assert "offset=40000" in chunk1.content[0]
+        assert "20,000 chars remaining" in chunk1.content[0]
+
+        # Second call: offset=40000, gets remaining 20KB
+        chunk2 = _apply_chunking(r, offset=40000)
+        assert chunk2.content[0].startswith("B" * 20000)
+        assert "Content truncated" not in chunk2.content[0]  # no more remaining
+
+    def test_offset_beyond_content(self):
+        """Offset beyond content length returns end message."""
+        content = "hello"
+        r = ResponseModel(status=200, content=[content], url="https://x.com")
+        result = _apply_chunking(r, offset=9999)
+        assert "No more content" in result.content[0]
+
+    def test_offset_exact_end(self):
+        """Offset exactly at content length returns end message."""
+        content = "A" * 50000
+        r = ResponseModel(status=200, content=[content], url="https://x.com")
+        chunk1 = _apply_chunking(r, offset=0)
+        assert "10,000 chars remaining" in chunk1.content[0]
+        # offset=40000 should get last 10KB
+        chunk2 = _apply_chunking(r, offset=40000)
+        assert chunk2.content[0].startswith("A" * 10000)
+        assert "Content truncated" not in chunk2.content[0]
+        # offset=50000 should say no more
+        chunk3 = _apply_chunking(r, offset=50000)
+        assert "No more content" in chunk3.content[0]
+
+    def test_multiple_content_strings_flattened(self):
+        """Multiple content strings are flattened before chunking."""
+        part1 = "A" * 25000
+        part2 = "B" * 25000
+        r = ResponseModel(status=200, content=[part1, part2], url="https://x.com")
         result = _apply_chunking(r)
-        total = sum(len(c) for c in result.content)
-        assert total <= MAX_CONTENT_CHARS + 200
-        # First chunk should be intact, second truncated
-        assert result.content[0] == chunk1
+        # First 40KB = 25K A's + newline + 14,999 B's (50,001 total with newline)
+        assert "10,001 chars remaining" in result.content[0]
+
+    def test_preserves_all_fields(self):
+        """Chunking preserves all ResponseModel fields, not just status/content/url."""
+        r = ResponseModel(
+            status=200, content=["x" * 50000], url="https://x.com",
+            cached=True, fetcher_used="http", extracted_type="markdown",
+            session_id="abc123", duration_ms=1500.0, error=""
+        )
+        result = _apply_chunking(r)
+        assert result.cached is True
+        assert result.fetcher_used == "http"
+        assert result.extracted_type == "markdown"
+        assert result.session_id == "abc123"
+        assert result.duration_ms == 1500.0
+        assert result.error == ""
 
     def test_at_limit_no_truncation(self):
         content = "y" * MAX_CONTENT_CHARS
