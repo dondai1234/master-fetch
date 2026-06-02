@@ -1,6 +1,6 @@
 [project]
 name = "hound-mcp"
-version = "2.4.0"
+version = "2.5.0"
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever."
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
 requires-python = ">=3.11"

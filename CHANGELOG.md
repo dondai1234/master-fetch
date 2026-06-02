@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.5.0] - 2026-06-02
+
+### Security
+- **Removed hardcoded TinyFish API key from source code.** The key was visible in the public GitHub repo. Search now requires `TINYFISH_API_KEY` environment variable. Get a free key at tinyfish.ai.
+
+### Changed
+- **README rewritten again**: Fixed agent harness examples (OpenClaw, Hermes Agent, OpenCode instead of Claude/Cursor/Codex). TinyFish API key now required for search (no more "built-in key" claims). Firecrawl correctly listed as self-hostable. First browser launch latency documented. Honest competitor comparisons.
+- **Search tool returns clear error when no API key is set** instead of silently using a hardcoded key.
+
 ## [2.4.0] - 2026-06-02
 
 ### Changed

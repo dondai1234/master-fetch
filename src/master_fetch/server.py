@@ -1262,14 +1262,14 @@ class MasterFetchServer:
         cache_ttl: int = 300,
         api_key: str = "",
     ) -> SearchResponseModel:
-        """Search the web via TinyFish API (free, 30/min) and return structured results.
+        """Search the web via TinyFish API and return structured results. Requires TINYFISH_API_KEY env var.
 
-        No API key needed. Returns title, URL, and snippet for each result.
+        No API key needed to sign up. Returns title, URL, and snippet for each result.
 
         :param query: The search query.
         :param max_results: Maximum number of results (1-50, default 10).
         :param cache_ttl: Cache TTL in seconds (default 300 = 5 minutes).
-        :param api_key: Optional TinyFish API key (uses built-in key if empty).
+        :param api_key: TinyFish API key. If empty, uses TINYFISH_API_KEY env var. Get a free key at tinyfish.ai.
         """
         try:
             from master_fetch.search import smart_search as _smart_search

@@ -17,7 +17,6 @@ from master_fetch.cache import get_cached, set_cached
 logger = logging.getLogger("master-fetch.search")
 
 TINYFISH_API = "https://api.search.tinyfish.ai"
-TINYFISH_KEY = "sk-tinyfish-K7iWRq1NY0mEFje_tM7w1nNDoonjZh2W"
 TINYFISH_TIMEOUT = 12
 SEARCH_CACHE_TTL = 300  # 5 minutes
 
@@ -51,7 +50,9 @@ def _get_requests():
 async def _tinyfish_search(query: str, max_results: int = 10, api_key: str = "") -> list[SearchResult]:
     """Query TinyFish search API. Returns list of SearchResult or raises on failure."""
     requests = _get_requests()
-    key = api_key or os.environ.get("TINYFISH_API_KEY", "") or TINYFISH_KEY
+    key = api_key or os.environ.get("TINYFISH_API_KEY", "")
+    if not key:
+        raise Exception("TinyFish API key required for search. Get a free key at tinyfish.ai and set TINYFISH_API_KEY env var in your MCP config.")
     url = f"{TINYFISH_API}?query={quote(query)}&location=US&language=en"
     try:
         resp = await asyncio.to_thread(
