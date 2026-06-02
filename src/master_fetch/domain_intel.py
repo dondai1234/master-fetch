@@ -106,10 +106,23 @@ def guess_protection_level(url: str) -> str:
 
 
 async def get_domain_level(url: str) -> str:
-    """Get stored protection level for a URL's domain, or guess."""
-    domain = _extract_domain(url)
-    db_path = await _ensure_db()
+    """Get stored protection level for a URL's domain, or guess.
 
+    Known domains (safe, stealthy, dynamic) always take priority over
+    learned DB records. Only unknown domains use the learned behavior.
+    """
+    domain = _extract_domain(url)
+
+    # Known domains always win — no amount of learning overrides them
+    if domain in _KNOWN_SAFE_DOMAINS:
+        return "none"
+    if domain in _KNOWN_STEALTHY_DOMAINS:
+        return "high"
+    if domain in _KNOWN_DYNAMIC_DOMAINS:
+        return "low"
+
+    # Unknown domain: check if we've learned anything
+    db_path = await _ensure_db()
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
@@ -119,8 +132,7 @@ async def get_domain_level(url: str) -> str:
         if row:
             return row["protection_level"]
 
-    # No record:
-    return guess_protection_level(url)
+    return "none"
 
 
 async def record_result(url: str, level: str, success: bool, response_ms: float = 0) -> None:

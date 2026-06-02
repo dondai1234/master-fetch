@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.6.0] - 2026-06-02
+
+### Fixed
+- Auto-escalation was broken. Phase C bailed out after HTTP failure unless the response looked like a Cloudflare challenge. Sites returning 403 with "JS required" (IMDb, ScrapingCourse) never got dynamic or stealthy. Now: every tier that fails escalates to the next. Simple try-next-tier, no fancy gating.
+
 ## [2.4.0] - 2026-06-02
 
 ### Changed

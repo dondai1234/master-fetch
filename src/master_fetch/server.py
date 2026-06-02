@@ -1097,36 +1097,35 @@ class MasterFetchServer:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result, offset=offset)
 
-        # Phase B: If domain needs dynamic, try dynamic then escalate
+        # Phase B: If domain needs dynamic, try dynamic, escalate to stealthy if blocked
         if domain_level == "low":
+            remaining = max(timeout - int((now() - start_time) * 1000), 5000)
             dsid = await self._ensure_auto_session("dynamic")
             result = await self.fetch(url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
                 use_trafilatura=use_trafilatura, headless=headless,
                 real_chrome=real_chrome, wait=wait, proxy=proxy,
-                timeout=timeout, network_idle=network_idle,
+                timeout=remaining, network_idle=network_idle,
                 disable_resources=True,
                 extra_headers=extra_headers, useragent=useragent, cookies=cookies,
                 session_id=dsid)
-            if result.status < 400 and not _is_cloudflare_from_response(result):
-                if _is_js_shell(result):
-                    # Dynamic returned JS-disabled placeholder: escalate to stealthy
-                    logger.info(f"Dynamic returned JS shell for {url}, escalating to stealthy")
-                else:
-                    elapsed = (now() - start_time) * 1000
-                    result.duration_ms = elapsed
-                    await record_result(url, "low", True, elapsed)
-                    result = _annotate_quality(result)
-                    if cache_ttl > 0:
-                        await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                    return _apply_chunking(result, offset=offset)
-            # Escalate to stealthy
+            elapsed = (now() - start_time) * 1000
+            result.duration_ms = elapsed
+            if result.status < 400 and not _is_js_shell(result):
+                await record_result(url, "low", True, elapsed)
+                result = _annotate_quality(result)
+                if cache_ttl > 0:
+                    await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+                return _apply_chunking(result, offset=offset)
+
+            # Dynamic failed or returned JS shell / challenge: escalate to stealthy
+            remaining = max(timeout - int((now() - start_time) * 1000), 5000)
             ssid = await self._ensure_auto_session("stealthy")
             result = await self.stealthy_fetch(url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
                 use_trafilatura=use_trafilatura, headless=headless,
                 real_chrome=real_chrome, wait=wait, proxy=proxy,
-                timeout=timeout, network_idle=network_idle,
+                timeout=remaining, network_idle=network_idle,
                 disable_resources=True,
                 solve_cloudflare=solve_cloudflare, block_webrtc=block_webrtc,
                 hide_canvas=hide_canvas, extra_headers=extra_headers,
@@ -1140,10 +1139,11 @@ class MasterFetchServer:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result, offset=offset)
 
-        # Phase C: Unknown domain: try HTTP first (fastest), then escalate
-        errors = []  # Collect errors for better diagnostics
+        # Phase C: Unknown domain. Try HTTP, escalate on any failure. No fancy gating.
+        errors = []
         _http_cookies = {c["name"]: c["value"] for c in cookies} if cookies else None
 
+        # Tier 1: HTTP
         result = await self._http_with_retry(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
             use_trafilatura=use_trafilatura,
@@ -1152,22 +1152,21 @@ class MasterFetchServer:
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
 
-        # Success with HTTP: check if content is a JS-only shell
-        if result.status < 400:
-            if _is_js_shell(result):
-                # JS-only placeholder: escalate to dynamic fetcher
-                logger.info(f"HTTP returned JS shell for {url}, escalating to dynamic")
-            else:
-                # Real content: done, fastest path
-                await record_result(url, "none", True, elapsed)
-                result = _annotate_quality(result)
-                if cache_ttl > 0:
-                    await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                return _apply_chunking(result, offset=offset)
+        # Accept if status is OK and content is real
+        if result.status < 400 and not _is_js_shell(result) and not _is_cloudflare_from_response(result):
+            await record_result(url, "none", True, elapsed)
+            result = _annotate_quality(result)
+            if cache_ttl > 0:
+                await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+            return _apply_chunking(result, offset=offset)
 
-        # Failed with HTTP: check if it's a bot challenge or just an error page
-        if not _is_cloudflare_from_response(result):
-            # Not a bot challenge. Don't waste time escalating. Return the error.
+        # Decide whether to escalate. Two reasons:
+        # 1. Status 200 with JS shell → page needs a real browser
+        # 2. Status 403 or 503 → explicit bot block
+        # Don't check _is_cloudflare_from_response on 200 — legitimate articles
+        # about web security contain "cloudflare" in the body.
+        should_escalate = (result.status < 400 and _is_js_shell(result)) or result.status in (403, 503)
+        if not should_escalate:
             await record_result(url, "none", False, elapsed)
             result.duration_ms = elapsed
             result = _annotate_quality(result)
@@ -1175,39 +1174,37 @@ class MasterFetchServer:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result, offset=offset)
 
-        # Bot challenge detected: try dynamic
-        errors.append(f"HTTP tier blocked (status {result.status})")
+        # Tier 2: Dynamic
+        errors.append(f"HTTP failed (status {result.status})")
+        remaining = max(timeout - int((now() - start_time) * 1000), 5000)
         dsid = await self._ensure_auto_session("dynamic")
         result = await self.fetch(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
             use_trafilatura=use_trafilatura, headless=headless,
             real_chrome=real_chrome, wait=wait, proxy=proxy,
-            timeout=timeout, network_idle=network_idle,
+            timeout=remaining, network_idle=network_idle,
             disable_resources=True,
             extra_headers=extra_headers, useragent=useragent, cookies=cookies,
             session_id=dsid)
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
 
-        if result.status < 400 and not _is_cloudflare_from_response(result):
-            if _is_js_shell(result):
-                # Dynamic returned JS-disabled placeholder: escalate to stealthy
-                logger.info(f"Dynamic returned JS shell for {url}, escalating to stealthy")
-            else:
-                await record_result(url, "low", True, elapsed)
-                result = _annotate_quality(result)
-                if cache_ttl > 0:
-                    await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
-                return _apply_chunking(result, offset=offset)
+        if result.status < 400 and not _is_js_shell(result):
+            await record_result(url, "low", True, elapsed)
+            result = _annotate_quality(result)
+            if cache_ttl > 0:
+                await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
+            return _apply_chunking(result, offset=offset)
 
-        # Failed with dynamic: escalate to stealthy
-        errors.append(f"Dynamic tier failed (status {result.status})")
+        # Tier 3: Stealthy
+        errors.append(f"Dynamic failed (status {result.status})")
+        remaining = max(timeout - int((now() - start_time) * 1000), 5000)
         ssid = await self._ensure_auto_session("stealthy")
         result = await self.stealthy_fetch(url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
             use_trafilatura=use_trafilatura, headless=headless,
             real_chrome=real_chrome, wait=wait, proxy=proxy,
-            timeout=timeout, network_idle=network_idle,
+            timeout=remaining, network_idle=network_idle,
             disable_resources=True,
             solve_cloudflare=solve_cloudflare, block_webrtc=block_webrtc,
             hide_canvas=hide_canvas, extra_headers=extra_headers,
@@ -1216,18 +1213,21 @@ class MasterFetchServer:
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
 
-        if result.status < 400 and not _is_cloudflare_from_response(result):
+        if result.status < 400 and not _is_js_shell(result):
+            # Stealthy is the last tier. If it returns 200 with real content, accept it.
+            # Don't check cloudflare here — stealthy already solved the challenge,
+            # residual "cloudflare" strings in the page are not a block.
             await record_result(url, "high", True, elapsed)
             result = _annotate_quality(result)
             if cache_ttl > 0:
                 await set_cached(url, extraction_type, result.content, result.status, css_selector, cache_ttl)
             return _apply_chunking(result, offset=offset)
 
-        # All tiers failed: return with diagnostic info
-        errors.append(f"Stealthy tier also failed (status {result.status})")
+        # All three tiers failed
+        errors.append(f"Stealthy failed (status {result.status})")
         result.content = [
             f"[All fetch tiers failed for {url}]\n"
-            f"Tried: HTTP (curl_cffi with Chrome impersonation) → Dynamic (Playwright browser) → Stealthy (Cloudflare solver)\n"
+            f"Tried: HTTP (curl_cffi) → Dynamic (Playwright) → Stealthy (Cloudflare solver)\n"
             f"Failures: {'; '.join(errors)}\n"
             f"Final status: {result.status}"
         ]
