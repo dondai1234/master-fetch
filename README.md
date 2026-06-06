@@ -1,58 +1,53 @@
 # 🐕 Hound
 
-**Give your AI agent the web. 2 steps. $0.**
+**Give your AI agent the web. $0. One command.**
 
 ```
-pip install hound-mcp[all]
-playwright install chromium
+hound install
 ```
 
 Fetch any page, search the web, bypass bot protection. No accounts, no Docker, no credit card.
 
-[Install](#install) · [Tools](#tools) · [How it works](#how-it-works) · [Comparison](#comparison) · [Pi Agent](#for-pi-agent-users)
+[Commands](#commands) · [Tools](#tools) · [How it works](#how-it-works) · [Comparison](#comparison) · [Pi Agent](#for-pi-agent-users)
 
 ---
 
-## Install
+## Commands
 
-*Just want it to work? Copy the AI prompt below, give it to your agent, done.*
+```bash
+hound install    # install everything: hound + Chromium
+hound -v         # version + update status
+hound -u         # update to latest
+```
 
-### Tell your agent to do it
+---
 
-Paste this into your agent (OpenClaw, Hermes Agent, Pi, OpenCode, etc.):
+## Tell your agent to do it
+
+Paste this into your agent (Claude Desktop, Pi, OpenCode, etc.):
 
 **Fetch + search:**
 ```
-Install the Hound MCP server on this machine. Steps:
+Install the Hound MCP server on this machine:
 
-1. Run: pip install hound-mcp[all]
-2. Run: playwright install chromium
-3. Add Hound to the MCP config on this machine. The server name is "hound". The command is "hound" with no arguments. Create a backup of the config file before editing.
-4. After setup, tell me: "Go to https://tinyfish.ai, click Get API Key, sign up (free, no credit card needed). Copy the key and paste it here."
-5. Wait for me to paste the key. Do not proceed until I provide it.
-6. Once I give you the key, add it as TINYFISH_API_KEY env var in the hound server's MCP config.
-7. Tell me: "Done. Restart your agent. You should see smart_fetch and smart_search in your tools."
+1. Run: hound install
+2. Add Hound to the MCP config. Server name: "hound", command: "hound", no args. Backup the config file first.
+3. Ask me: "Get a free API key at tinyfish.ai (no credit card) and paste it here."
+4. Add the key as TINYFISH_API_KEY env var in the hound MCP config.
+5. Done. Restart your agent. smart_fetch and smart_search should be available.
 ```
 
 **Fetch only (no API key):**
 ```
-Install the Hound MCP server (fetch only) on this machine. Steps:
+Install the Hound MCP server (fetch only) on this machine:
 
-1. Run: pip install hound-mcp
-2. Run: playwright install chromium
-3. Add Hound to the MCP config on this machine. The server name is "hound". The command is "hound" with no arguments. Create a backup of the config file before editing.
-4. Tell me: "Done. Restart your agent. You should see smart_fetch in your tools."
+1. Run: hound install
+2. Add Hound to the MCP config. Server name: "hound", command: "hound", no args. Backup the config file first.
+3. Done. Restart your agent. smart_fetch should be available.
 ```
 
-### Manual install
+### MCP config reference
 
-```bash
-pip install hound-mcp[all]        # fetch + search (needs TinyFish key)
-pip install hound-mcp              # fetch only
-playwright install chromium        # browser for JS/anti-bot pages
-```
-
-MCP config:
 ```json
 {
   "mcpServers": {
@@ -64,24 +59,18 @@ MCP config:
 }
 ```
 
-Get a free TinyFish key at [tinyfish.ai](https://tinyfish.ai) (no credit card). Skip the `env` block for fetch-only.
-
-### Update
-```bash
-pip install --upgrade hound-mcp[all]
-```
-
 ---
 
 ## Tools
 
 | Tool | Does |
 |------|------|
-| `smart_fetch` | Fetch any URL. Auto HTTP → browser → stealth escalation. Start here. |
-| `smart_search` | Web search. Free TinyFish key required. |
-| `get` / `fetch` / `stealthy_fetch` | Manual tier selection. `bulk_*` variants for parallel. |
+| `smart_fetch` | Fetch any URL. Auto HTTP → browser → stealth escalation. Use `urls` for bulk. |
+| `smart_search` | Web search via TinyFish. Free key required. |
 | `screenshot` | Full-page screenshot via open session. |
-| `open_session` / `close_session` | Persistent browser sessions. |
+| `open_session` / `close_session` | Browser session management for screenshot reuse. |
+| `cache_clear` | Clear fetch cache. Set `all=true` for full clear. |
+| `version` | Check installed version + availability of updates. |
 
 ---
 
@@ -127,49 +116,25 @@ Content over 40KB gets chunked with a continuation offset. Your agent can call a
 
 ## For Pi Agent Users
 
-Paste this into Pi to install Hound:
+Paste this into Pi:
 
 ```
-Install the Hound MCP server for web fetching and search. Steps:
+Install the Hound MCP server:
 
-1. Run: pip install hound-mcp[all]
-2. Run: playwright install chromium
-3. Check if pi-mcp-adapter is installed: pi list. If not: pi install npm:pi-mcp-adapter
-4. Add to ~/.pi/agent/mcp.json inside mcpServers:
+1. Run: hound install
+2. Check pi-mcp-adapter: pi list. If not installed: pi install npm:pi-mcp-adapter
+3. Add to ~/.pi/agent/mcp.json inside mcpServers:
 
    "hound": { "command": "hound", "transport": "stdio", "lifecycle": "eager" }
 
-   Back up the file first. If mcpServers doesn't exist, create the full structure:
-   { "mcpServers": { "hound": { "command": "hound", "transport": "stdio", "lifecycle": "eager" } } }
+   Backup the file first.
+4. For search: get a free key at tinyfish.ai (no credit card), then add as env:
 
-5. Tell me: "Go to https://tinyfish.ai, click Get API Key, sign up (free, no credit card). Copy the key and paste it here."
-6. Wait for me to paste the TinyFish key.
-7. Add the key as env in the hound entry:
+   "hound": { "command": "hound", "transport": "stdio", "lifecycle": "eager", "env": { "TINYFISH_API_KEY": "<key>" } }
 
-   "hound": { "command": "hound", "transport": "stdio", "lifecycle": "eager", "env": { "TINYFISH_API_KEY": "<the key>" } }
-
-8. Tell me: "Done. Run /reload, then /mcp. You should see smart_fetch and smart_search."
-```
-
-Fetch only:
-```
-Install the Hound MCP server (fetch only). Steps:
-
-1. Run: pip install hound-mcp
-2. Run: playwright install chromium
-3. Check pi-mcp-adapter: pi list. If not: pi install npm:pi-mcp-adapter
-4. Add to ~/.pi/agent/mcp.json inside mcpServers:
-
-   "hound": { "command": "hound", "transport": "stdio", "lifecycle": "eager" }
-
-   Back up the file first.
-5. Tell me: "Done. Run /reload, then /mcp. smart_fetch should be available."
+5. Done. Run /reload, then /mcp. smart_fetch and smart_search should be available.
 ```
 
 ---
-
-## Requirements
-
-Python 3.11+ · Chromium (`playwright install chromium`) · Search: `pip install hound-mcp[all]` + free TinyFish key
 
 MIT

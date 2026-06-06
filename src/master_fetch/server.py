@@ -135,6 +135,14 @@ class CacheInfoModel(BaseModel):
     purged: int = Field(default=0, description="Number of entries purged.")
 
 
+class VersionInfoModel(BaseModel):
+    """Hound version and update status."""
+    version: str = Field(description="Installed Hound version.")
+    latest: str = Field(default="", description="Latest version on PyPI, empty if unable to check.")
+    up_to_date: bool = Field(default=True, description="True if installed version is the latest or ahead.")
+    update_command: str = Field(default="hound -u", description="Command to run to update Hound.")
+
+
 @dataclass
 class _SessionEntry:
     session: Any  # AsyncDynamicSession | AsyncStealthySession
@@ -1680,6 +1688,30 @@ class MasterFetchServer:
                 message=f"Cleared {count} expired cache entries.", purged=count,
             )
 
+    # ─── Version ──────────────────────────────────────────────────
+
+    async def version(self) -> VersionInfoModel:
+        """Check installed Hound version and whether an update is available.
+
+        Returns installed version, latest PyPI version, and whether Hound is up to date.
+        Call this to check if you should tell the user to run: hound -u
+        """
+        installed, latest, is_current = _check_version()
+        # up_to_date: True if at or ahead of PyPI (no update needed)
+        up_to_date = is_current if is_current is not None else True
+        if not up_to_date and latest:
+            try:
+                if _pad_version(installed) > _pad_version(latest):
+                    up_to_date = True
+            except (ValueError, IndexError):
+                pass
+        return VersionInfoModel(
+            version=installed,
+            latest=latest or "",
+            up_to_date=up_to_date,
+            update_command="hound -u",
+        )
+
     # ─── Search ────────────────────────────────────────────────────
 
     async def smart_search(
@@ -1782,30 +1814,177 @@ class MasterFetchServer:
             ),
             structured_output=True)
 
+        # Version
+        server.add_tool(self.version, title="version",
+            description=(
+                "Check installed Hound version and whether an update is available. "
+                "Returns version, latest PyPI version, and update command. "
+                "Call this to check if Hound is current before using its features."
+            ),
+            structured_output=True)
+
         server.run(transport="stdio" if not http else "streamable-http")
+
+
+def _check_version():
+    """Check installed version and compare with PyPI latest. Returns (installed, latest, is_current)."""
+    from importlib.metadata import version as _get_version
+    installed = _get_version("hound-mcp")
+
+    latest = None
+    try:
+        import json
+        from urllib.request import urlopen, Request
+        req = Request(
+            "https://pypi.org/pypi/hound-mcp/json",
+            headers={"User-Agent": "Hound/" + installed},
+        )
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            latest = data.get("info", {}).get("version")
+    except Exception:
+        pass
+
+    return installed, latest, (latest == installed if latest else None)
+
+
+def _pad_version(v: str) -> tuple:
+    parts = v.split(".")
+    return tuple(int(p) for p in parts[:3])
+
+
+def _do_update():
+    """Update hound-mcp via pip with clean output."""
+    import subprocess, sys
+    installed, latest, is_current = _check_version()
+
+    if is_current:
+        print(f"Hound v{installed}: already latest.")
+        return
+
+    if not latest:
+        print(f"Hound v{installed}: couldn't check PyPI.")
+        return
+
+    try:
+        if _pad_version(installed) > _pad_version(latest):
+            print(f"Hound v{installed}: ahead of PyPI v{latest}.")
+            return
+    except (ValueError, IndexError):
+        pass
+
+    print(f"Hound v{installed} → v{latest}")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
+         "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        err = result.stderr.strip()
+        for line in err.split("\n"):
+            if "ERROR" in line or "error" in line.lower():
+                print(f"  {line.strip()}")
+                break
+        else:
+            print(f"  {err.split(chr(10))[-1] if err else 'failed'}")
+        sys.exit(1)
+
+    new_ver = _check_version()[0]
+    print(f"Hound v{new_ver}")
+
+
+def _do_install():
+    """Install Hound with clean output (wraps pip + playwright)."""
+    import subprocess, sys
+
+    # 1. Install hound-mcp
+    print("Installing hound-mcp...", end=" ", flush=True)
+    r = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "hound-mcp[all]",
+         "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if r.returncode != 0:
+        print("failed")
+        err = r.stderr.strip()
+        print(f"  {err.split(chr(10))[-1] if err else 'unknown error'}")
+        sys.exit(1)
+    ver = _check_version()[0]
+    print(f"v{ver}")
+
+    # 2. Check/install Chromium
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); p.chromium.launch(); p.stop()"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            print("Chromium: ready")
+        else:
+            print("Installing Chromium...", end=" ", flush=True)
+            r2 = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r2.returncode == 0:
+                print("ready")
+            else:
+                print("failed")
+                print(f"  Run manually: playwright install chromium")
+    except Exception:
+        print("Chromium: unknown (run: playwright install chromium)")
+
+    print(f"\n  MCP config: add 'hound' as command to your MCP client")
+    print(f"  Search: set TINYFISH_API_KEY env var (free key at tinyfish.ai)")
 
 
 def main():
     """Entry point for the hound CLI."""
+    import sys
     import argparse
     parser = argparse.ArgumentParser(description="Hound MCP Server")
-    parser.add_argument(
-        "--http", action="store_true",
-        help="Use Streamable HTTP transport instead of stdio",
-    )
-    parser.add_argument(
-        "--host", default="127.0.0.1",
-        help="Host for HTTP transport (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=8765,
-        help="Port for HTTP transport (default: 8765)",
-    )
-    parser.add_argument(
-        "--cache-ttl", type=int, default=3600,
-        help="Default cache TTL in seconds (default: 3600)",
-    )
+    parser.add_argument("--http", action="store_true",
+                        help="Use HTTP transport instead of stdio")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Host for HTTP transport")
+    parser.add_argument("--port", type=int, default=8765,
+                        help="Port for HTTP transport")
+    parser.add_argument("--cache-ttl", type=int, default=3600,
+                        help="Default cache TTL in seconds")
+    parser.add_argument("-v", "--version", action="store_true",
+                        help="Check installed version + update status")
+    parser.add_argument("-u", "--update", action="store_true",
+                        help="Update Hound to latest version")
+    parser.add_argument("install", nargs="?", default=None,
+                        help="Install Hound + Chromium (hidden: use 'hound install')")
     args = parser.parse_args()
+
+    if args.install == "install":
+        _do_install()
+        return
+
+    if args.update:
+        _do_update()
+        return
+
+    if args.version:
+        installed, latest, is_current = _check_version()
+        if latest and is_current:
+            print(f"Hound v{installed}  (latest)")
+        elif latest:
+            try:
+                if _pad_version(installed) > _pad_version(latest):
+                    print(f"Hound v{installed}  PyPI v{latest} (ahead)")
+                else:
+                    print(f"Hound v{installed}  latest v{latest}  hound -u")
+            except (ValueError, IndexError):
+                print(f"Hound v{installed}  latest v{latest}  hound -u")
+        else:
+            print(f"Hound v{installed}")
+        return
+
+    if args.install is not None:
+        parser.error(f"unknown command: {args.install}")
 
     srv = MasterFetchServer(cache_ttl=args.cache_ttl)
     srv.serve(http=args.http, host=args.host, port=args.port)

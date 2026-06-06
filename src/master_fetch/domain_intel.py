@@ -154,10 +154,17 @@ async def record_result(url: str, level: str, success: bool, response_ms: float 
         row = await cursor.fetchone()
 
         if row is None:
+            # Apply upgrade logic even on first record.
+            # If this was a failure, start tracking at the escalated level.
+            new_level = level
+            if not success and level == "none":
+                new_level = "low"
+            elif not success and level == "low":
+                new_level = "high"
             await db.execute(
                 """INSERT INTO domain_intel (domain, protection_level, avg_response_ms, hit_count, fail_count, last_seen)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (domain, level, response_ms, 1 if success else 0, 0 if success else 1, time.time()),
+                (domain, new_level, response_ms, 1 if success else 0, 0 if success else 1, time.time()),
             )
         else:
             hits = row["hit_count"] + (1 if success else 0)
