@@ -10,43 +10,69 @@ Forks Scrapling's built-in MCP server and adds:
 - Input validation with SSRF protection
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import re
+import sys
 from uuid import uuid4
 from asyncio import gather, sleep as asyncio_sleep
 from datetime import datetime, timezone
 from time import time as now
 from dataclasses import dataclass, field
-from typing import Sequence, Optional, Literal, Union, Dict, List, Any
+from typing import Annotated, Sequence, Optional, Literal, Union, Dict, List, Any, TYPE_CHECKING
 
 logger = logging.getLogger("master-fetch.server")
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import ImageContent, TextContent
+
+from master_fetch import __version__
 from pydantic import BaseModel, Field
 
-from scrapling.core.shell import Convertor
-from scrapling.engines.toolbelt.custom import Response as _ScraplingResponse
-from scrapling.engines.static import ImpersonateType
-from scrapling.fetchers import (
-    FetcherSession,
-    AsyncDynamicSession,
-    AsyncStealthySession,
-)
-from scrapling.core._types import (
-    Optional as _ScraplingOptional,
-    Literal as _ScraplingLiteral,
-    Union as _ScraplingUnion,
-    Tuple,
-    Mapping,
-    Dict as _ScraplingDict,
-    List as _ScraplingList,
-    Any as _ScraplingAny,
-    SetCookieParam,
-    extraction_types,
-    SelectorWaitStates,
-    FollowRedirects,
-)
+# Lazy imports: scrapling pulls in playwright (~5s load). Defer until first use
+# so the MCP server responds to initialize immediately.
+_scrapling = None
+
+# Module-level type placeholders — needed because FastMCP evaluates string
+# annotations at tool registration time. Set to actual types on first fetch.
+SetCookieParam: Any = None  # type: ignore[valid-type]
+SelectorWaitStates: Any = None
+FollowRedirects: Any = None
+ImpersonateType: Any = None
+
+
+def _get_scrapling():
+    """Import scrapling on first call. Cached for subsequent calls."""
+    global _scrapling, SetCookieParam, SelectorWaitStates, FollowRedirects, ImpersonateType
+    if _scrapling is None:
+        from scrapling.core.shell import Convertor
+        from scrapling.engines.toolbelt.custom import Response as _SResponse
+        from scrapling.engines.static import ImpersonateType as _Imp
+        from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
+        from scrapling.core._types import SetCookieParam as _SCP, SelectorWaitStates as _SWS, FollowRedirects as _FR
+        from types import SimpleNamespace
+        _scrapling = SimpleNamespace()
+        _scrapling.Convertor = Convertor
+        _scrapling.Response = _SResponse
+        _scrapling.ImpersonateType = _Imp
+        _scrapling.FetcherSession = FetcherSession
+        _scrapling.AsyncDynamicSession = AsyncDynamicSession
+        _scrapling.AsyncStealthySession = AsyncStealthySession
+        _scrapling.SetCookieParam = _SCP
+        _scrapling.SelectorWaitStates = _SWS
+        _scrapling.FollowRedirects = _FR
+        # Also set module-level placeholders so function signature evaluation works
+        SetCookieParam = _SCP  # type: ignore[assignment]
+        SelectorWaitStates = _SWS
+        FollowRedirects = _FR
+        ImpersonateType = _Imp
+    return _scrapling
+
+if TYPE_CHECKING:
+    from scrapling.engines.toolbelt.custom import Response as _ScraplingResponse
+    from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
 
 from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
 from master_fetch.domain_intel import get_domain_level, record_result, guess_protection_level
@@ -75,72 +101,73 @@ MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50MB hard cap for response bodies
 
 class ResponseModel(BaseModel):
     """Request's response information structure."""
-    status: int = Field(description="HTTP status code returned by the website (0 if network error).")
-    content: list[str] = Field(description="Extracted content as plain text. May be truncated if is_truncated is True.")
-    url: str = Field(description="Final URL after redirects.")
-    cached: bool = Field(default=False, description="Whether this response was served from cache rather than a fresh fetch.")
-    fetcher_used: str = Field(default="", description="Which fetcher produced this result: 'http', 'dynamic', 'stealthy', 'cache', or 'none'.")
-    extracted_type: str = Field(default="markdown", description="Content extraction format: 'markdown', 'html', 'text', 'article', 'structured'.")
-    session_id: str = Field(default="", description="Browser session ID used for this request.")
-    duration_ms: float = Field(default=0, description="Total request duration in milliseconds.")
-    error: str = Field(default="", description="Error details if the request failed. Includes recovery hints when possible.")
-    content_type: str = Field(default="", description="Content-Type header from the response, e.g. 'text/html', 'application/json'.")
-    total_size_bytes: int = Field(default=0, description="Size of the raw response body in bytes before extraction and chunking.")
-    is_truncated: bool = Field(default=False, description="True if content was truncated. Use the offset parameter to fetch the next chunk.")
-    escalation_path: str = Field(default="", description="Fetcher sequence used: 'direct:http', 'http→dynamic', 'http→dynamic→stealthy', etc. Empty if unknown.")
-    retry_count: int = Field(default=0, description="Number of retries needed to get a successful response.")
+    status: int = Field(description="HTTP status (0=network error)")
+    content: list[str] = Field(description="Extracted text (truncated if is_truncated)")
+    url: str = Field(description="Final URL")
+    cached: bool = Field(default=False, description="From cache")
+    fetcher_used: str = Field(default="", description="http/dynamic/stealthy/cache/none")
+    extracted_type: str = Field(default="markdown", description="markdown|html|text|article|structured")
+    session_id: str = Field(default="", description="Browser session ID")
+    duration_ms: float = Field(default=0, description="Duration ms")
+    error: str = Field(default="", description="Error + recovery hints")
+    content_type: str = Field(default="", description="e.g. text/html, application/json")
+    total_size_bytes: int = Field(default=0, description="Raw body bytes")
+    is_truncated: bool = Field(default=False, description="True=more content, use next_offset")
+    next_offset: int = Field(default=0, description="Next offset when is_truncated. 0=no more")
+    escalation_path: str = Field(default="", description="e.g. http→dynamic→stealthy")
+    retry_count: int = Field(default=0, description="Retries")
 
 
 class BulkResponseModel(BaseModel):
     """Response from bulk fetch operations, one result per URL."""
-    results: list[ResponseModel] = Field(description="Individual results for each URL.")
-    total: int = Field(description="Total number of URLs fetched.")
-    successful: int = Field(description="Number of successful fetches (status < 400 and no error).")
+    results: list[ResponseModel] = Field(description="Per-URL results")
+    total: int = Field(description="Total URLs")
+    successful: int = Field(description="Fetches with status<400 + no error")
 
 
 class ArticleModel(BaseModel):
     """Structured article data extracted by Trafilatura."""
-    title: str = Field(description="Article title.")
-    author: str = Field(description="Article author.")
-    date: str = Field(description="Publication date.")
-    body: str = Field(description="Main article text content.")
-    description: str = Field(description="Article description/summary.")
-    url: str = Field(description="Source URL.")
-    categories: list[str] = Field(default=[], description="Categories.")
-    tags: list[str] = Field(default=[], description="Tags.")
+    title: str = Field(description="Article title")
+    author: str = Field(description="Article author")
+    date: str = Field(description="Publication date")
+    body: str = Field(description="Main article text")
+    description: str = Field(description="Article summary")
+    url: str = Field(description="Source URL")
+    categories: list[str] = Field(default=[], description="Categories")
+    tags: list[str] = Field(default=[], description="Tags")
 
 
 class SessionInfo(BaseModel):
     """Information about an open browser session."""
-    session_id: str = Field(description="The unique identifier of the session.")
-    session_type: SessionType = Field(description="The type of the session: 'dynamic' or 'stealthy'.")
-    created_at: str = Field(description="ISO timestamp of when the session was created.")
-    is_alive: bool = Field(description="Whether the session is still alive and usable.")
+    session_id: str = Field(description="Session ID")
+    session_type: SessionType = Field(description="dynamic|stealthy")
+    created_at: str = Field(description="ISO timestamp")
+    is_alive: bool = Field(description="Session alive?")
 
 
 class SessionCreatedModel(SessionInfo):
     """Response returned when a new session is created."""
-    message: str = Field(description="A confirmation message.")
+    message: str = Field(description="Confirmation message")
 
 
 class SessionClosedModel(BaseModel):
     """Response returned when a session is closed."""
-    session_id: str = Field(description="The unique identifier of the closed session.")
-    message: str = Field(description="A confirmation message.")
+    session_id: str = Field(description="Closed session ID")
+    message: str = Field(description="Confirmation message")
 
 
 class CacheInfoModel(BaseModel):
     """Response from cache management operations."""
-    message: str = Field(description="Result message.")
-    purged: int = Field(default=0, description="Number of entries purged.")
+    message: str = Field(description="Result message")
+    purged: int = Field(default=0, description="Entries purged")
 
 
 class VersionInfoModel(BaseModel):
     """Hound version and update status."""
-    version: str = Field(description="Installed Hound version.")
-    latest: str = Field(default="", description="Latest version on PyPI, empty if unable to check.")
-    up_to_date: bool = Field(default=True, description="True if installed version is the latest or ahead.")
-    update_command: str = Field(default="hound -u", description="Command to run to update Hound.")
+    version: str = Field(description="Installed version")
+    latest: str = Field(default="", description="Latest PyPI version")
+    up_to_date: bool = Field(default=True, description="Installed >= latest?")
+    update_command: str = Field(default="hound -u", description="Update command")
 
 
 @dataclass
@@ -234,26 +261,25 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
 
     if offset >= total_len:
         return ResponseModel(
-            status=result.status, content=["[Offset exceeds content length. No more content available.]"],
+            status=result.status, content=["[No more content.]"],
             url=result.url, cached=result.cached, fetcher_used=result.fetcher_used,
             extracted_type=result.extracted_type, session_id=result.session_id,
             duration_ms=result.duration_ms, error=result.error,
             content_type=result.content_type, total_size_bytes=result.total_size_bytes,
             escalation_path=result.escalation_path, retry_count=result.retry_count,
+            next_offset=0,
         )
 
     chunk = full_text[offset:offset + max_chars]
     chunk_len = len(chunk)
     remaining = total_len - offset - chunk_len
 
+    next_off = 0
     if remaining > 0:
         truncated = True
-        next_offset = offset + chunk_len
+        next_off = offset + chunk_len
         chunk += (
-            f"\n\n[Content truncated: received {chunk_len:,} of {total_len:,} chars "
-            f"(offset {offset:,}-{next_offset:,}). "
-            f"{remaining:,} chars remaining. "
-            f"Call smart_fetch again with offset={next_offset} to get the next chunk.]"
+            f"\n\n[Truncated: {chunk_len:,}/{total_len:,} chars. Next offset: {next_off}]"
         )
 
     return ResponseModel(
@@ -262,7 +288,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         extracted_type=result.extracted_type, session_id=result.session_id,
         duration_ms=result.duration_ms, error=result.error,
         content_type=result.content_type, total_size_bytes=result.total_size_bytes,
-        is_truncated=truncated,
+        is_truncated=truncated, next_offset=next_off,
         escalation_path=result.escalation_path, retry_count=result.retry_count,
     )
 
@@ -306,12 +332,13 @@ def _translate_response(
         except Exception:
             pass  # Fall through to normal extraction if JSON decode fails
 
+    s = _get_scrapling()
     content: list[str]
     if use_trafilatura and extraction_type in ("markdown", "text", "article", "structured"):
         content = extract_with_trafilatura(page, extraction_type=extraction_type, css_selector=css_selector)
         if not content or content == [""] or content == ["\n"]:
             content = list(
-                Convertor._extract_content(
+                s.Convertor._extract_content(
                     page,
                     css_selector=css_selector,
                     extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
@@ -320,7 +347,7 @@ def _translate_response(
             )
     else:
         content = list(
-            Convertor._extract_content(
+            s.Convertor._extract_content(
                 page,
                 css_selector=css_selector,
                 extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
@@ -583,15 +610,16 @@ class MasterFetchServer:
             wait_selector_state=wait_selector_state,
         )
 
-        session: Union[AsyncDynamicSession, AsyncStealthySession]
+        s = _get_scrapling()
+        session: Union[s.AsyncDynamicSession, s.AsyncStealthySession]
         if session_type == "stealthy":
-            session = AsyncStealthySession(
+            session = s.AsyncStealthySession(
                 **common_kwargs, hide_canvas=hide_canvas, block_webrtc=block_webrtc,
                 allow_webgl=allow_webgl, solve_cloudflare=solve_cloudflare,
                 additional_args=additional_args,
             )
         else:
-            session = AsyncDynamicSession(**common_kwargs)
+            session = s.AsyncDynamicSession(**common_kwargs)
 
         entry = _SessionEntry(session=session, session_type=session_type)
         self._sessions[session_id] = entry
@@ -608,7 +636,7 @@ class MasterFetchServer:
             message=f"Session '{session_id}' ({session_type}) created successfully.",
         )
 
-    async def close_session(self, session_id: str) -> SessionClosedModel:
+    async def close_session(self, session_id: Annotated[str, Field(description="Session ID to close")]) -> SessionClosedModel:
         """Close a persistent browser session and free its resources.
 
         :param session_id: The unique identifier of the session to close.
@@ -821,7 +849,8 @@ class MasterFetchServer:
         normalized_auth = _normalize_credentials(auth)
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
-        async with FetcherSession() as session:
+        s = _get_scrapling()
+        async with s.FetcherSession() as session:
             timed_tasks = [
                 _timed(session.get(
                     url, auth=normalized_auth, proxy=proxy, http3=http3, verify=verify,
@@ -834,13 +863,10 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks)
             results = [
-                _apply_chunking(
-                    _annotate_quality(
-                        _translate_response(
-                            page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
-                        )
-                    ),
-                    max_chars=max_content_chars,
+                _annotate_quality(
+                    _translate_response(
+                        page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
+                    )
                 )
                 for page, elapsed in timed_responses
             ]
@@ -993,7 +1019,8 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks)
         else:
-            async with AsyncDynamicSession(
+            s = _get_scrapling()
+            async with s.AsyncDynamicSession(
                 wait=wait, proxy=proxy, locale=locale, timeout=timeout,
                 cookies=cookies, cdp_url=cdp_url, headless=headless,
                 block_ads=True, max_pages=len(urls), useragent=useragent,
@@ -1007,13 +1034,10 @@ class MasterFetchServer:
                 timed_responses = await gather(*timed_tasks)
 
         results = [
-            _apply_chunking(
-                _annotate_quality(
-                    _translate_response(
-                        page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed,
-                    )
-                ),
-                max_chars=max_content_chars,
+            _annotate_quality(
+                _translate_response(
+                    page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed,
+                )
             )
             for page, elapsed in timed_responses
         ]
@@ -1186,7 +1210,8 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks)
         else:
-            async with AsyncStealthySession(
+            s = _get_scrapling()
+            async with s.AsyncStealthySession(
                 wait=wait, proxy=proxy, locale=locale, cdp_url=cdp_url,
                 timeout=timeout, cookies=cookies, headless=headless,
                 block_ads=True, useragent=useragent, timezone_id=timezone_id,
@@ -1202,13 +1227,10 @@ class MasterFetchServer:
                 timed_responses = await gather(*timed_tasks)
 
         results = [
-            _apply_chunking(
-                _annotate_quality(
-                    _translate_response(
-                        page, extraction_type, css_selector, main_content_only, use_tf, "stealthy", elapsed,
-                    )
-                ),
-                max_chars=max_content_chars,
+            _annotate_quality(
+                _translate_response(
+                    page, extraction_type, css_selector, main_content_only, use_tf, "stealthy", elapsed,
+                )
             )
             for page, elapsed in timed_responses
         ]
@@ -1260,28 +1282,28 @@ class MasterFetchServer:
 
     async def smart_fetch(
         self,
-        url: str,
-        urls: Optional[List[str]] = None,
-        extraction_type: ExtendedExtractionType = "markdown",
-        css_selector: Optional[str] = None,
-        main_content_only: bool = True,
-        use_trafilatura: bool = True,
-        cache_ttl: int = DEFAULT_TTL,
-        force_fetcher: Optional[Literal["http", "dynamic", "stealthy"]] = None,
-        respect_robots: bool = False,
-        headless: bool = True,
-        real_chrome: bool = False,
-        wait: int | float = 0,
-        proxy: Optional[str | Dict[str, str]] = None,
-        timeout: int | float = 30000,
-        network_idle: bool = False,
-        solve_cloudflare: bool = True,
-        block_webrtc: bool = True,
-        hide_canvas: bool = True,
-        extra_headers: Optional[Dict[str, str]] = None,
-        useragent: Optional[str] = None,
-        cookies: Sequence[SetCookieParam] | None = None,
-        offset: int = 0,
+        url: Annotated[str, Field(description="Single URL to fetch.")],
+        urls: Annotated[Optional[List[str]], Field(description="Multiple URLs to fetch in parallel. Returns bulk results. Use instead of calling smart_fetch multiple times.")] = None,
+        extraction_type: Annotated[ExtendedExtractionType, Field(description="Content format: 'markdown' (default), 'html', 'text', 'article', 'structured'.")] = "markdown",
+        css_selector: Annotated[Optional[str], Field(description="CSS selector to narrow extracted content (e.g. 'article', '.main-content').")] = None,
+        main_content_only: Annotated[bool, Field(description="Strip nav, ads, footers (default True).")] = True,
+        use_trafilatura: Annotated[bool, Field(description="Use Trafilatura for cleaner article extraction (default True).")] = True,
+        cache_ttl: Annotated[int, Field(description="Cache duration in seconds. Default 3600 (1 hour). Set 0 to skip cache and force a fresh fetch.")] = DEFAULT_TTL,
+        force_fetcher: Annotated[Optional[Literal["http", "dynamic", "stealthy"]], Field(description="Lock to one fetcher tier. 'http' = fast HTTP-only, 'dynamic' = Playwright JS rendering, 'stealthy' = Cloudflare bypass. Skips auto-escalation.")] = None,
+        respect_robots: Annotated[bool, Field(description="Check robots.txt before fetching (default False).")] = False,
+        headless: Annotated[bool, Field(description="Run browser without visible window (default True).")] = True,
+        real_chrome: Annotated[bool, Field(description="Use installed Chrome instead of bundled browser.")] = False,
+        wait: Annotated[int | float, Field(description="Extra milliseconds to wait after page load for JS rendering.")] = 0,
+        proxy: Annotated[Optional[str | Dict[str, str]], Field(description="Proxy URL or dict with server/username/password.")] = None,
+        timeout: Annotated[int | float, Field(description="Max request time in milliseconds (default 30000).")] = 30000,
+        network_idle: Annotated[bool, Field(description="Wait until network is idle for 500ms before capturing (good for SPAs).")] = False,
+        solve_cloudflare: Annotated[bool, Field(description="Attempt Cloudflare bypass in stealthy mode (default True).")] = True,
+        block_webrtc: Annotated[bool, Field(description="Prevent WebRTC IP leak in stealthy mode (default True).")] = True,
+        hide_canvas: Annotated[bool, Field(description="Randomize canvas fingerprint in stealthy mode (default True).")] = True,
+        extra_headers: Annotated[Optional[Dict[str, str]], Field(description="Additional HTTP headers as {name: value} dict.")] = None,
+        useragent: Annotated[Optional[str], Field(description="Override browser user agent string.")] = None,
+        cookies: Annotated[Sequence[SetCookieParam] | None, Field(description="Cookies as list of {name, value, domain} dicts.")] = None,
+        offset: Annotated[int, Field(description="Resume from this character offset when content was truncated. The response tells you the next offset to use.")] = 0,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -1673,7 +1695,7 @@ class MasterFetchServer:
 
     # ─── Cache Management ──────────────────────────────────────────
 
-    async def cache_clear(self, all: bool = False) -> CacheInfoModel:
+    async def cache_clear(self, all: Annotated[bool, Field(description="True=wipe all, False=expired only")] = False) -> CacheInfoModel:
         """Clear expired cache entries, or all entries if 'all' is True.
 
         :param all: If True, clear ALL cache entries. If False (default), only expired ones.
@@ -1763,68 +1785,207 @@ class MasterFetchServer:
 
     # ─── Serve ─────────────────────────────────────────────────────
 
+    # Minimal hand-crafted tool definitions — no Pydantic schema bloat.
+    # Saves ~69% tokens vs FastMCP auto-generated schemas.
+    _TOOL_DEFS: list[dict] = [
+        {
+            "name": "mcp_open_session",
+            "description": "Open browser session. Returns session_id.",
+            "inputSchema": {
+                "type": "object", "required": ["session_type"],
+                "properties": {
+                    "session_type": {"type": "string", "enum": ["dynamic", "stealthy"], "description": "dynamic or stealthy"},
+                    "headless": {"type": "boolean", "description": "No visible window"},
+                    "options": {"type": "object", "description": "proxy, timeout, cookies, extra_headers, useragent, wait, network_idle, real_chrome, hide_canvas, block_webrtc, solve_cloudflare, session_id", "additionalProperties": True},
+                },
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+        },
+        {
+            "name": "close_session",
+            "description": "Close a browser session.",
+            "inputSchema": {
+                "type": "object", "required": ["session_id"],
+                "properties": {
+                    "session_id": {"type": "string", "description": "Session to close"},
+                },
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "list_sessions",
+            "description": "List open browser sessions.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "mcp_smart_fetch",
+            "description": "Fetch any URL. Auto HTTP→browser→stealth escalation. Bulk: pass urls. Truncated? Use next_offset. Fresh: cache_ttl=0.",
+            "inputSchema": {
+                "type": "object", "required": ["url"],
+                "properties": {
+                    "url": {"type": "string", "description": "URL to fetch"},
+                    "urls": {"type": "array", "items": {"type": "string"}, "description": "Multiple URLs (parallel)"},
+                    "extraction_type": {"type": "string", "enum": ["markdown", "html", "text", "article", "structured"], "description": "markdown|html|text|article|structured"},
+                    "cache_ttl": {"type": "integer", "description": "Cache seconds. 0=fresh"},
+                    "force_fetcher": {"type": "string", "enum": ["http", "dynamic", "stealthy"], "description": "Lock to one tier"},
+                    "offset": {"type": "integer", "description": "0-based char offset. is_truncated=true? Use next_offset value."},
+                    "options": {"type": "object", "description": "css_selector, proxy, timeout, cookies, extra_headers, useragent, wait, network_idle, headless, real_chrome, respect_robots, main_content_only, use_trafilatura, solve_cloudflare, block_webrtc, hide_canvas", "additionalProperties": True},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+        },
+        {
+            "name": "mcp_screenshot",
+            "description": "Screenshot a URL. Requires open_session.",
+            "inputSchema": {
+                "type": "object", "required": ["url", "session_id"],
+                "properties": {
+                    "url": {"type": "string", "description": "URL to screenshot"},
+                    "session_id": {"type": "string", "description": "From open_session"},
+                    "options": {"type": "object", "description": "full_page, image_type, quality, wait, wait_selector, network_idle, timeout", "additionalProperties": True},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+        },
+        {
+            "name": "mcp_smart_search",
+            "description": "Web search via TinyFish. Free key: https://agent.tinyfish.ai/sign-up?ref=v1.dXNlcl8zRGVtcWxON25nSU5aSkRzU0NLQXNtT1BVUXk.VU_44hCD2lp3YXGzJWIy3mwwsHQ8xr1TbnmQQrUNDj4",
+            "inputSchema": {
+                "type": "object", "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "options": {"type": "object", "description": "max_results, cache_ttl, api_key", "additionalProperties": True},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+        },
+        {
+            "name": "cache_clear",
+            "description": "Clear fetch cache. all=true wipes all.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "all": {"type": "boolean", "description": "Wipe all (default: expired only)"},
+                },
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+        },
+        {
+            "name": "version",
+            "description": "Hound version + update status.",
+            "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
+        },
+    ]
+
     def serve(self, http: bool = False, host: str = "127.0.0.1", port: int = 8765):
-        """Start the MCP server."""
-        server = FastMCP(name="Hound", host=host, port=port)
+        """Start the MCP server using low-level Server for minimal token overhead."""
+        from mcp.server import Server
+        from mcp.types import Tool, TextContent
 
-        # Session management (for screenshot reuse and advanced workflows)
-        server.add_tool(self.open_session, title="open_session",
-            description="Open a browser session for screenshot reuse. Returns session_id. Sessions auto-expire after 300s of inactivity.",
-            structured_output=True)
-        server.add_tool(self.close_session, title="close_session",
-            description="Close a browser session. Call when done with a session to free resources.",
-            structured_output=True)
-        server.add_tool(self.list_sessions, title="list_sessions",
-            description="List all open browser sessions with their IDs, types, and ages.",
-            structured_output=True)
+        server = Server(name="Hound", version=__version__)
 
-        # Main fetch tool. All fetch operations go through this.
-        server.add_tool(self.smart_fetch, title="smart_fetch",
-            description=(
-                "Fetch a URL (or multiple URLs) with automatic anti-bot escalation. "
-                "Use this for ALL web page fetching. Auto-selects the best method. "
-                "Single URL: pass 'url'. Multiple URLs: pass 'urls' (returns bulk results). "
-                "Returns extracted content with metadata: content_type, total_size_bytes, "
-                "is_truncated, escalation_path (e.g. 'http→dynamic→stealthy'), duration_ms. "
-                "Set force_fetcher='http' for fast HTTP-only, 'stealthy' for Cloudflare bypass."
-            ),
-            structured_output=True)
+        # ── list_tools: return hand-crafted minimal definitions ──────
+        @server.list_tools()
+        async def list_tools():
+            return [Tool(**td) for td in self._TOOL_DEFS]
 
-        # Screenshot
-        server.add_tool(self.screenshot, title="screenshot",
-            description=(
-                "Take a screenshot of a URL using an existing browser session. "
-                "Open a session first with open_session. Returns the image + final URL."
-            ))
+        # ── call_tool: dispatch to existing methods ─────────────────
+        @server.call_tool(validate_input=False)
+        async def call_tool(name: str, arguments: dict):
+            try:
+                return await self._dispatch(name, arguments)
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": redact_api_key(str(e)[:300])}))]
 
-        # Search
-        server.add_tool(self.smart_search, title="smart_search",
-            description=(
-                "Search the web via TinyFish API. Free key (no credit card): https://agent.tinyfish.ai/sign-up?ref=v1.dXNlcl8zRGVtcWxON25nSU5aSkRzU0NLQXNtT1BVUXk.VU_44hCD2lp3YXGzJWIy3mwwsHQ8xr1TbnmQQrUNDj4 "
-                "Returns title, URL, and snippet for each result. "
-                "Use this to find information on the web before fetching specific pages with smart_fetch."
-            ),
-            structured_output=True)
+        if not http:
+            import anyio
+            from mcp.server.stdio import stdio_server
 
-        # Cache
-        server.add_tool(self.cache_clear, title="cache_clear",
-            description=(
-                "Clear the fetch cache. By default clears only expired entries. "
-                "Set all=true to wipe everything. Use after fixing a fetch issue to force a fresh re-fetch."
-            ),
-            structured_output=True)
+            async def _run():
+                async with stdio_server() as (read, write):
+                    await server.run(read, write, server.create_initialization_options())
 
-        # Version
-        server.add_tool(self.version, title="version",
-            description=(
-                "Check installed Hound version and whether an update is available. "
-                "Returns version, latest PyPI version, and update command. "
-                "Call this to check if Hound is current before using its features."
-            ),
-            structured_output=True)
+            anyio.run(_run)
+        else:
+            from mcp.server.sse import SseServerTransport
+            from starlette.applications import Starlette
+            from starlette.routing import Route
 
-        server.run(transport="stdio" if not http else "streamable-http")
+            sse = SseServerTransport("/messages/")
 
+            async def handle_sse(request):
+                async with sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
+                    await server.run(read, write, server.create_initialization_options())
+
+            app = Starlette(routes=[Route("/sse", endpoint=handle_sse), Route("/messages/", endpoint=sse.handle_post_message)])
+            import uvicorn
+            uvicorn.run(app, host=host, port=port)
+
+    async def _dispatch(self, name: str, args: dict) -> list:
+        """Route MCP tool calls to internal methods and format responses."""
+        from mcp.types import TextContent, ImageContent
+
+        options = args.get("options") or {}
+
+        if name == "mcp_smart_fetch":
+            kw = {k: v for k, v in options.items() if k in (
+                "css_selector", "proxy", "timeout", "cookies", "extra_headers", "useragent",
+                "wait", "network_idle", "headless", "real_chrome", "respect_robots",
+                "main_content_only", "use_trafilatura", "solve_cloudflare", "block_webrtc", "hide_canvas",
+            )}
+            result = await self.smart_fetch(
+                url=args["url"], urls=args.get("urls"),
+                extraction_type=args.get("extraction_type", "markdown"),
+                cache_ttl=args.get("cache_ttl", DEFAULT_TTL),
+                force_fetcher=args.get("force_fetcher"),
+                offset=args.get("offset", 0), **kw,
+            )
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "mcp_open_session":
+            kw = {k: v for k, v in options.items() if k in (
+                "proxy", "timeout", "cookies", "extra_headers", "useragent",
+                "wait", "network_idle", "real_chrome", "hide_canvas", "block_webrtc",
+                "solve_cloudflare", "session_id",
+            )}
+            result = await self.open_session(
+                session_type=args["session_type"], headless=args.get("headless", True), **kw,
+            )
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "close_session":
+            result = await self.close_session(session_id=args["session_id"])
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "list_sessions":
+            result = await self.list_sessions()
+            data = [r.model_dump() for r in result]
+            return [TextContent(type="text", text=json.dumps(data))], data
+
+        elif name == "mcp_screenshot":
+            kw = {k: v for k, v in options.items() if k in (
+                "full_page", "image_type", "quality", "wait", "wait_selector", "network_idle", "timeout",
+            )}
+            result = await self.screenshot(url=args["url"], session_id=args["session_id"], **kw)
+            return result  # already list[ImageContent|TextContent]
+
+        elif name == "mcp_smart_search":
+            kw = {k: v for k, v in options.items() if k in ("max_results", "cache_ttl", "api_key")}
+            result = await self.smart_search(query=args["query"], **kw)
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "cache_clear":
+            result = await self.cache_clear(all=args.get("all", False))
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "version":
+            result = await self.version()
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        else:
+            return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
 
 def _check_version():
     """Check installed version and compare with PyPI latest. Returns (installed, latest, is_current)."""
@@ -1858,22 +2019,18 @@ def _do_update():
     import subprocess, sys
     installed, latest, is_current = _check_version()
 
-    if is_current:
-        print(f"Hound v{installed}: already latest.")
-        return
-
     if not latest:
-        print(f"Hound v{installed}: couldn't check PyPI.")
+        print(f"Hound v{installed}: can't check for updates.")
         return
 
     try:
-        if _pad_version(installed) > _pad_version(latest):
-            print(f"Hound v{installed}: ahead of PyPI v{latest}.")
+        if _pad_version(installed) >= _pad_version(latest):
+            print(f"Hound v{installed} (latest)")
             return
     except (ValueError, IndexError):
         pass
 
-    print(f"Hound v{installed} → v{latest}")
+    print(f"Updating v{installed} to v{latest}...")
     result = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
          "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
@@ -1893,52 +2050,6 @@ def _do_update():
     print(f"Hound v{new_ver}")
 
 
-def _do_install():
-    """Install Hound with clean output (wraps pip + playwright)."""
-    import subprocess, sys
-
-    # 1. Install hound-mcp
-    print("Installing hound-mcp...", end=" ", flush=True)
-    r = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "hound-mcp[all]",
-         "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
-        capture_output=True, text=True, timeout=120,
-    )
-    if r.returncode != 0:
-        print("failed")
-        err = r.stderr.strip()
-        print(f"  {err.split(chr(10))[-1] if err else 'unknown error'}")
-        sys.exit(1)
-    ver = _check_version()[0]
-    print(f"v{ver}")
-
-    # 2. Check/install Chromium
-    try:
-        r = subprocess.run(
-            [sys.executable, "-c", "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); p.chromium.launch(); p.stop()"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if r.returncode == 0:
-            print("Chromium: ready")
-        else:
-            print("Installing Chromium...", end=" ", flush=True)
-            r2 = subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "chromium"],
-                capture_output=True, text=True, timeout=120,
-            )
-            if r2.returncode == 0:
-                print("ready")
-            else:
-                print("failed")
-                print(f"  Run manually: playwright install chromium")
-    except Exception:
-        print("Chromium: unknown (run: playwright install chromium)")
-
-    print(f"\n  MCP config: add 'hound' as command to your MCP client")
-    print(f"  Search: set TINYFISH_API_KEY env var")
-    print(f"  Free key: https://agent.tinyfish.ai/sign-up?ref=v1.dXNlcl8zRGVtcWxON25nSU5aSkRzU0NLQXNtT1BVUXk.VU_44hCD2lp3YXGzJWIy3mwwsHQ8xr1TbnmQQrUNDj4")
-
-
 def main():
     """Entry point for the hound CLI."""
     import sys
@@ -1956,13 +2067,7 @@ def main():
                         help="Check installed version + update status")
     parser.add_argument("-u", "--update", action="store_true",
                         help="Update Hound to latest version")
-    parser.add_argument("install", nargs="?", default=None,
-                        help="Install Hound + Chromium (hidden: use 'hound install')")
     args = parser.parse_args()
-
-    if args.install == "install":
-        _do_install()
-        return
 
     if args.update:
         _do_update()
@@ -1971,21 +2076,18 @@ def main():
     if args.version:
         installed, latest, is_current = _check_version()
         if latest and is_current:
-            print(f"Hound v{installed}  (latest)")
+            print(f"Hound v{installed} (latest)")
         elif latest:
             try:
-                if _pad_version(installed) > _pad_version(latest):
-                    print(f"Hound v{installed}  PyPI v{latest} (ahead)")
+                if _pad_version(installed) >= _pad_version(latest):
+                    print(f"Hound v{installed} (latest)")
                 else:
-                    print(f"Hound v{installed}  latest v{latest}  hound -u")
+                    print(f"Hound v{installed}. v{latest} available. Run hound -u to update.")
             except (ValueError, IndexError):
-                print(f"Hound v{installed}  latest v{latest}  hound -u")
+                print(f"Hound v{installed}")
         else:
             print(f"Hound v{installed}")
         return
-
-    if args.install is not None:
-        parser.error(f"unknown command: {args.install}")
 
     srv = MasterFetchServer(cache_ttl=args.cache_ttl)
     srv.serve(http=args.http, host=args.host, port=args.port)
