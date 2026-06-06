@@ -10,43 +10,68 @@ Forks Scrapling's built-in MCP server and adds:
 - Input validation with SSRF protection
 """
 
+from __future__ import annotations
+
 import logging
 import re
+import sys
 from uuid import uuid4
 from asyncio import gather, sleep as asyncio_sleep
 from datetime import datetime, timezone
 from time import time as now
 from dataclasses import dataclass, field
-from typing import Sequence, Optional, Literal, Union, Dict, List, Any
+from typing import Sequence, Optional, Literal, Union, Dict, List, Any, TYPE_CHECKING
 
 logger = logging.getLogger("master-fetch.server")
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import ImageContent, TextContent
+
+from master_fetch import __version__
 from pydantic import BaseModel, Field
 
-from scrapling.core.shell import Convertor
-from scrapling.engines.toolbelt.custom import Response as _ScraplingResponse
-from scrapling.engines.static import ImpersonateType
-from scrapling.fetchers import (
-    FetcherSession,
-    AsyncDynamicSession,
-    AsyncStealthySession,
-)
-from scrapling.core._types import (
-    Optional as _ScraplingOptional,
-    Literal as _ScraplingLiteral,
-    Union as _ScraplingUnion,
-    Tuple,
-    Mapping,
-    Dict as _ScraplingDict,
-    List as _ScraplingList,
-    Any as _ScraplingAny,
-    SetCookieParam,
-    extraction_types,
-    SelectorWaitStates,
-    FollowRedirects,
-)
+# Lazy imports: scrapling pulls in playwright (~5s load). Defer until first use
+# so the MCP server responds to initialize immediately.
+_scrapling = None
+
+# Module-level type placeholders — needed because FastMCP evaluates string
+# annotations at tool registration time. Set to actual types on first fetch.
+SetCookieParam: Any = None  # type: ignore[valid-type]
+SelectorWaitStates: Any = None
+FollowRedirects: Any = None
+ImpersonateType: Any = None
+
+
+def _get_scrapling():
+    """Import scrapling on first call. Cached for subsequent calls."""
+    global _scrapling, SetCookieParam, SelectorWaitStates, FollowRedirects, ImpersonateType
+    if _scrapling is None:
+        from scrapling.core.shell import Convertor
+        from scrapling.engines.toolbelt.custom import Response as _SResponse
+        from scrapling.engines.static import ImpersonateType as _Imp
+        from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
+        from scrapling.core._types import SetCookieParam as _SCP, SelectorWaitStates as _SWS, FollowRedirects as _FR
+        from types import SimpleNamespace
+        _scrapling = SimpleNamespace()
+        _scrapling.Convertor = Convertor
+        _scrapling.Response = _SResponse
+        _scrapling.ImpersonateType = _Imp
+        _scrapling.FetcherSession = FetcherSession
+        _scrapling.AsyncDynamicSession = AsyncDynamicSession
+        _scrapling.AsyncStealthySession = AsyncStealthySession
+        _scrapling.SetCookieParam = _SCP
+        _scrapling.SelectorWaitStates = _SWS
+        _scrapling.FollowRedirects = _FR
+        # Also set module-level placeholders so function signature evaluation works
+        SetCookieParam = _SCP  # type: ignore[assignment]
+        SelectorWaitStates = _SWS
+        FollowRedirects = _FR
+        ImpersonateType = _Imp
+    return _scrapling
+
+if TYPE_CHECKING:
+    from scrapling.engines.toolbelt.custom import Response as _ScraplingResponse
+    from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
 
 from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
 from master_fetch.domain_intel import get_domain_level, record_result, guess_protection_level
@@ -306,12 +331,13 @@ def _translate_response(
         except Exception:
             pass  # Fall through to normal extraction if JSON decode fails
 
+    s = _get_scrapling()
     content: list[str]
     if use_trafilatura and extraction_type in ("markdown", "text", "article", "structured"):
         content = extract_with_trafilatura(page, extraction_type=extraction_type, css_selector=css_selector)
         if not content or content == [""] or content == ["\n"]:
             content = list(
-                Convertor._extract_content(
+                s.Convertor._extract_content(
                     page,
                     css_selector=css_selector,
                     extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
@@ -320,7 +346,7 @@ def _translate_response(
             )
     else:
         content = list(
-            Convertor._extract_content(
+            s.Convertor._extract_content(
                 page,
                 css_selector=css_selector,
                 extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
@@ -583,15 +609,16 @@ class MasterFetchServer:
             wait_selector_state=wait_selector_state,
         )
 
-        session: Union[AsyncDynamicSession, AsyncStealthySession]
+        s = _get_scrapling()
+        session: Union[s.AsyncDynamicSession, s.AsyncStealthySession]
         if session_type == "stealthy":
-            session = AsyncStealthySession(
+            session = s.AsyncStealthySession(
                 **common_kwargs, hide_canvas=hide_canvas, block_webrtc=block_webrtc,
                 allow_webgl=allow_webgl, solve_cloudflare=solve_cloudflare,
                 additional_args=additional_args,
             )
         else:
-            session = AsyncDynamicSession(**common_kwargs)
+            session = s.AsyncDynamicSession(**common_kwargs)
 
         entry = _SessionEntry(session=session, session_type=session_type)
         self._sessions[session_id] = entry
@@ -821,7 +848,8 @@ class MasterFetchServer:
         normalized_auth = _normalize_credentials(auth)
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
-        async with FetcherSession() as session:
+        s = _get_scrapling()
+        async with s.FetcherSession() as session:
             timed_tasks = [
                 _timed(session.get(
                     url, auth=normalized_auth, proxy=proxy, http3=http3, verify=verify,
@@ -993,7 +1021,8 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks)
         else:
-            async with AsyncDynamicSession(
+            s = _get_scrapling()
+            async with s.AsyncDynamicSession(
                 wait=wait, proxy=proxy, locale=locale, timeout=timeout,
                 cookies=cookies, cdp_url=cdp_url, headless=headless,
                 block_ads=True, max_pages=len(urls), useragent=useragent,
@@ -1186,7 +1215,8 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks)
         else:
-            async with AsyncStealthySession(
+            s = _get_scrapling()
+            async with s.AsyncStealthySession(
                 wait=wait, proxy=proxy, locale=locale, cdp_url=cdp_url,
                 timeout=timeout, cookies=cookies, headless=headless,
                 block_ads=True, useragent=useragent, timezone_id=timezone_id,
@@ -1766,6 +1796,7 @@ class MasterFetchServer:
     def serve(self, http: bool = False, host: str = "127.0.0.1", port: int = 8765):
         """Start the MCP server."""
         server = FastMCP(name="Hound", host=host, port=port)
+        server._mcp_server.version = __version__
 
         # Session management (for screenshot reuse and advanced workflows)
         server.add_tool(self.open_session, title="open_session",
@@ -1818,7 +1849,7 @@ class MasterFetchServer:
         server.add_tool(self.version, title="version",
             description=(
                 "Check installed Hound version and whether an update is available. "
-                "Returns version, latest PyPI version, and update command. "
+                "Returns version, latest available version, and update command. "
                 "Call this to check if Hound is current before using its features."
             ),
             structured_output=True)
@@ -1858,22 +1889,18 @@ def _do_update():
     import subprocess, sys
     installed, latest, is_current = _check_version()
 
-    if is_current:
-        print(f"Hound v{installed}: already latest.")
-        return
-
     if not latest:
-        print(f"Hound v{installed}: couldn't check PyPI.")
+        print(f"Hound v{installed}: can't check for updates.")
         return
 
     try:
-        if _pad_version(installed) > _pad_version(latest):
-            print(f"Hound v{installed}: ahead of PyPI v{latest}.")
+        if _pad_version(installed) >= _pad_version(latest):
+            print(f"Hound v{installed} (latest)")
             return
     except (ValueError, IndexError):
         pass
 
-    print(f"Hound v{installed} → v{latest}")
+    print(f"Updating v{installed} to v{latest}...")
     result = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
          "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
@@ -1894,25 +1921,13 @@ def _do_update():
 
 
 def _do_install():
-    """Install Hound with clean output (wraps pip + playwright)."""
+    """Set up Chromium for Hound (run after pip install)."""
     import subprocess, sys
 
-    # 1. Install hound-mcp
-    print("Installing hound-mcp...", end=" ", flush=True)
-    r = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "hound-mcp[all]",
-         "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
-        capture_output=True, text=True, timeout=120,
-    )
-    if r.returncode != 0:
-        print("failed")
-        err = r.stderr.strip()
-        print(f"  {err.split(chr(10))[-1] if err else 'unknown error'}")
-        sys.exit(1)
     ver = _check_version()[0]
-    print(f"v{ver}")
+    print(f"Hound v{ver}")
 
-    # 2. Check/install Chromium
+    # Check/install Chromium
     try:
         r = subprocess.run(
             [sys.executable, "-c", "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); p.chromium.launch(); p.stop()"],
@@ -1934,9 +1949,9 @@ def _do_install():
     except Exception:
         print("Chromium: unknown (run: playwright install chromium)")
 
-    print(f"\n  MCP config: add 'hound' as command to your MCP client")
-    print(f"  Search: set TINYFISH_API_KEY env var")
-    print(f"  Free key: https://agent.tinyfish.ai/sign-up?ref=v1.dXNlcl8zRGVtcWxON25nSU5aSkRzU0NLQXNtT1BVUXk.VU_44hCD2lp3YXGzJWIy3mwwsHQ8xr1TbnmQQrUNDj4")
+    print(f"\n  Next: add 'hound' as an MCP server in your agent's config")
+    print(f"  Free TinyFish key: https://agent.tinyfish.ai/sign-up?ref=v1.dXNlcl8zRGVtcWxON25nSU5aSkRzU0NLQXNtT1BVUXk.VU_44hCD2lp3YXGzJWIy3mwwsHQ8xr1TbnmQQrUNDj4")
+    print(f"  Add TINYFISH_API_KEY as env var in the MCP config")
 
 
 def main():
@@ -1957,7 +1972,7 @@ def main():
     parser.add_argument("-u", "--update", action="store_true",
                         help="Update Hound to latest version")
     parser.add_argument("install", nargs="?", default=None,
-                        help="Install Hound + Chromium (hidden: use 'hound install')")
+                        help="Set up Chromium for Hound (run after pip install)")
     args = parser.parse_args()
 
     if args.install == "install":
@@ -1971,15 +1986,15 @@ def main():
     if args.version:
         installed, latest, is_current = _check_version()
         if latest and is_current:
-            print(f"Hound v{installed}  (latest)")
+            print(f"Hound v{installed} (latest)")
         elif latest:
             try:
-                if _pad_version(installed) > _pad_version(latest):
-                    print(f"Hound v{installed}  PyPI v{latest} (ahead)")
+                if _pad_version(installed) >= _pad_version(latest):
+                    print(f"Hound v{installed} (latest)")
                 else:
-                    print(f"Hound v{installed}  latest v{latest}  hound -u")
+                    print(f"Hound v{installed}. v{latest} available. Run hound -u to update.")
             except (ValueError, IndexError):
-                print(f"Hound v{installed}  latest v{latest}  hound -u")
+                print(f"Hound v{installed}")
         else:
             print(f"Hound v{installed}")
         return

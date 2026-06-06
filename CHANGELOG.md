@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.9.0] - 2026-06-06
+
+### Fixed
+- **MCP server now starts in <3s instead of 5-10s.** Scrapling/playwright imports deferred to first tool call. Before: OpenCode and other clients timed out waiting for `initialize` response (default 5s timeout). Now: server responds instantly, heavy deps load on first `smart_fetch`/`smart_search` call.
+- `serverInfo.version` in MCP handshake now shows Hound version (e.g. `2.9.0`) instead of MCP SDK version (`1.27.0`)
+- `NameError: name 'sys' is not defined` in `smart_fetch` and `open_session` — missing import in lazy loader
+
+### Changed
+- Install flow: `pip install hound-mcp[all]` then `hound install` (Chromium setup). No more chicken-and-egg where `hound install` can't run before pip.
+- `hound -v` output simplified: `Hound v2.9.0 (latest)` or `Hound v2.9.0. v3.0.0 available. Run hound -u to update.` No PyPI jargon.
+- `hound install` no longer re-runs pip (just Chromium setup). Shows `(already installed)` when re-run.
+- Agent prompts in README: correct POV ("Tell the user to restart this agent", not "Restart your agent"), no client-specific config examples, no fetch-only option.
+- Removed broken fetch-only install path. One product: fetch + search.
+- OpenCode MCP config format: `type: "local"`, `command: ["hound"]`, `environment: { ... }` (not `env`).
+
+### Added
+- `__main__.py`: `python -m master_fetch` works as MCP server
+- `__version__` in `__init__.py` as single source of truth
+- `list_sessions` in README tools table
+
 ## [2.8.0] - 2026-06-06
 
 ### Removed
