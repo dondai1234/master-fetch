@@ -24,20 +24,20 @@ SEARCH_CACHE_TTL = 300  # 5 minutes
 
 
 class SearchResult(BaseModel):
-    title: str = Field(description="Result title.")
-    url: str = Field(description="Result URL.")
-    snippet: str = Field(default="", description="Result snippet/description.")
-    source: str = Field(default="tinyfish", description="Source name.")
-    position: int = Field(default=0, description="Position in results (1-indexed).")
+    title: str = Field(description="Result title")
+    url: str = Field(description="Result URL")
+    snippet: str = Field(default="", description="Result snippet")
+    source: str = Field(default="tinyfish", description="Source name")
+    position: int = Field(default=0, description="1-indexed position")
 
 
 class SearchResponseModel(BaseModel):
-    query: str = Field(description="The search query.")
-    results: list[SearchResult] = Field(description="Search results.")
-    total_results: int = Field(default=0, description="Total number of results found.")
-    cached: bool = Field(default=False, description="Whether served from cache.")
-    duration_ms: float = Field(default=0, description="Search duration in ms.")
-    error: str = Field(default="", description="Error message if search failed.")
+    query: str = Field(description="Search query")
+    results: list[SearchResult] = Field(description="Search results")
+    total_results: int = Field(default=0, description="Total results found")
+    cached: bool = Field(default=False, description="Served from cache?")
+    duration_ms: float = Field(default=0, description="Duration ms")
+    error: str = Field(default="", description="Error message")
 
 
 def _get_requests():
