@@ -185,29 +185,29 @@ class TestChunking:
     def test_small_content_not_truncated(self):
         r = _make_response(content=["Short content"])
         result = _apply_chunking(r)
-        assert "[Content truncated:" not in result.content[0]
+        assert "[Truncated:" not in result.content[0]
         assert result.content == ["Short content"]
 
     def test_large_content_truncated(self):
         huge = "x" * (MAX_CONTENT_CHARS + 100)
         r = _make_response(content=[huge])
         result = _apply_chunking(r)
-        assert "[Content truncated:" in result.content[0]
+        assert "[Truncated:" in result.content[0]
         assert len(result.content[0]) < MAX_CONTENT_CHARS + 500  # room for notice
 
     def test_offset_continuation(self):
         content = "ABCDEFGHIJ"  # 10 chars
         r = _make_response(content=[content])
         result = _apply_chunking(r, max_chars=4, offset=4)
-        # Should get chars 4-7 (EFGH) + "remaining" note
+        # Should get chars 4-7 (EFGH) + truncation note
         assert "EFGH" in result.content[0]
-        assert "remaining" in result.content[0].lower()
+        assert "Next offset:" in result.content[0]
 
     def test_offset_beyond_content(self):
         content = "ABC"  # 3 chars
         r = _make_response(content=[content])
         result = _apply_chunking(r, offset=10)
-        assert "No more content available" in result.content[0]
+        assert "No more content" in result.content[0]
 
     def test_chunking_preserves_fields(self):
         r = _make_response(

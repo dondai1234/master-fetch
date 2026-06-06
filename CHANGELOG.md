@@ -1,5 +1,71 @@
 # Changelog
 
+## [2.11.1] - 2026-06-06
+
+### Changed
+- Trimmed hand-holding from tool descriptions and truncation messages. Same meta-awareness, fewer tokens.
+
+## [2.11.0] - 2026-06-06
+
+### Changed
+- **Switched from FastMCP to low-level MCP Server**: hand-crafted minimal tool definitions eliminate Pydantic schema bloat. Tools/list payload dropped from 13KB/4.4K tokens to 4KB/1.4K tokens (69% reduction). No outputSchema in declarations (agents get structured content in every response instead). Every param still has descriptions, annotations intact.
+- `next_offset` field in ResponseModel: structured integer for pagination. No string parsing needed.
+
+## [2.10.1] - 2026-06-06
+
+### Added
+- `next_offset` field in ResponseModel: structured integer telling agents the exact offset for the next chunk. No string parsing needed. `0` = no more content.
+
+### Changed
+- `is_truncated` description: `True=more content, use next_offset`
+- `offset` param description: `0-based char offset. is_truncated=true? Use next_offset value.`
+
+## [2.10.0] - 2026-06-06
+
+### Changed
+- **Token-efficient MCP tool definitions**: 20KB → 13KB (34% less tokens burned per conversation). Core params stay structured and validated. Advanced params moved to `options` dict (proxy, cookies, useragent, etc.). Agents discover them without paying token tax on every call.
+- Compressed all field descriptions in output schemas (e.g. "HTTP status code returned by the website (0 if network error)" → "HTTP status (0=network error)").
+- Tool descriptions compressed to terse one-liners.
+
+## [2.9.3] - 2026-06-06
+
+### Added
+- Parameter descriptions on all `smart_fetch` inputs (via `Annotated` + `Field`). Agents now see what `offset`, `cache_ttl`, `force_fetcher`, etc. do before calling.
+- Tool description now mentions chunking (`is_truncated=True` means call again with `offset`) and caching (`cache_ttl=0` to force fresh).
+
+## [2.9.2] - 2026-06-06
+
+### Fixed
+- **Double-chunking bug**: `bulk_get`, `bulk_fetch`, `bulk_stealthy_fetch` applied `_apply_chunking` before `_finalize_result` applied it again. Truncation messages got baked into cached content, and offset continuation returned the truncation message instead of actual content. Now chunking only happens once, in `_finalize_result` (and the direct cache-hit/robots paths).
+
+## [2.9.1] - 2026-06-06
+
+### Added
+- MCP `ToolAnnotations` on all 8 tools: `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. Agents can now determine whether a tool is safe to parallelize, retry, or cache without trial and error. ([Idea from this Reddit post](https://www.reddit.com/r/mcp/comments/1tyh7dp/mcp_needs_better_tool_metadata/))
+
+### Removed
+- `hound install` command. Use `playwright install chromium` directly. One less custom command to maintain.
+
+## [2.9.0] - 2026-06-06
+
+### Fixed
+- **MCP server now starts in <3s instead of 5-10s.** Scrapling/playwright imports deferred to first tool call. Before: OpenCode and other clients timed out waiting for `initialize` response (default 5s timeout). Now: server responds instantly, heavy deps load on first `smart_fetch`/`smart_search` call.
+- `serverInfo.version` in MCP handshake now shows Hound version (e.g. `2.9.0`) instead of MCP SDK version (`1.27.0`)
+- `NameError: name 'sys' is not defined` in `smart_fetch` and `open_session` — missing import in lazy loader
+
+### Changed
+- Install flow: `pip install hound-mcp[all]` then `hound install` (Chromium setup). No more chicken-and-egg where `hound install` can't run before pip.
+- `hound -v` output simplified: `Hound v2.9.0 (latest)` or `Hound v2.9.0. v3.0.0 available. Run hound -u to update.` No PyPI jargon.
+- `hound install` no longer re-runs pip (just Chromium setup). Shows `(already installed)` when re-run.
+- Agent prompts in README: correct POV ("Tell the user to restart this agent", not "Restart your agent"), no client-specific config examples, no fetch-only option.
+- Removed broken fetch-only install path. One product: fetch + search.
+- OpenCode MCP config format: `type: "local"`, `command: ["hound"]`, `environment: { ... }` (not `env`).
+
+### Added
+- `__main__.py`: `python -m master_fetch` works as MCP server
+- `__version__` in `__init__.py` as single source of truth
+- `list_sessions` in README tools table
+
 ## [2.8.0] - 2026-06-06
 
 ### Removed
