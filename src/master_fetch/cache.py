@@ -4,6 +4,7 @@ Stores fetched content keyed by URL+params hash. Auto-expires entries past TTL.
 Uses a shared DB connection pool for efficiency instead of opening a new
 connection per operation.
 """
+import asyncio
 import hashlib
 import json
 import time
@@ -19,6 +20,7 @@ DEFAULT_TTL = 3600  # 1 hour
 
 # Shared DB path cache — avoids re-running PRAGMA on every operation
 _db_initialized: dict[Path, bool] = {}
+_db_init_lock = asyncio.Lock()
 
 
 def _cache_key(url: str, extraction_type: str, css_selector: str | None = None) -> str:
@@ -33,35 +35,42 @@ async def _ensure_db(cache_dir: Path | None = None) -> Path:
     Caches initialization status to avoid redundant PRAGMA calls.
     WAL journal mode for better concurrent read/write performance.
     Busy timeout to handle lock contention gracefully.
+    Lock-protected to prevent races during concurrent first-access.
     """
     d = cache_dir or _CACHE_DIR
     d.mkdir(parents=True, exist_ok=True)
     db_path = d / _DB_NAME
 
+    # Fast path: already initialized, no lock needed
     if _db_initialized.get(db_path):
         return db_path
 
-    async with aiosqlite.connect(db_path) as db:
-        # WAL mode: readers don't block writers, writers don't block readers.
-        await db.execute("PRAGMA journal_mode=WAL")
-        # Wait up to 5s if DB is locked by another connection.
-        await db.execute("PRAGMA busy_timeout=5000")
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS cache (
-                key TEXT PRIMARY KEY,
-                url TEXT NOT NULL,
-                extraction_type TEXT NOT NULL,
-                content TEXT NOT NULL,
-                status INTEGER NOT NULL,
-                fetched_at REAL NOT NULL,
-                ttl INTEGER NOT NULL DEFAULT 3600
-            )
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_fetched_at ON cache(fetched_at)")
-        await db.commit()
+    async with _db_init_lock:
+        # Re-check after acquiring lock (another task may have initialized)
+        if _db_initialized.get(db_path):
+            return db_path
 
-    _db_initialized[db_path] = True
-    return db_path
+        async with aiosqlite.connect(db_path) as db:
+            # WAL mode: readers don't block writers, writers don't block readers.
+            await db.execute("PRAGMA journal_mode=WAL")
+            # Wait up to 5s if DB is locked by another connection.
+            await db.execute("PRAGMA busy_timeout=5000")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS cache (
+                    key TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    extraction_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status INTEGER NOT NULL,
+                    fetched_at REAL NOT NULL,
+                    ttl INTEGER NOT NULL DEFAULT 3600
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_fetched_at ON cache(fetched_at)")
+            await db.commit()
+
+        _db_initialized[db_path] = True
+        return db_path
 
 
 async def get_cached(

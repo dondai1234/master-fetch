@@ -16,7 +16,7 @@ import json
 import logging
 import sys
 from uuid import uuid4
-from asyncio import gather, Lock, sleep as asyncio_sleep
+from asyncio import gather, Lock, sleep as asyncio_sleep, to_thread as asyncio_to_thread
 from datetime import datetime, timezone
 from time import time as now
 from dataclasses import dataclass, field
@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
 
 from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
-from master_fetch.domain_intel import get_domain_level, record_result, guess_protection_level
+from master_fetch.domain_intel import get_domain_level, record_result
 from master_fetch.trafilatura_extractor import extract_with_trafilatura
 from master_fetch.robots import is_allowed, clear_robots_cache
 from master_fetch.search import SearchResponseModel
@@ -96,6 +96,7 @@ ScreenshotType = Literal["png", "jpeg"]
 
 MAX_CONTENT_CHARS = 40000
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50MB hard cap for response bodies
+MAX_BULK_URLS = 100  # hard cap to prevent DoS via unbounded parallel requests
 
 
 class ResponseModel(BaseModel):
@@ -881,6 +882,8 @@ class MasterFetchServer:
         """
         # Validate all URLs
         urls = [validate_url(u) for u in urls]
+        if len(urls) > MAX_BULK_URLS:
+            raise ValueError(f"Too many URLs ({len(urls)}). Maximum is {MAX_BULK_URLS} per call.")
         validate_css_selector(css_selector)
         validate_proxy(proxy)
 
@@ -1047,6 +1050,8 @@ class MasterFetchServer:
         :param max_content_chars: Max chars per result before truncation (default 40000).
         """
         urls = [validate_url(u) for u in urls]
+        if len(urls) > MAX_BULK_URLS:
+            raise ValueError(f"Too many URLs ({len(urls)}). Maximum is {MAX_BULK_URLS} per call.")
         validate_css_selector(css_selector)
         validate_headers(extra_headers)
         validate_proxy(proxy)
@@ -1257,6 +1262,8 @@ class MasterFetchServer:
         :param max_content_chars: Max chars per result before truncation (default 40000).
         """
         urls = [validate_url(u) for u in urls]
+        if len(urls) > MAX_BULK_URLS:
+            raise ValueError(f"Too many URLs ({len(urls)}). Maximum is {MAX_BULK_URLS} per call.")
         validate_css_selector(css_selector)
         validate_headers(extra_headers)
         validate_proxy(proxy)
@@ -1490,8 +1497,8 @@ class MasterFetchServer:
         useragent, cookies,
     ) -> BulkResponseModel:
         """Fetch multiple URLs in parallel through the smart fetch pipeline."""
-        if len(urls) > 50:
-            urls = urls[:50]
+        if len(urls) > MAX_BULK_URLS:
+            urls = urls[:MAX_BULK_URLS]
 
         async def _fetch_one(u: str) -> ResponseModel:
             try:
@@ -1792,7 +1799,7 @@ class MasterFetchServer:
         Returns installed version, latest PyPI version, and whether Hound is up to date.
         Call this to check if you should tell the user to run: hound -u
         """
-        installed, latest, is_current = _check_version()
+        installed, latest, is_current = await asyncio_to_thread(_check_version)
         # up_to_date: True if at or ahead of PyPI (no update needed)
         up_to_date = is_current if is_current is not None else True
         if not up_to_date and latest:

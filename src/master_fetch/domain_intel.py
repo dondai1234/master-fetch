@@ -3,7 +3,7 @@
 Stores per-domain protection level so smart_fetch can auto-escalate.
 Levels: "none" (plain HTTP works), "low" (dynamic needed), "high" (stealthy needed).
 """
-import json
+import asyncio
 import time
 from pathlib import Path
 
@@ -14,6 +14,7 @@ _DB_NAME = "domains.db"
 
 # Shared DB path cache — avoids re-running PRAGMA on every operation
 _db_initialized: dict[Path, bool] = {}
+_db_init_lock = asyncio.Lock()
 
 PROTECTION_LEVELS = ("none", "low", "high")
 # Domains known to be static (HTTP works fine). Prevents over-escalation.
@@ -84,27 +85,33 @@ async def _ensure_db() -> Path:
     d.mkdir(parents=True, exist_ok=True)
     db_path = d / _DB_NAME
 
+    # Fast path: already initialized, no lock needed
     if _db_initialized.get(db_path):
         return db_path
 
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=5000")
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS domain_intel (
-                domain TEXT PRIMARY KEY,
-                protection_level TEXT NOT NULL DEFAULT 'none',
-                avg_response_ms REAL,
-                hit_count INTEGER NOT NULL DEFAULT 0,
-                fail_count INTEGER NOT NULL DEFAULT 0,
-                last_seen REAL NOT NULL
-            )
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_domain_last_seen ON domain_intel(last_seen)")
-        await db.commit()
+    async with _db_init_lock:
+        # Re-check after acquiring lock (another task may have initialized)
+        if _db_initialized.get(db_path):
+            return db_path
 
-    _db_initialized[db_path] = True
-    return db_path
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA busy_timeout=5000")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS domain_intel (
+                    domain TEXT PRIMARY KEY,
+                    protection_level TEXT NOT NULL DEFAULT 'none',
+                    avg_response_ms REAL,
+                    hit_count INTEGER NOT NULL DEFAULT 0,
+                    fail_count INTEGER NOT NULL DEFAULT 0,
+                    last_seen REAL NOT NULL
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_domain_last_seen ON domain_intel(last_seen)")
+            await db.commit()
+
+        _db_initialized[db_path] = True
+        return db_path
 
 
 def guess_protection_level(url: str) -> str:

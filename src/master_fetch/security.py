@@ -61,6 +61,72 @@ class SecurityError(ValueError):
     pass
 
 
+def _normalize_ip_notation(host: str) -> str | None:
+    """Resolve alternate IP notations that curl/libcurl would resolve.
+
+    curl_cffi uses libcurl, which accepts many IP address formats that
+    Python's ipaddress module rejects. This normalizes them so we can
+    check against private network ranges.
+
+    Handles:
+    - Octal notation: 0177.0.0.1 → 127.0.0.1
+    - Hex notation: 0x7f000001 → 127.0.0.1, 0x7f.1 → 127.0.0.1
+    - Decimal integer: 2130706433 → 127.0.0.1
+    - Short-form: 127.1 → 127.0.0.1
+
+    Returns dotted-decimal string like '127.0.0.1' or None.
+    """
+    cleaned = host.strip('[]')
+
+    # Case: pure decimal integer (2130706433) or packed octal (017700000001)
+    if cleaned.isdigit():
+        try:
+            # Leading zero → curl treats as octal: 017700000001 → 127.0.0.1
+            if len(cleaned) > 1 and cleaned[0] == '0' and all(c in '01234567' for c in cleaned):
+                val = int(cleaned, 8)
+            else:
+                val = int(cleaned)
+            if val <= 0xFFFFFFFF:
+                return f"{(val >> 24) & 0xFF}.{(val >> 16) & 0xFF}.{(val >> 8) & 0xFF}.{val & 0xFF}"
+        except (ValueError, OverflowError):
+            pass
+        return None
+
+    # Case: dotted notation (127.0.0.1, 0177.0.0.1, 0x7f.1, 127.1)
+    parts = cleaned.split('.')
+    if not (1 <= len(parts) <= 4):
+        return None
+
+    try:
+        resolved = []
+        for p in parts:
+            if not p:
+                return None
+            # Leading zero → octal (curl behavior): '0177' → 127
+            if len(p) > 1 and p[0] == '0' and all(c in '01234567' for c in p):
+                resolved.append(int(p, 8))
+            # Hex prefix: '0x7f' → 127
+            elif p.lower().startswith('0x'):
+                resolved.append(int(p, 0))
+            else:
+                resolved.append(int(p))
+
+        # Expand short-form to 4 octets (curl/inet_aton behavior).
+        # 2-part: a.b → a.0.0.b
+        # 3-part: a.b.c → a.b.0.c
+        # 4-part: a.b.c.d → a.b.c.d (no expansion needed)
+        if len(resolved) == 2:
+            resolved = [resolved[0], 0, 0, resolved[1]]
+        elif len(resolved) == 3:
+            resolved = [resolved[0], resolved[1], 0, resolved[2]]
+
+        if any(o < 0 or o > 255 for o in resolved):
+            return None
+        return '.'.join(str(o) for o in resolved)
+    except (ValueError, OverflowError):
+        return None
+
+
 def validate_url(url: str, allow_internal: bool = False) -> str:
     """Validate and sanitize a URL. Returns the validated URL.
 
@@ -140,12 +206,27 @@ def validate_url(url: str, allow_internal: bool = False) -> str:
 
     # Check for internal IPs (only if hostname is an IP)
     if not allow_internal:
+        addr = None
         is_ip = False
         try:
             addr = ipaddress.ip_address(hostname)
             is_ip = True
         except ValueError:
-            pass  # Not an IP address — check hostname blocklist below
+            pass  # Not a standard IP — try alternate notations below
+
+        # Handle alternate IP notations that ipaddress rejects but curl resolves
+        # (octal, hex, decimal integer, short-form). This is critical: Python's
+        # ipaddress module rejects leading zeros (CVE-2021-29921), but curl_cffi
+        # (libcurl) resolves them. An attacker could use http://0177.0.0.1 to
+        # bypass SSRF protection and reach the loopback interface.
+        if not is_ip:
+            normalized = _normalize_ip_notation(hostname)
+            if normalized is not None:
+                try:
+                    addr = ipaddress.ip_address(normalized)
+                    is_ip = True
+                except ValueError:
+                    pass  # Not resolvable to a valid IP after normalization
 
         if is_ip:
             # Check IPv4-mapped IPv6: extract the mapped IPv4 and re-check it
@@ -195,6 +276,9 @@ def validate_css_selector(selector: Optional[str]) -> Optional[str]:
         raise SecurityError("CSS selector must be a string or None")
 
     selector = selector.strip()
+
+    if not selector:
+        return None  # Empty/whitespace-only selectors have no effect
 
     if len(selector) > MAX_CSS_SELECTOR_LENGTH:
         raise SecurityError(
@@ -370,12 +454,26 @@ def validate_search_query(query: str) -> str:
 
 
 def redact_api_key(text: str) -> str:
-    """Redact API keys from error messages/logs.
+    """Redact API keys and proxy credentials from error messages/logs.
 
-    Detects TinyFish API key format and replaces with [REDACTED].
+    Detects TinyFish API key format, generic API key patterns,
+    and proxy URLs with embedded credentials.
     """
     # TinyFish keys: sk-tinyfish- followed by alphanumeric
     text = re.sub(r'sk-tinyfish-[a-zA-Z0-9]+', 'sk-tinyfish-[REDACTED]', text)
     # Generic key patterns (sk-, pk-, api_)
     text = re.sub(r'(?:sk|pk|api_key)[-_][a-zA-Z0-9]{20,}', '[API_KEY_REDACTED]', text)
+    # Proxy URLs with embedded credentials: http://user:pass@host
+    # Catches the full credential portion before @
+    text = re.sub(
+        r'(https?://)[^:@\s]+:[^@\s]+@',
+        r'\1[CREDENTIALS_REDACTED]@',
+        text,
+    )
+    # socks5://user:pass@host
+    text = re.sub(
+        r'(socks5h?://)[^:@\s]+:[^@\s]+@',
+        r'\1[CREDENTIALS_REDACTED]@',
+        text,
+    )
     return text
