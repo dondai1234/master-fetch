@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.2.0] - 2026-06-07
+
+### Fixed
+- **Double-chunking regression**: `bulk_get`, `bulk_fetch`, `bulk_stealthy_fetch` were applying `_apply_chunking` internally, then `_finalize_result` chunked again. Result: 148KB JSON appeared as 40KB because chunking ran twice. Removed chunking from bulk methods — only `_finalize_result` (single-URL path) and `_smart_fetch_bulk` (bulk path) apply chunking once.
+- **Cache now stores unchunked content**: Since bulk methods no longer chunk, cache stores full extracted content. Offset-based pagination now works correctly — the second call with `offset=40000` gets the correct remaining content instead of the first chunk again.
+
 ## [3.1.0] - 2026-06-07
 
 ### Changed

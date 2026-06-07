@@ -867,7 +867,6 @@ class MasterFetchServer:
         verify: Optional[bool] = True,
         http3: Optional[bool] = False,
         stealthy_headers: Optional[bool] = True,
-        max_content_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Async parallel GET requests with browser fingerprint impersonation.
         Fast, but only works for low-protection sites.
@@ -892,7 +891,6 @@ class MasterFetchServer:
         :param verify: Verify HTTPS certificates (default True).
         :param http3: Use HTTP/3 (default False).
         :param stealthy_headers: Generate real browser headers (default True).
-        :param max_content_chars: Max chars per result before truncation (default 40000).
         """
         # Validate all URLs
         urls = [validate_url(u) for u in urls]
@@ -928,13 +926,11 @@ class MasterFetchServer:
                     ))
                 else:
                     page, elapsed = resp
-                    results.append(_apply_chunking(
-                        _annotate_quality(
+                    results.append(_annotate_quality(
                             _translate_response(
                                 page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
                             )
-                        ), max_chars=max_content_chars
-                    ))
+                        ))
             successful = sum(1 for r in results if r.status < 400 and not r.error)
             return BulkResponseModel(results=results, total=len(results), successful=successful)
 
@@ -1035,7 +1031,6 @@ class MasterFetchServer:
         network_idle: bool = False,
         wait_selector_state: SelectorWaitStates = "attached",
         session_id: Optional[str] = None,
-        max_content_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Async parallel dynamic fetch via Playwright. Handles JS-rendered pages.
 
@@ -1061,7 +1056,6 @@ class MasterFetchServer:
         :param network_idle: Wait for no network connections for 500ms.
         :param wait_selector_state: Selector wait state.
         :param session_id: Reuse existing browser session.
-        :param max_content_chars: Max chars per result before truncation (default 40000).
         """
         urls = [validate_url(u) for u in urls]
         if len(urls) > MAX_BULK_URLS:
@@ -1110,13 +1104,11 @@ class MasterFetchServer:
                 ))
             else:
                 page, elapsed = resp
-                results.append(_apply_chunking(
-                    _annotate_quality(
+                results.append(_annotate_quality(
                         _translate_response(
                             page, extraction_type, css_selector, main_content_only, use_tf, "dynamic", elapsed,
                         )
-                    ), max_chars=max_content_chars
-                ))
+                    ))
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
@@ -1243,7 +1235,6 @@ class MasterFetchServer:
         solve_cloudflare: bool = False,
         additional_args: Optional[Dict] = None,
         session_id: Optional[str] = None,
-        max_content_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Async parallel stealthy fetch with browser fingerprint randomization.
 
@@ -1273,7 +1264,6 @@ class MasterFetchServer:
         :param wait_selector_state: Selector wait state.
         :param additional_args: Extra Playwright context args.
         :param session_id: Reuse existing browser session.
-        :param max_content_chars: Max chars per result before truncation (default 40000).
         """
         urls = [validate_url(u) for u in urls]
         if len(urls) > MAX_BULK_URLS:
@@ -1324,13 +1314,11 @@ class MasterFetchServer:
                 ))
             else:
                 page, elapsed = resp
-                results.append(_apply_chunking(
-                    _annotate_quality(
+                results.append(_annotate_quality(
                         _translate_response(
                             page, extraction_type, css_selector, main_content_only, use_tf, "stealthy", elapsed,
                         )
-                    ), max_chars=max_content_chars
-                ))
+                    ))
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
