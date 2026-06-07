@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.3.0] - 2026-06-07
+
+### Added
+- **Idle timeout for auto browser sessions**: Browser processes now close after 30 minutes of inactivity instead of running forever. Frees ~200-300MB RAM per session. Reopens on next fetch (one-time 5s penalty). `AUTO_SESSION_IDLE_TIMEOUT = 1800`, `IDLE_CHECK_INTERVAL = 60`.
+- **Session consolidation**: When the stealthy (Patchright) auto session is already alive, dynamic-tier requests use it instead of spawning a separate Playwright browser. Patchright is a Playwright fork and handles everything Playwright does. Cuts idle RAM from ~400-600MB (2 browsers) to ~200-300MB (1 browser).
+
+### Fixed
+- **TOCTOU race in session consolidation**: `_acquire_stealthy_session()` atomically checks session liveness, bumps `last_used` timestamp, and returns session ID under the sessions lock. Prevents idle monitor from closing a session between check and use.
+- **Idle monitor race condition**: All reads of `_auto_*_id` and `_auto_*_last_used` now happen inside the sessions lock. Prevents stale timestamp reads that could kill a session that was just used.
+- **Domain intel corruption from consolidation**: When dynamic tier is skipped due to stealthy consolidation, `record_result` now records the domain's actual level ("low"), not the fetcher used ("high"). Prevents false promotion that would skip dynamic on future fetches.
+- **Orphaned sessions on close failure**: When `close_session()` fails internally during idle cleanup, the session is still removed from the sessions dict and marked as not alive. No ghost sessions leaking memory.
+- **Idle monitor silent death**: Added `try/except` around monitor loop body. `CancelledError` re-raised for proper asyncio cleanup. Other exceptions logged and loop continues on next cycle.
+- **Monitor restart on session reuse**: `_ensure_idle_monitor()` now called on all return paths of `_ensure_auto_session()` (not just new session creation).
+
 ## [3.2.0] - 2026-06-07
 
 ### Fixed

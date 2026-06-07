@@ -16,6 +16,7 @@ import json
 import logging
 import sys
 from uuid import uuid4
+import asyncio
 from asyncio import gather, Lock, sleep as asyncio_sleep, to_thread as asyncio_to_thread
 from datetime import datetime, timezone
 from time import time as now
@@ -98,6 +99,8 @@ MAX_CONTENT_CHARS = 40000
 MIN_CHUNK_CHARS = 500  # if remaining < this, merge into current chunk (avoids wasteful round-trips)
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50MB hard cap for response bodies
 MAX_BULK_URLS = 100  # hard cap to prevent DoS via unbounded parallel requests
+AUTO_SESSION_IDLE_TIMEOUT = 1800  # Close auto browser sessions after 30 min idle (seconds)
+IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 
 
 class ResponseModel(BaseModel):
@@ -469,6 +472,9 @@ class MasterFetchServer:
         self._use_trafilatura = use_trafilatura
         self._auto_dynamic_id: Optional[str] = None
         self._auto_stealthy_id: Optional[str] = None
+        self._auto_dynamic_last_used: float = 0  # timestamp of last auto dynamic session use
+        self._auto_stealthy_last_used: float = 0  # timestamp of last auto stealthy session use
+        self._idle_monitor_task: Optional[Any] = None  # asyncio.Task for idle session cleanup
 
     # ─── Core helpers ─────────────────────────────────────────────
 
@@ -502,11 +508,18 @@ class MasterFetchServer:
 
         Race-safe: if two concurrent calls both pass the initial check,
         the second one closes its orphaned session and reuses the first.
+
+        Idle timeout: auto sessions close after AUTO_SESSION_IDLE_TIMEOUT (30 min)
+        of inactivity. Reopened on next fetch (one-time startup penalty).
         """
         attr = "_auto_dynamic_id" if session_type == "dynamic" else "_auto_stealthy_id"
+        ts_attr = "_auto_dynamic_last_used" if session_type == "dynamic" else "_auto_stealthy_last_used"
         async with self._sessions_lock:
             existing_id = getattr(self, attr)
             if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
+                setattr(self, ts_attr, now())
+                # Ensure monitor is alive (may have crashed since last check)
+                self._ensure_idle_monitor()
                 return existing_id
 
         # Create session outside lock (expensive — browser launch)
@@ -521,9 +534,101 @@ class MasterFetchServer:
                     await self.close_session(sid.session_id)
                 except Exception:
                     pass  # Best effort cleanup
+                setattr(self, ts_attr, now())
+                self._ensure_idle_monitor()
                 return existing_id
             setattr(self, attr, sid.session_id)
+            setattr(self, ts_attr, now())
+
+        # Start idle monitor if not running
+        self._ensure_idle_monitor()
+
         return sid.session_id
+
+    def _stealthy_auto_alive(self) -> bool:
+        """Check if the auto stealthy session is alive (Patchright browser running).
+
+        INFORMATIONAL ONLY. Does not acquire the sessions lock, so the result may
+        be stale by the time the caller acts on it. Safe for tier-skip decisions
+        (Phase C unknown domain), but NOT safe for reading the session ID directly.
+        For atomic check-and-use, see _acquire_stealthy_session().
+        """
+        sid = self._auto_stealthy_id
+        return bool(sid and sid in self._sessions and self._sessions[sid]._alive)
+
+    async def _acquire_stealthy_session(self) -> Optional[str]:
+        """Atomically check if the auto stealthy session is alive, bump its
+        last-used timestamp, and return its session ID.
+
+        Returns None if not alive. Uses sessions_lock to prevent TOCTOU races
+        with the idle monitor and other concurrent callers.
+        """
+        async with self._sessions_lock:
+            sid = self._auto_stealthy_id
+            if sid and sid in self._sessions and self._sessions[sid]._alive:
+                self._auto_stealthy_last_used = now()
+                return sid
+        return None
+
+    async def _start_idle_monitor(self) -> None:
+        """Background task: close auto browser sessions after AUTO_SESSION_IDLE_TIMEOUT
+        of inactivity.
+
+        All reads of _auto_*_id and _auto_*_last_used happen inside the sessions lock
+        to prevent races with _ensure_auto_session and _acquire_stealthy_session.
+        Session closing happens outside the lock to avoid blocking other operations.
+        """
+        while True:
+            await asyncio_sleep(IDLE_CHECK_INTERVAL)
+            try:
+                now_ts = now()
+                async with self._sessions_lock:
+                    # Check dynamic auto session (all reads under lock)
+                    if self._auto_dynamic_id and now_ts - self._auto_dynamic_last_used > AUTO_SESSION_IDLE_TIMEOUT:
+                        close_dynamic = self._auto_dynamic_id
+                        self._auto_dynamic_id = None
+                    else:
+                        close_dynamic = None
+                    # Check stealthy auto session (all reads under lock)
+                    if self._auto_stealthy_id and now_ts - self._auto_stealthy_last_used > AUTO_SESSION_IDLE_TIMEOUT:
+                        close_stealthy = self._auto_stealthy_id
+                        self._auto_stealthy_id = None
+                    else:
+                        close_stealthy = None
+                # Close sessions outside the lock to avoid blocking
+                if close_dynamic:
+                    try:
+                        await self.close_session(close_dynamic)
+                    except Exception as e:
+                        logger.warning(f"Idle monitor failed to close dynamic session {close_dynamic}: {e}")
+                        # Pop from sessions dict even if close() failed — don't orphan
+                        async with self._sessions_lock:
+                            entry = self._sessions.pop(close_dynamic, None)
+                            if entry:
+                                entry._alive = False
+                if close_stealthy:
+                    try:
+                        await self.close_session(close_stealthy)
+                    except Exception as e:
+                        logger.warning(f"Idle monitor failed to close stealthy session {close_stealthy}: {e}")
+                        # Pop from sessions dict even if close() failed — don't orphan
+                        async with self._sessions_lock:
+                            entry = self._sessions.pop(close_stealthy, None)
+                            if entry:
+                                entry._alive = False
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Idle monitor check failed, will retry on next cycle")
+
+    def _ensure_idle_monitor(self) -> None:
+        """Start the idle monitor background task if not already running.
+
+        Idempotent: safe to call from any code path (session creation, reuse, etc.).
+        If the monitor task crashed, the next call restarts it.
+        """
+        if self._idle_monitor_task is None or self._idle_monitor_task.done():
+            self._idle_monitor_task = asyncio.create_task(self._start_idle_monitor())
 
     async def _finalize_result(
         self,
@@ -1556,6 +1661,26 @@ class MasterFetchServer:
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
 
         elif force_fetcher == "dynamic":
+            # If stealthy is already alive, use it instead — Patchright handles
+            # everything Playwright does. _acquire_stealthy_session atomically
+            # checks, bumps the timestamp, and returns the session ID.
+            ssid = await self._acquire_stealthy_session()
+            if ssid:
+                result = await self.stealthy_fetch(
+                    url, extraction_type=extraction_type, css_selector=css_selector,
+                    main_content_only=main_content_only, use_trafilatura=use_trafilatura,
+                    headless=headless, real_chrome=real_chrome, wait=wait,
+                    proxy=proxy, timeout=timeout, network_idle=network_idle,
+                    disable_resources=True,
+                    solve_cloudflare=solve_cloudflare, block_webrtc=block_webrtc,
+                    hide_canvas=hide_canvas, extra_headers=extra_headers,
+                    useragent=useragent, cookies=cookies,
+                    session_id=ssid,
+                )
+                result.escalation_path = "direct:stealthy(consolidated)"
+                # force_fetcher overrides auto-escalation; record what was used
+                await record_result(url, "high", result.status < 400, result.duration_ms)
+                return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
             dsid = await self._ensure_auto_session("dynamic")
             result = await self.fetch(
                 url, extraction_type=extraction_type, css_selector=css_selector,
@@ -1621,6 +1746,31 @@ class MasterFetchServer:
 
         # Phase B: Domain needs dynamic. Try dynamic, escalate to stealthy if blocked.
         if domain_level == "low":
+            # If stealthy already alive, skip dynamic — Patchright handles everything
+            # Playwright does. _acquire_stealthy_session atomically checks, bumps
+            # timestamp, and returns the session ID (no TOCTOU).
+            ssid = await self._acquire_stealthy_session()
+            if ssid:
+                result = await self.stealthy_fetch(
+                    url, extraction_type=extraction_type,
+                    css_selector=css_selector, main_content_only=main_content_only,
+                    use_trafilatura=use_trafilatura, headless=headless,
+                    real_chrome=real_chrome, wait=wait, proxy=proxy,
+                    timeout=timeout, network_idle=network_idle,
+                    disable_resources=True,
+                    solve_cloudflare=solve_cloudflare, block_webrtc=block_webrtc,
+                    hide_canvas=hide_canvas, extra_headers=extra_headers,
+                    useragent=useragent, cookies=cookies,
+                    session_id=ssid,
+                )
+                result.escalation_path = "stealthy(auto,consolidated)"
+                elapsed = (now() - start_time) * 1000
+                result.duration_ms = elapsed
+                # Record "low" — skipped dynamic for resource consolidation,
+                # not because it failed. The domain still belongs at "low".
+                await record_result(url, "low", result.status < 400, elapsed)
+                return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+
             remaining = max(timeout - int((now() - start_time) * 1000), 5000)
             dsid = await self._ensure_auto_session("dynamic")
             result = await self.fetch(
@@ -1708,31 +1858,34 @@ class MasterFetchServer:
             result.duration_ms = elapsed
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
 
-        # Tier 2: Dynamic
+        # Tier 2: Dynamic (skip if stealthy already alive — Patchright handles everything Playwright does)
         errors.append(f"HTTP failed (status {result.status})")
         remaining = max(timeout - int((now() - start_time) * 1000), 5000)
-        dsid = await self._ensure_auto_session("dynamic")
-        result = await self.fetch(
-            url, extraction_type=extraction_type,
-            css_selector=css_selector, main_content_only=main_content_only,
-            use_trafilatura=use_trafilatura, headless=headless,
-            real_chrome=real_chrome, wait=wait, proxy=proxy,
-            timeout=remaining, network_idle=network_idle,
-            disable_resources=True,
-            extra_headers=extra_headers, useragent=useragent, cookies=cookies,
-            session_id=dsid,
-        )
-        elapsed = (now() - start_time) * 1000
-        result.duration_ms = elapsed
+        _skipped_dynamic = self._stealthy_auto_alive()
+        if not _skipped_dynamic:
+            dsid = await self._ensure_auto_session("dynamic")
+            result = await self.fetch(
+                url, extraction_type=extraction_type,
+                css_selector=css_selector, main_content_only=main_content_only,
+                use_trafilatura=use_trafilatura, headless=headless,
+                real_chrome=real_chrome, wait=wait, proxy=proxy,
+                timeout=remaining, network_idle=network_idle,
+                disable_resources=True,
+                extra_headers=extra_headers, useragent=useragent, cookies=cookies,
+                session_id=dsid,
+            )
+            elapsed = (now() - start_time) * 1000
+            result.duration_ms = elapsed
 
-        if result.status < 400 and not _is_js_shell(result):
-            result.escalation_path = "http→dynamic"
-            await record_result(url, "low", True, elapsed)
-            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+            if result.status < 400 and not _is_js_shell(result):
+                result.escalation_path = "http→dynamic"
+                await record_result(url, "low", True, elapsed)
+                return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+
+            errors.append(f"Dynamic failed (status {result.status})")
+            remaining = max(timeout - int((now() - start_time) * 1000), 5000)
 
         # Tier 3: Stealthy
-        errors.append(f"Dynamic failed (status {result.status})")
-        remaining = max(timeout - int((now() - start_time) * 1000), 5000)
         ssid = await self._ensure_auto_session("stealthy")
         result = await self.stealthy_fetch(
             url, extraction_type=extraction_type,
@@ -1751,15 +1904,22 @@ class MasterFetchServer:
 
         if result.status < 400 and not _is_js_shell(result):
             # Stealthy is the last tier. If it returns 200 with real content, accept it.
-            result.escalation_path = "http→dynamic→stealthy"
-            await record_result(url, "high", True, elapsed)
+            if _skipped_dynamic:
+                result.escalation_path = "http→stealthy(auto,consolidated)"
+                # Record "low" — skipped dynamic for resource consolidation,
+                # not failure. Let next auto-escalation try dynamic first.
+                await record_result(url, "low", True, elapsed)
+            else:
+                result.escalation_path = "http→dynamic→stealthy"
+                await record_result(url, "high", True, elapsed)
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
 
-        # All three tiers failed
+        # All tiers failed
         errors.append(f"Stealthy failed (status {result.status})")
+        _tiers = "HTTP → Stealthy (dynamic skipped)" if _skipped_dynamic else "HTTP → Dynamic → Stealthy"
         result.content = [
-            f"[All three fetch tiers failed for {url}]\n"
-            f"Attempted: HTTP (curl_cffi) → Dynamic (Playwright) → Stealthy (Cloudflare bypass)\n"
+            f"[All fetch tiers failed for {url}]\n"
+            f"Attempted: {_tiers}\n"
             f"Failures: {'; '.join(errors)}\n"
             f"Final status: {result.status}\n"
             f"\n"
@@ -1769,8 +1929,8 @@ class MasterFetchServer:
             f"- Set solve_cloudflare=True (already tried).\n"
             f"- Try with a proxy via the proxy parameter."
         ]
-        result.escalation_path = "http→dynamic→stealthy(all_failed)"
-        result.retry_count = 3
+        result.escalation_path = "http→stealthy(all_failed)" if _skipped_dynamic else "http→dynamic→stealthy(all_failed)"
+        result.retry_count = 2 if _skipped_dynamic else 3
         await record_result(url, "high", False, elapsed)
         result.duration_ms = elapsed
         result.error = f"all_tiers_failed: HTTP status {result.status}"

@@ -157,7 +157,7 @@ def test_version_tool():
             print(f"  ⚠️  Could not parse version response")
             return
 
-        assert data.get("version") == "3.1.0", f"Version mismatch: {data.get('version')}"
+        assert data.get("version") == "3.3.0", f"Version mismatch: {data.get('version')}"
         print(f"  ✅ version={data['version']}, up_to_date={data.get('up_to_date')}")
         print(f"  ✅ Version call took {elapsed:.1f}s (should not block event loop)")
 
@@ -218,7 +218,7 @@ def test_bulk_url_limit():
 
 
 if __name__ == "__main__":
-    print("End-to-end MCP protocol tests for Hound v3.1.0\n")
+    print("End-to-end MCP protocol tests for Hound v3.3.0\n")
 
     print("1. Tool definitions (meta-awareness)")
     test_tool_definitions()
