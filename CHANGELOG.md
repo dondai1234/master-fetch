@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.4.1] - 2026-06-08
+
+### Fixed
+- **Removed browser pre-warming (caused two-Chrome bug + slowness)**: Pre-warming created a stealthy session in the background on first smart_fetch call. This raced with Phase B: if Phase B started before pre-warming completed, it created a dynamic session, then pre-warming created a stealthy session — both lived indefinitely. Pre-warming also made stealthy always-alive, causing Phase B to always take the stealthy shortcut (slower than dynamic for simple JS rendering). Removed entirely.
+- **Dynamic session close is now non-blocking**: `_close_auto_dynamic_session()` was `await`-ed in the fetch path, blocking the actual fetch while Chrome shut down. Now fires as `asyncio.create_task()` — the close happens in background, the fetch proceeds immediately.
+
 ## [3.4.0] - 2026-06-08
 
 ### Fixed

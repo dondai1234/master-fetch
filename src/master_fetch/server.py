@@ -475,7 +475,6 @@ class MasterFetchServer:
         self._auto_dynamic_last_used: float = 0  # timestamp of last auto dynamic session use
         self._auto_stealthy_last_used: float = 0  # timestamp of last auto stealthy session use
         self._idle_monitor_task: Optional[Any] = None  # asyncio.Task for idle session cleanup
-        self._prewarm_triggered: bool = False  # pre-warm stealthy on first browser-using call
 
     # ─── Core helpers ─────────────────────────────────────────────
 
@@ -545,19 +544,6 @@ class MasterFetchServer:
         self._ensure_idle_monitor()
 
         return sid.session_id
-
-    async def _prewarm_stealthy(self) -> None:
-        """Pre-warm the stealthy browser in the background.
-
-        Launches Chrome before the first fetch call needs it, eliminating
-        the 3-5s cold-start penalty. Fire-and-forget — failures are silent
-        (the browser will just launch on first actual use).
-        """
-        try:
-            await self._ensure_auto_session("stealthy")
-            logger.debug("Stealthy browser pre-warmed successfully")
-        except Exception:
-            pass  # Will launch on first actual fetch
 
     async def _close_auto_dynamic_session(self) -> None:
         """Close the auto dynamic browser session if it exists.
@@ -1736,7 +1722,10 @@ class MasterFetchServer:
             ssid = await self._ensure_auto_session("stealthy")
             # Stealthy handles everything dynamic does — close the dynamic
             # auto session to free memory (~100-180MB of Chrome RAM).
-            await self._close_auto_dynamic_session()
+            # Stealthy handles everything dynamic does — close the dynamic
+            # auto session in background to free ~100-180MB RAM. Fire-and-forget
+            # so the fetch isn't blocked waiting for Chrome to shut down.
+            asyncio.create_task(self._close_auto_dynamic_session())
             result = await self.stealthy_fetch(
                 url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
@@ -1767,8 +1756,9 @@ class MasterFetchServer:
         if domain_level == "high":
             ssid = await self._ensure_auto_session("stealthy")
             # Stealthy handles everything dynamic does — close any leftover
-            # dynamic auto session to free memory (~100-180MB of Chrome RAM).
-            await self._close_auto_dynamic_session()
+            # dynamic auto session in background to free ~100-180MB RAM.
+            # Fire-and-forget so the fetch isn't blocked.
+            asyncio.create_task(self._close_auto_dynamic_session())
             result = await self.stealthy_fetch(
                 url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
@@ -1838,8 +1828,9 @@ class MasterFetchServer:
             remaining = max(timeout - int((now() - start_time) * 1000), 5000)
             ssid = await self._ensure_auto_session("stealthy")
             # Stealthy handles everything dynamic does — close the dynamic
-            # auto session to free memory (saves ~100-180MB of Chrome RAM).
-            await self._close_auto_dynamic_session()
+            # auto session in background to free ~100-180MB RAM.
+            # Fire-and-forget so the fetch isn't blocked.
+            asyncio.create_task(self._close_auto_dynamic_session())
             result = await self.stealthy_fetch(
                 url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
@@ -1918,8 +1909,9 @@ class MasterFetchServer:
         remaining = max(timeout - int((now() - start_time) * 1000), 5000)
         ssid = await self._ensure_auto_session("stealthy")
         # If a dynamic auto session exists from a prior call (e.g. Phase B),
-        # close it now — stealthy handles everything. Saves ~100-180MB RAM.
-        await self._close_auto_dynamic_session()
+        # close it in background — stealthy handles everything. Saves ~100-180MB RAM.
+        # Fire-and-forget so the fetch isn't blocked.
+        asyncio.create_task(self._close_auto_dynamic_session())
         result = await self.stealthy_fetch(
             url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,
@@ -2209,20 +2201,6 @@ class MasterFetchServer:
         - content_list for tools with mixed content (e.g. screenshot with ImageContent)
         """
         from mcp.types import TextContent, ImageContent
-
-        # Pre-warm stealthy browser on first browser-using tool call.
-        # Runs in background — browser is warm by the time a follow-up
-        # fetch or escalate starts (eliminates 3-5s cold-start penalty).
-        if not self._prewarm_triggered and name in (
-            "mcp_smart_fetch", "mcp_open_session", "mcp_screenshot"
-        ):
-            self._prewarm_triggered = True
-            try:
-                _get_scrapling()
-                import asyncio
-                asyncio.create_task(self._prewarm_stealthy())
-            except Exception:
-                pass  # Pre-warming is best-effort; fails silently
 
         options = args.get("options") or {}
 
