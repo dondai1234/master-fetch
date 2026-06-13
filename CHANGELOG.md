@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.5.2] - 2026-06-13
+
+### Fixed
+- **`force_fetcher` schema enum aligned with runtime**: removed `"dynamic"` from the `mcp_smart_fetch` input schema. The 3-tier path (HTTP -> dynamic -> stealthy) was dropped in v3.5.0; the schema was stale and accepted `force_fetcher="dynamic"` even though it silently rerouted to stealthy. Now only `http` and `stealthy` are valid for pinning the tier. `force_fetcher="stealthy"` and `force_fetcher="http"` continue to work as they always have.
+- **Schema/escalation string docs match runtime**: `mcp_smart_fetch` description rewritten to say "http -> stealthy (2 tiers)" instead of the stale "HTTP -> browser -> stealth". `escalation_path` field description updated to reflect the new path. The dynamic tier is still accepted by `mcp_open_session(session_type="dynamic")` for backward compatibility with manual session creation; only the auto-routing removed it.
+
+### Notes
+- No behavior change. Pure schema/docstring cleanup. Tests already use only the stealthy tier via auto-routing.
+
 ## [3.5.1] - 2026-06-08
 
 ### Added

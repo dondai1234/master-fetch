@@ -2,12 +2,15 @@
 
 Forks Scrapling's built-in MCP server and adds:
 - Trafilatura article extraction (cleaner than markdownify)
-- Smart fetch routing (auto-escalate HTTP -> Dynamic -> Stealthy)
+- Smart fetch routing (auto-escalate HTTP -> Stealthy). 2 tiers: HTTP first, then Patchright stealth browser.
 - SQLite content cache with TTL
-- Domain intelligence (remember which sites need stealth)
 - smart_fetch umbrella tool (single entry point that routes automatically)
 - extract_article and extract_structured modes
 - Input validation with SSRF protection
+
+Note: the dynamic (Playwright) browser tier was removed in v3.5.0. open_session
+still accepts session_type="dynamic" for backward compatibility with manual
+session creation, but smart_fetch auto-routing only uses http -> stealthy.
 """
 
 from __future__ import annotations
@@ -119,7 +122,7 @@ class ResponseModel(BaseModel):
     total_extracted_chars: int = Field(default=0, description="Total chars of extracted text (before chunking). Use to gauge how much remains: total_extracted_chars - offset")
     is_truncated: bool = Field(default=False, description="True=more extracted content. Use next_offset. Check total_extracted_chars to see how much remains.")
     next_offset: int = Field(default=0, description="Next offset when is_truncated. 0=no more")
-    escalation_path: str = Field(default="", description="e.g. http→dynamic→stealthy")
+    escalation_path: str = Field(default="", description="e.g. http→stealthy. Pre-v3.5 logs may contain http→dynamic→stealthy entries from the old 3-tier path.")
     retry_count: int = Field(default=0, description="Retries")
 
 
@@ -226,7 +229,8 @@ def _is_cloudflare_from_response(result: ResponseModel) -> bool:
 def _is_js_shell(result: ResponseModel) -> bool:
     """Check if a response contains only a JS-only placeholder, not real content.
 
-    Used by smart_fetch to decide whether to escalate from HTTP->dynamic or dynamic->stealthy.
+    Used by smart_fetch to decide whether to escalate from HTTP to stealthy.
+    Pre-v3.5 callers may have passed through dynamic as an intermediate step.
     """
     content_str = " ".join(result.content).lower().strip()
     if not content_str:
@@ -1930,7 +1934,7 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_fetch",
-            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto HTTP→browser→stealth escalation. Bulk: pass urls. Offset pages through EXTRACTED text (not raw HTML). If extraction produces 40KB from a 1MB page, offset can't reach beyond that 40KB. Use extraction_type=html for raw HTML. Cache: cache_ttl=0 bypasses cache. is_truncated=true + total_extracted_chars tells you exactly how much remains.",
+            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto http -> stealthy escalation (2 tiers: plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Offset pages through EXTRACTED text (not raw HTML). If extraction produces 40KB from a 1MB page, offset can't reach beyond that 40KB. Use extraction_type=html for raw HTML. Cache: cache_ttl=0 bypasses cache. is_truncated=true + total_extracted_chars tells you exactly how much remains.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1938,7 +1942,7 @@ class MasterFetchServer:
                     "urls": {"type": "array", "items": {"type": "string"}, "description": "Multiple URLs (parallel)"},
                     "extraction_type": {"type": "string", "enum": ["markdown", "html", "text", "article", "structured"], "description": "markdown|html|text|article|structured"},
                     "cache_ttl": {"type": "integer", "description": "Cache seconds. 0=fresh"},
-                    "force_fetcher": {"type": "string", "enum": ["http", "dynamic", "stealthy"], "description": "Lock to one tier"},
+                    "force_fetcher": {"type": "string", "enum": ["http", "stealthy"], "description": "Pin smart_fetch to one tier. Default behavior already auto-escalates http -> stealthy."},
                     "offset": {"type": "integer", "description": "Char offset into extracted text (not raw HTML). Use next_offset from previous response. Check total_extracted_chars to see total available."},
                     "options": {"type": "object", "description": "css_selector, proxy, timeout, cookies, extra_headers, useragent, wait, network_idle, headless, real_chrome, respect_robots, main_content_only, use_trafilatura, solve_cloudflare, block_webrtc, hide_canvas", "additionalProperties": True},
                 },
