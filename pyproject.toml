@@ -50,3 +50,7 @@ packages = ["src/master_fetch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-m", "not e2e"]
+markers = [
+    "e2e: end-to-end tests that spawn a real hound.exe subprocess. Skip by default in CI; run manually with `pytest -m e2e`.",
+]

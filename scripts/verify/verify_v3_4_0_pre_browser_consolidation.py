@@ -6,7 +6,11 @@ import asyncio
 import sys, os, time, json
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Walk up from scripts/verify/ to repo root, then add src/ so master_fetch
+# is importable without needing pip install. Works whether or not the dev
+# install is present in site-packages.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 from master_fetch.server import MasterFetchServer, _get_scrapling
 
 G = "\033[92m"
