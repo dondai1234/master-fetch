@@ -82,6 +82,7 @@ from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_ca
 from master_fetch.trafilatura_extractor import extract_with_trafilatura
 from master_fetch.robots import is_allowed, clear_robots_cache
 from master_fetch.search import SearchResponseModel
+from master_fetch.reddit import is_reddit_url, rewrite_to_old_reddit, parse_old_reddit_listing
 from master_fetch.security import (
     validate_url,
     validate_css_selector,
@@ -374,7 +375,42 @@ def _translate_response(
 
     s = _get_scrapling()
     content: list[str]
-    if use_trafilatura and extraction_type in ("markdown", "text", "article", "structured"):
+    
+    # Reddit optimization: use custom parser for old.reddit.com listings
+    page_url = getattr(page, 'url', '') or ''
+    is_old_reddit_listing = (
+        'old.reddit.com' in page_url
+        and '/comments/' not in page_url  # Not a post page
+        and extraction_type in ("markdown", "text")
+    )
+    
+    if is_old_reddit_listing and raw_body:
+        try:
+            html_text = raw_body.decode(page.encoding or 'utf-8', errors='replace')
+            parsed = parse_old_reddit_listing(html_text)
+            if parsed and len(parsed) > 500:  # Successfully parsed
+                content = [parsed]
+            else:
+                # Fallback to normal extraction
+                content = list(
+                    s.Convertor._extract_content(
+                        page,
+                        css_selector=css_selector,
+                        extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
+                        main_content_only=main_content_only,
+                    )
+                )
+        except Exception:
+            # Fallback to normal extraction
+            content = list(
+                s.Convertor._extract_content(
+                    page,
+                    css_selector=css_selector,
+                    extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
+                    main_content_only=main_content_only,
+                )
+            )
+    elif use_trafilatura and extraction_type in ("markdown", "text", "article", "structured"):
         content = extract_with_trafilatura(page, extraction_type=extraction_type, css_selector=css_selector)
         if not content or content == [""] or content == ["\n"]:
             content = list(
@@ -1639,7 +1675,13 @@ class MasterFetchServer:
                 hide_canvas, extra_headers, useragent, cookies,
             )
 
-        # 4. Auto-escalation
+        # 4. Reddit optimization: rewrite subreddit listings to old.reddit.com
+        # Post pages (/comments/...) are NOT rewritten (old.reddit.com shows
+        # sidebar instead of full comments) — handled inside rewrite_to_old_reddit
+        if is_reddit_url(url):
+            url = rewrite_to_old_reddit(url)
+
+        # 5. Auto-escalation
         return await self._auto_escalate(
             url, extraction_type, css_selector, main_content_only,
             use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,

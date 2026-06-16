@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.6.0] - 2026-06-16
+
+### Added
+- **Reddit optimization**: Subreddit listing URLs auto-rewritten to old.reddit.com for 2x faster fetching. old.reddit.com serves the same content but with 7x smaller page size (134KB vs 1MB), reducing fetch times from 12-15s to 5-10s.
+- **Structured Reddit extraction**: Custom parser for old.reddit.com listings extracts post titles, scores, comment counts, authors, and URLs as clean numbered markdown. Agents get structured data instead of raw text dump.
+- **27 new tests**: URL detection (all Reddit domain variants), URL rewriting (www/m/np → old, skips /comments/), structured parser (titles, scores, comments, authors, URLs, 25-post limit).
+
+### Changed
+- **smart_fetch**: Reddit subreddit URLs (www.reddit.com, m.reddit.com, np.reddit.com) transparently rewritten to old.reddit.com before fetching. Individual post pages (/comments/...) are NOT rewritten to preserve full comment threads.
+
+### Performance
+- Reddit subreddit fetch: 5-10s (was 12-15s) — 2x faster
+- Reddit page size: 134KB (was 1MB) — 7x smaller
+- Reddit extraction: 5,000+ chars structured (was 1,500 chars unstructured)
+- Reddit post pages: unchanged (preserves full comments)
+- Cached Reddit fetches: 21ms (unchanged)
+- Non-Reddit URLs: no change
+
 ## [3.5.3] - 2026-06-13
 
 ### Fixed
