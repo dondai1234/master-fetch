@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.6.2] - 2026-06-17
+
+### Fixed
+- **`hound -u` self-update failed on Windows with WinError 32**: `_do_update` ran `pip install --upgrade` *inside* the running `hound.exe` process, so Windows locked `hound.exe` against the very overwrite pip was attempting (`The process cannot access the file because it is being used by another process`). The fix stages the running launcher aside first: `hound.exe` is renamed to `hound.exe.old` before pip runs (Windows permits renaming a running .exe even though it forbids overwriting it), so pip can write a fresh `hound.exe`. The `.old` is swept on the next `hound` launch by `_cleanup_old_launcher()`. Non-Windows is unaffected (no file lock). If staging fails for any reason, the code falls through to the old behavior — no worse than before.
+
+### Notes
+- This is a Windows-only fix to the updater. **To get onto 3.6.2 from a version with the broken updater (<=3.6.1), run pip directly once** (not via `hound -u`), since `python.exe` running pip does not lock `hound.exe`:
+  ```powershell
+  python -m pip install --upgrade hound-mcp[all]
+  ```
+  After that, `hound -u` works normally for future updates.
+
 ## [3.6.1] - 2026-06-17
 
 ### Fixed

@@ -9,10 +9,14 @@ Covers:
 - `_close_auto_dynamic_session`, `_stealthy_auto_alive`, `_acquire_stealthy_session`
   are gone (dead-code removal).
 - `domain_intel` module is gone.
+- `hound -u` self-update stages the running launcher on Windows (WinError 32 fix).
 """
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import os
+import sys
+import tempfile
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -21,6 +25,8 @@ from master_fetch.server import (
     MasterFetchServer,
     MAX_BULK_URLS,
     AUTO_SESSION_IDLE_TIMEOUT,
+    _hound_exe_path,
+    _cleanup_old_launcher,
 )
 
 
@@ -205,3 +211,69 @@ class TestDeadCodeRemoved:
         import importlib
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module("master_fetch.domain_intel")
+
+
+# ─── hound -u self-update: Windows launcher staging (WinError 32 fix) ────────
+
+class TestSelfUpdateLauncherStaging:
+    """`hound -u` ran pip inside the running hound.exe, so Windows locked
+    hound.exe against the overwrite pip was attempting (WinError 32). The fix
+    renames the live launcher to hound.exe.old before pip runs; pip writes a
+    fresh hound.exe; the .old is swept on the next launch.
+    """
+
+    def test_hound_exe_path_returns_str_or_none(self):
+        p = _hound_exe_path()
+        assert p is None or isinstance(p, str)
+
+    def test_cleanup_noop_when_no_old(self, tmp_path):
+        # Point _hound_exe_path at a temp exe with no .old sibling.
+        exe = tmp_path / "hound.exe"
+        exe.write_text("fake")
+        with patch("master_fetch.server._hound_exe_path", return_value=str(exe)):
+            _cleanup_old_launcher()
+        assert exe.exists()
+        assert not (tmp_path / "hound.exe.old").exists()
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="launcher staging is Windows-only")
+    def test_cleanup_removes_stale_old(self, tmp_path):
+        exe = tmp_path / "hound.exe"
+        exe.write_text("fake")
+        old = tmp_path / "hound.exe.old"
+        old.write_text("stale")
+        with patch("master_fetch.server._hound_exe_path", return_value=str(exe)):
+            _cleanup_old_launcher()
+        assert exe.exists()
+        assert not old.exists(), "stale .old must be swept on launch"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="launcher staging is Windows-only")
+    def test_do_update_renames_exe_before_pip_runs(self, tmp_path):
+        from master_fetch.server import _do_update
+
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")
+
+        state = {"renamed_at_pip_time": None}
+
+        class FakeResult:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        def fake_run(cmd, **kwargs):
+            # At the moment pip runs, the live exe must already be staged aside.
+            state["renamed_at_pip_time"] = (
+                not exe.exists() and (tmp_path / "hound.exe.old").exists()
+            )
+            return FakeResult()
+
+        with patch("master_fetch.server._hound_exe_path", return_value=str(exe)), \
+             patch("master_fetch.server._check_version",
+                   side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
+             patch("subprocess.run", side_effect=fake_run):
+            _do_update()
+
+        assert state["renamed_at_pip_time"] is True, (
+            "hound.exe must be renamed to .old BEFORE pip runs, so pip can write a fresh one"
+        )
+        assert (tmp_path / "hound.exe.old").exists(), "staged .old must remain for post-exit sweep"

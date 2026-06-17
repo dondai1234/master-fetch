@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from uuid import uuid4
 import asyncio
@@ -2181,6 +2182,46 @@ def _pad_version(v: str) -> tuple:
     return tuple(int(p) for p in parts[:3])
 
 
+def _hound_exe_path() -> str | None:
+    """Locate the installed hound launcher executable (Windows only).
+
+    Returns the path to hound.exe, or None if it can't be found.
+    """
+    import shutil
+    # Primary: whatever 'hound' on PATH resolves to (what the user just ran).
+    candidate = shutil.which("hound")
+    if candidate and os.path.exists(candidate):
+        return candidate
+    # Fallback: the Scripts dir next to the running interpreter.
+    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
+    fallback = os.path.join(scripts_dir, "hound.exe")
+    if os.path.exists(fallback):
+        return fallback
+    return None
+
+
+def _cleanup_old_launcher() -> None:
+    """Remove a stale hound.exe.old left by a previous self-update.
+
+    Windows locks the running .exe against deletion, so _do_update renames the
+    live launcher to hound.exe.old before letting pip write a fresh one. The
+    .old can only be deleted once the process that was running from it has
+    exited, so we sweep it on the next launch instead.
+    """
+    if sys.platform != "win32":
+        return
+    exe = _hound_exe_path()
+    if not exe:
+        return
+    old = exe + ".old"
+    try:
+        if os.path.exists(old):
+            os.remove(old)
+    except OSError:
+        # Still locked (another hound -u running concurrently) — leave it.
+        pass
+
+
 def _do_update():
     """Update hound-mcp via pip with clean output."""
     import subprocess
@@ -2197,11 +2238,35 @@ def _do_update():
     except (ValueError, IndexError):
         pass
 
+    # Windows: the running hound.exe locks itself against overwrite, so a
+    # plain `pip install --upgrade` fails with WinError 32 on hound.exe.
+    # Rename the live launcher aside first — Windows permits renaming a
+    # running .exe even though it forbids overwriting it — then pip can
+    # write a fresh hound.exe. The .old is swept on the next launch by
+    # _cleanup_old_launcher(). Non-Windows has no such lock.
+    renamed_old = None
+    if sys.platform == "win32":
+        exe = _hound_exe_path()
+        if exe:
+            old = exe + ".old"
+            try:
+                if os.path.exists(old):
+                    os.remove(old)
+            except OSError:
+                pass
+            try:
+                os.rename(exe, old)
+                renamed_old = old
+            except OSError as e:
+                # Rename failed (permissions / weird install). Fall through
+                # and let pip attempt the overwrite; no worse than before.
+                print(f"  warn: could not stage running launcher ({e}); trying direct update.")
+
     print(f"Updating v{installed} to v{latest}...")
     result = subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
          "-qq", "--no-cache-dir", "--disable-pip-version-check", "--no-python-version-warning"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=180,
     )
     if result.returncode != 0:
         err = result.stderr.strip()
@@ -2215,6 +2280,8 @@ def _do_update():
 
     new_ver = _check_version()[0]
     print(f"Hound v{new_ver}")
+    if renamed_old:
+        print("  (old launcher will be cleaned up on next launch)")
 
 
 def main():
@@ -2234,6 +2301,9 @@ def main():
     parser.add_argument("-u", "--update", action="store_true",
                         help="Update Hound to latest version")
     args = parser.parse_args()
+
+    # Sweep a stale launcher left by a previous `hound -u` (Windows only).
+    _cleanup_old_launcher()
 
     if args.update:
         _do_update()
