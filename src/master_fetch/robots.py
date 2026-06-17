@@ -49,14 +49,18 @@ async def _fetch_robots_txt(domain: str) -> str | None:
     try:
         from scrapling.engines.static import FetcherSession
         async with FetcherSession() as sess:
-            response, _ = await asyncio.to_thread(
-                lambda: sess.get(f"https://{domain}/robots.txt", timeout=_FETCH_TIMEOUT)
+            # sess.get is a coroutine returning a Response directly (not a tuple).
+            # Previously this was wrapped in asyncio.to_thread around a coroutine,
+            # which always raised and silently fell through to the urllib fallback —
+            # defeating the impersonated-fetch path entirely.
+            response = await sess.get(
+                f"https://{domain}/robots.txt", timeout=_FETCH_TIMEOUT,
             )
-            # Extract body from response
-            if hasattr(response, 'body'):
-                body = response.body
-                if body:
-                    return body.decode(response.encoding or 'utf-8', errors='replace')
+            body = getattr(response, 'body', None)
+            if body:
+                return body.decode(
+                    getattr(response, 'encoding', None) or 'utf-8', errors='replace',
+                )
     except ImportError:
         logger.debug(f"scrapling not available for robots.txt fetch of {domain}, using fallback")
     except Exception as e:

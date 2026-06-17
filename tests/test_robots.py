@@ -2,12 +2,45 @@
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from master_fetch.robots import (
     _extract_netloc,
+    _fetch_robots_txt,
     is_allowed,
     clear_robots_cache,
 )
+
+
+class _FakeResponse:
+    def __init__(self, body, encoding="utf-8"):
+        self.body = body
+        self.encoding = encoding
+
+
+class _FakeSessionLogic:
+    """Mimics the object yielded by `async with FetcherSession() as sess`."""
+    def __init__(self, body, encoding="utf-8"):
+        self._body = body
+        self._encoding = encoding
+        self.get = MagicMock(return_value=_awaitable(_FakeResponse(body, encoding)))
+
+
+def _awaitable(value):
+    async def _coro():
+        return value
+    return _coro()
+
+
+class _FakeFetcherSession:
+    """Replacement for scrapling FetcherSession: `async with FetcherSession() as sess`."""
+    def __init__(self, body, encoding="utf-8"):
+        self._logic = _FakeSessionLogic(body, encoding)
+
+    async def __aenter__(self):
+        return self._logic
+
+    async def __aexit__(self, *exc):
+        return False
 
 
 class TestExtractNetloc:
@@ -127,3 +160,36 @@ class TestClearRobotsCache:
             # Should re-fetch
             await is_allowed("https://clear-cache-test.com/page2")
             assert mock_fetch.call_count == 2
+
+
+class TestFetchRobotsTxtScraplingPath:
+    """The scrapling (impersonated) fetch path must actually be used.
+
+    Regression: previously _fetch_robots_txt wrapped an async sess.get()
+    coroutine in asyncio.to_thread and unpacked the result as a
+    (response, elapsed) tuple. The coroutine was never awaited and the
+    unpack always raised, so every call fell through to the urllib fallback.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uses_awaited_sess_get_and_returns_body(self):
+        body = b"User-agent: *\nDisallow: /private\n"
+        fake = _FakeFetcherSession(body)
+
+        with patch("scrapling.engines.static.FetcherSession", lambda *a, **kw: fake):
+            out = await _fetch_robots_txt("example.com")
+
+        assert out == "User-agent: *\nDisallow: /private\n"
+        fake._logic.get.assert_called_once_with(
+            "https://example.com/robots.txt", timeout=10,
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_body_empty(self):
+        fake = _FakeFetcherSession(None)
+
+        with patch("scrapling.engines.static.FetcherSession", lambda *a, **kw: fake):
+            out = await _fetch_robots_txt("example.com")
+        # Empty body from scrapling -> falls through to urllib fallback path,
+        # which can't reach the synthetic domain -> None.
+        assert out is None

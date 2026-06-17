@@ -1,16 +1,15 @@
 """Tests for Hound MCP v3.0.0 reliability upgrade.
 
-Covers the 10 areas of reliability fixes:
+Covers the reliability fixes:
 1. gather return_exceptions fix in bulk_get/bulk_fetch/bulk_stealthy_fetch
 2. _ensure_auto_session race fix
 3. _normalize_credentials validation
 4. _dispatch error handling (missing url/urls, unknown tool)
 5. SecurityError consistency in search.py
-6. Domain intel downgrade threshold (10+ consecutive hits)
-7. open_session exception handler race (_alive inside lock)
-8. DB init caching (_ensure_db doesn't re-run PRAGMAs)
-9. Cloudflare detection only on error status
-10. Cache DB initialization caching (_db_initialized)
+6. open_session exception handler race (_alive inside lock)
+7. DB init caching (_ensure_db doesn't re-run PRAGMAs)
+8. Cloudflare detection only on error status
+9. Cache DB initialization caching (_db_initialized)
 """
 
 import asyncio
@@ -34,13 +33,6 @@ from master_fetch.server import (
     _SessionEntry,
 )
 from master_fetch.security import SecurityError
-from master_fetch.domain_intel import (
-    _ensure_db as domain_ensure_db,
-    _db_initialized as domain_db_initialized,
-    get_domain_level,
-    record_result,
-    _extract_domain,
-)
 from master_fetch.cache import (
     _ensure_db as cache_ensure_db,
     _db_initialized as cache_db_initialized,
@@ -676,108 +668,7 @@ class TestSearchSecurityErrorConsistency:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6. Domain intel downgrade threshold (10+ consecutive hits)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestDomainIntelDowngradeThreshold:
-    """The downgrade from 'high' to 'low' requires 10+ consecutive hits with zero fails.
-
-    Changed from 5 → 10 to prevent flip-flopping between levels.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _unique_session(self):
-        """Generate a session-unique prefix for domain isolation."""
-        import uuid
-        self._prefix = uuid.uuid4().hex[:12]
-
-    @pytest.mark.asyncio
-    async def test_nine_consecutive_hits_no_downgrade(self):
-        """9 consecutive successful 'high' fetches should NOT trigger downgrade.
-        The threshold is 10+ hits (hits > 10).
-        """
-        test_domain = f"dg9-{self._prefix}.dev"
-        test_url = f"https://{test_domain}/page"
-
-        # Seed: record as "high" to start
-        await record_result(test_url, "high", True, 100)
-
-        # Do 8 more successful "high" fetches (total 9 hits)
-        for _ in range(8):
-            await record_result(test_url, "high", True, 120)
-
-        level = await get_domain_level(test_url)
-        # Should still be "high" — 9 hits is not > 10
-        assert level == "high", f"Expected 'high' with 9 hits, got '{level}'"
-
-    @pytest.mark.asyncio
-    async def test_ten_hits_no_downgrade(self):
-        """10 hits is NOT > 10, so should also not trigger downgrade.
-        The condition is `hits > 10`, meaning it needs 11 hits.
-        """
-        test_domain = f"dg10-{self._prefix}.dev"
-        test_url = f"https://{test_domain}/page"
-
-        await record_result(test_url, "high", True, 100)
-        for _ in range(9):
-            await record_result(test_url, "high", True, 120)
-
-        level = await get_domain_level(test_url)
-        # hits = 10, condition is `hits > 10` → False
-        assert level == "high", f"Expected 'high' with 10 hits (not > 10), got '{level}'"
-
-    @pytest.mark.asyncio
-    async def test_eleven_consecutive_hits_downgrades(self):
-        """11 consecutive successful 'high' fetches (hits > 10) should downgrade to 'low'."""
-        test_domain = f"dg11-{self._prefix}.dev"
-        test_url = f"https://{test_domain}/page"
-
-        await record_result(test_url, "high", True, 100)
-        for _ in range(10):
-            await record_result(test_url, "high", True, 120)
-
-        level = await get_domain_level(test_url)
-        # hits = 11, hits > 10 → True → downgrade to 'low'
-        assert level == "low", f"Expected downgrade to 'low' with 11 hits, got '{level}'"
-
-    @pytest.mark.asyncio
-    async def test_single_failure_resets_downgrade(self):
-        """Even one failure among many successes should prevent downgrade.
-        The condition requires fails == 0.
-        """
-        test_domain = f"dgfail-{self._prefix}.dev"
-        test_url = f"https://{test_domain}/page"
-
-        # Build up 5 successful
-        for _ in range(5):
-            await record_result(test_url, "high", True, 100)
-
-        # One failure
-        await record_result(test_url, "high", False, 500)
-
-        # 10 more successful (now 15 total hits, 1 fail)
-        for _ in range(10):
-            await record_result(test_url, "high", True, 120)
-
-        level = await get_domain_level(test_url)
-        # fails != 0, so no downgrade
-        assert level == "high", f"Expected 'high' due to non-zero fails, got '{level}'"
-
-    @pytest.mark.asyncio
-    async def test_level_none_multiple_successes_does_not_change(self):
-        """Success with level='none' should keep level as 'none' (no escalation needed)."""
-        test_domain = f"dgnone-{self._prefix}.dev"
-        test_url = f"https://{test_domain}/page"
-
-        for _ in range(20):
-            await record_result(test_url, "none", True, 50)
-
-        level = await get_domain_level(test_url)
-        assert level == "none", f"Expected 'none' with many successes, got '{level}'"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 7. open_session exception handler race (_alive inside lock)
+# 6. open_session exception handler race (_alive inside lock)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestOpenSessionExceptionHandler:
@@ -869,88 +760,7 @@ class TestOpenSessionExceptionHandler:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 8. DB init caching (domain intel _ensure_db)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestDomainIntelDbInitCaching:
-    """Calling _ensure_db multiple times should not re-run PRAGMAs.
-    The _db_initialized dict caches initialization status.
-    """
-
-    @pytest.mark.asyncio
-    async def test_ensure_db_caches_initialization(self):
-        """First call runs PRAGMAs, second call should skip them."""
-        import master_fetch.domain_intel as di
-
-        # Clear the cache for this test
-        di._db_initialized.clear()
-
-        # Mock aiosqlite.connect to track how many times it's called
-        connect_calls = []
-
-        orig_connect = di.aiosqlite.connect
-
-        def counting_connect(path):
-            connect_calls.append(str(path))
-            return orig_connect(path)
-
-        di.aiosqlite.connect = counting_connect
-
-        try:
-            # First call: should create and initialize
-            path1 = await di._ensure_db()
-            first_call_count = len(connect_calls)
-
-            # Second call: should skip, no new connect
-            path2 = await di._ensure_db()
-            second_call_count = len(connect_calls)
-
-            assert path1 == path2, "Both calls should return the same path"
-            assert first_call_count >= 1, "First call should trigger DB connection"
-            # After caching, no new connect calls
-            assert second_call_count == first_call_count, (
-                f"Second _ensure_db should not trigger new connect. "
-                f"Got {second_call_count} calls, expected {first_call_count}"
-            )
-        finally:
-            di.aiosqlite.connect = orig_connect
-            di._db_initialized.clear()
-
-    @pytest.mark.asyncio
-    async def test_ensure_db_flag_set_after_init(self):
-        """After _ensure_db completes, _db_initialized[path] must be True."""
-        import master_fetch.domain_intel as di
-
-        di._db_initialized.clear()
-
-        try:
-            path = await di._ensure_db()
-            assert di._db_initialized.get(path) is True, (
-                "_db_initialized should be True after initialization"
-            )
-        finally:
-            di._db_initialized.clear()
-
-    @pytest.mark.asyncio
-    async def test_ensure_db_idempotent(self):
-        """Calling _ensure_db many times returns the same result."""
-        import master_fetch.domain_intel as di
-
-        di._db_initialized.clear()
-
-        try:
-            paths = []
-            for _ in range(5):
-                paths.append(await di._ensure_db())
-
-            # All paths should be identical
-            assert len(set(paths)) == 1, f"All calls should return same path, got: {paths}"
-        finally:
-            di._db_initialized.clear()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 9. Cloudflare detection only on error status
+# 7. Cloudflare detection only on error status
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestCloudflareDetectionOnErrorStatusOnly:
@@ -1094,13 +904,11 @@ class TestCloudflareDetectionOnErrorStatusOnly:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 10. Cache DB initialization caching
+# 8. Cache DB initialization caching
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestCacheDbInitCaching:
-    """The _db_initialized dict should prevent redundant DB setup calls.
-    Both cache.py and domain_intel.py have their own _db_initialized dict.
-    """
+    """The _db_initialized dict should prevent redundant DB setup calls."""
 
     @pytest.mark.asyncio
     async def test_cache_ensure_db_skips_second_call(self):
@@ -1142,16 +950,6 @@ class TestCacheDbInitCaching:
     def test_cache_db_initialized_is_dict(self):
         """_db_initialized should be a dict."""
         assert isinstance(cache_db_initialized, dict)
-
-    def test_domain_intel_db_initialized_is_dict(self):
-        """domain_intel._db_initialized should be a dict."""
-        assert isinstance(domain_db_initialized, dict)
-
-    def test_cache_and_domain_use_separate_dicts(self):
-        """Cache and domain intel should use separate _db_initialized dicts."""
-        assert domain_db_initialized is not cache_db_initialized, (
-            "Cache and domain intel should have separate _db_initialized dicts"
-        )
 
     @pytest.mark.asyncio
     async def test_cache_ensure_db_different_dirs_different_cache(self):

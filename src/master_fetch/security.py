@@ -397,7 +397,20 @@ def validate_proxy(proxy: Optional[str | dict]) -> Optional[str | dict]:
         if not server:
             raise SecurityError("Proxy dict must include 'server' key")
 
-        validate_url(server, allow_internal=True)  # Proxy could be local
+        # Validate the server URL with the same scheme set accepted for string
+        # proxies (http/https/socks5/socks5h). Previously this called validate_url,
+        # which only permits http/https — so a dict proxy with a socks5 server was
+        # rejected even though the string form was accepted.
+        try:
+            parsed = urlparse(server)
+            if parsed.scheme not in ("http", "https", "socks5", "socks5h"):
+                raise SecurityError(
+                    f"Proxy scheme must be http, https, socks5, or socks5h, got: {parsed.scheme}"
+                )
+        except SecurityError:
+            raise
+        except Exception as e:
+            raise SecurityError(f"Invalid proxy server URL: {e}")
         return proxy
 
     raise SecurityError("Proxy must be a URL string, dict, or None")

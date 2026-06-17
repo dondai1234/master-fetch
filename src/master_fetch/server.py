@@ -78,7 +78,6 @@ if TYPE_CHECKING:
     from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
 
 from master_fetch.cache import get_cached, set_cached, clear_cache, clear_all_cache, DEFAULT_TTL
-# domain_intel is imported on demand for list_sessions stats only
 from master_fetch.trafilatura_extractor import extract_with_trafilatura
 from master_fetch.robots import is_allowed, clear_robots_cache
 from master_fetch.search import SearchResponseModel
@@ -496,7 +495,8 @@ def _safe_cookie_dict(cookies: Sequence[SetCookieParam] | None) -> Optional[Dict
             if name:
                 result[name] = value
             else:
-                logger.warning(f"Cookie dict missing 'name' key, skipping: {c}")
+                # Don't log the dict — it may contain a sensitive cookie value.
+                logger.warning("Cookie dict missing 'name' key, skipping")
     return result or None
 
 
@@ -550,8 +550,9 @@ class MasterFetchServer:
         Race-safe: if two concurrent calls both pass the initial check,
         the second one closes its orphaned session and reuses the first.
 
-        Idle timeout: auto sessions close after AUTO_SESSION_IDLE_TIMEOUT (30 min)
-        of inactivity. Reopened on next fetch (one-time startup penalty).
+        Idle timeout: when AUTO_SESSION_IDLE_TIMEOUT > 0, auto sessions close
+        after that many seconds of inactivity. When it is 0 (default), the
+        browser is kept alive forever and no idle monitor is started.
         """
         attr = "_auto_dynamic_id" if session_type == "dynamic" else "_auto_stealthy_id"
         ts_attr = "_auto_dynamic_last_used" if session_type == "dynamic" else "_auto_stealthy_last_used"
@@ -599,60 +600,12 @@ class MasterFetchServer:
         except Exception as e:
             logger.debug(f"Pre-warming failed (will launch on first fetch): {e}")
 
-    async def _close_auto_dynamic_session(self) -> None:
-        """Close the auto dynamic browser session if it exists.
-
-        Called when a stealthy auto session is created — Patchright handles
-        everything Playwright can, so keeping both is wasted memory (~100-180MB).
-
-        Safe to call even if no dynamic session exists (no-op).
-        """
-        async with self._sessions_lock:
-            dsid = self._auto_dynamic_id
-            if dsid is None:
-                return
-            self._auto_dynamic_id = None
-        # Close outside lock to avoid blocking
-        try:
-            await self.close_session(dsid)
-        except Exception as e:
-            logger.warning(f"Failed to close dynamic auto session during consolidation: {e}")
-            async with self._sessions_lock:
-                entry = self._sessions.pop(dsid, None)
-                if entry:
-                    entry._alive = False
-
-    def _stealthy_auto_alive(self) -> bool:
-        """Check if the auto stealthy session is alive (Patchright browser running).
-
-        INFORMATIONAL ONLY. Does not acquire the sessions lock, so the result may
-        be stale by the time the caller acts on it. Safe for tier-skip decisions
-        (Phase C unknown domain), but NOT safe for reading the session ID directly.
-        For atomic check-and-use, see _acquire_stealthy_session().
-        """
-        sid = self._auto_stealthy_id
-        return bool(sid and sid in self._sessions and self._sessions[sid]._alive)
-
-    async def _acquire_stealthy_session(self) -> Optional[str]:
-        """Atomically check if the auto stealthy session is alive, bump its
-        last-used timestamp, and return its session ID.
-
-        Returns None if not alive. Uses sessions_lock to prevent TOCTOU races
-        with the idle monitor and other concurrent callers.
-        """
-        async with self._sessions_lock:
-            sid = self._auto_stealthy_id
-            if sid and sid in self._sessions and self._sessions[sid]._alive:
-                self._auto_stealthy_last_used = now()
-                return sid
-        return None
-
     async def _start_idle_monitor(self) -> None:
         """Background task: close auto browser sessions after AUTO_SESSION_IDLE_TIMEOUT
         of inactivity.
 
         All reads of _auto_*_id and _auto_*_last_used happen inside the sessions lock
-        to prevent races with _ensure_auto_session and _acquire_stealthy_session.
+        to prevent races with _ensure_auto_session.
         Session closing happens outside the lock to avoid blocking other operations.
         """
         while True:
@@ -706,7 +659,13 @@ class MasterFetchServer:
 
         Idempotent: safe to call from any code path (session creation, reuse, etc.).
         If the monitor task crashed, the next call restarts it.
+
+        No-op when AUTO_SESSION_IDLE_TIMEOUT == 0 (keep-alive-forever mode) —
+        avoids a perpetual background task that wakes every IDLE_CHECK_INTERVAL
+        only to `continue`.
         """
+        if AUTO_SESSION_IDLE_TIMEOUT == 0:
+            return
         if self._idle_monitor_task is None or self._idle_monitor_task.done():
             self._idle_monitor_task = asyncio.create_task(self._start_idle_monitor())
 
@@ -1515,13 +1474,22 @@ class MasterFetchServer:
     # ─── SMART FETCH (The One Tool To Rule Them All) ────────────────
 
     async def _http_with_retry(self, url: str, **kwargs) -> ResponseModel:
-        """HTTP fetch with retry logic for transient network failures."""
+        """HTTP fetch with retry logic for transient network failures.
+
+        Does NOT retry on validation errors (SecurityError/ValueError) — those
+        are deterministic (bad URL, oversized response, blocked scheme) and
+        retrying just re-downloads the same failure. Only network/transport
+        errors are retried with exponential backoff.
+        """
         max_retries = 3
         base_delay = 1.0
         last_error = None
         for attempt in range(max_retries + 1):
             try:
                 return await self.get(url, **kwargs)
+            except (SecurityError, ValueError):
+                # Deterministic failure — surface immediately, no retry.
+                raise
             except Exception as e:
                 last_error = e
                 if attempt < max_retries:
@@ -1698,7 +1666,9 @@ class MasterFetchServer:
     ) -> BulkResponseModel:
         """Fetch multiple URLs in parallel through the smart fetch pipeline."""
         if len(urls) > MAX_BULK_URLS:
-            urls = urls[:MAX_BULK_URLS]
+            raise ValueError(
+                f"Too many URLs ({len(urls)}). Maximum is {MAX_BULK_URLS} per call."
+            )
 
         async def _fetch_one(u: str) -> ResponseModel:
             try:
@@ -1740,13 +1710,15 @@ class MasterFetchServer:
         useragent, cookies,
     ) -> ResponseModel:
         """Execute a forced fetcher tier and finalize the result."""
+        # HTTP fetcher takes seconds; browser timeout is ms. Cap at 30s.
+        http_timeout = max(1, min(int(timeout / 1000), 30))
         if force_fetcher == "http":
             http_cookies = _safe_cookie_dict(cookies)
             result = await self.get(
                 url, extraction_type=extraction_type, css_selector=css_selector,
                 main_content_only=main_content_only, use_trafilatura=use_trafilatura,
                 proxy=proxy if isinstance(proxy, str) else None,
-                headers=extra_headers, cookies=http_cookies, timeout=30,
+                headers=extra_headers, cookies=http_cookies, timeout=http_timeout,
                 stealthy_headers=True,
             )
             result.escalation_path = "direct:http"
@@ -1754,7 +1726,6 @@ class MasterFetchServer:
 
         else:  # stealthy ("dynamic" also routes here — Patchright handles everything)
             ssid = await self._ensure_auto_session("stealthy")
-            asyncio.create_task(self._close_auto_dynamic_session())
             result = await self.stealthy_fetch(
                 url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
@@ -1786,6 +1757,8 @@ class MasterFetchServer:
         start_time = now()
         errors = []
         http_cookies = _safe_cookie_dict(cookies)
+        # HTTP fetcher takes seconds; browser timeout is ms. Cap at 30s.
+        http_timeout = max(1, min(int(timeout / 1000), 30))
 
         # Tier 1: HTTP (always try first — it's fast)
         result = await self._http_with_retry(
@@ -1794,6 +1767,7 @@ class MasterFetchServer:
             use_trafilatura=use_trafilatura,
             proxy=proxy if isinstance(proxy, str) else None,
             headers=extra_headers, cookies=http_cookies, stealthy_headers=True,
+            timeout=http_timeout,
         )
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
@@ -1815,8 +1789,6 @@ class MasterFetchServer:
         errors.append(f"HTTP failed (status {result.status})")
         remaining = max(timeout - int((now() - start_time) * 1000), 5000)
         ssid = await self._ensure_auto_session("stealthy")
-        # Close any leftover dynamic session in background
-        asyncio.create_task(self._close_auto_dynamic_session())
         result = await self.stealthy_fetch(
             url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,

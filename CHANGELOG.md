@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.6.1] - 2026-06-17
+
+### Fixed
+- **robots.txt scrapling fetch path was silently broken**: `_fetch_robots_txt` wrapped an async `sess.get()` coroutine in `asyncio.to_thread` and unpacked the result as a `(response, elapsed)` tuple. The coroutine was never awaited and the unpack always raised, so every robots.txt lookup fell through to the plain-urllib fallback — defeating the browser-impersonated fetch path entirely. Now awaits `sess.get()` directly and reads `response.body`. Impersonated requests reach sites that block stdlib urllib.
+- **`smart_fetch` bulk mode silently truncated URLs past `MAX_BULK_URLS`**: `_smart_fetch_bulk` dropped overflow URLs with `urls[:MAX_BULK_URLS]` and no warning — silent data loss. Now raises `ValueError` matching the single-URL and `bulk_get`/`bulk_fetch`/`bulk_stealthy_fetch` behavior.
+- **`force_fetcher="http"` ignored the caller's `timeout`**: the HTTP branch hardcoded `timeout=30` seconds. A caller asking for a 5s budget got 30s. Now passes `timeout=max(1, min(int(timeout/1000), 30))`. The auto-escalation HTTP tier now also honors the caller timeout instead of always using the 30s default.
+- **`validate_proxy` rejected `socks5`/`socks5h` dict proxies**: the dict path validated the `server` URL with `validate_url`, which only permits `http`/`https`, so `proxy={"server": "socks5://host:1080"}` was rejected even though the string form `socks5://host:1080` was accepted. Now uses the same `http/https/socks5/socks5h` scheme set as the string path (and still allows internal/local proxy hosts).
+- **`_safe_cookie_dict` leaked cookie values into logs**: the "missing name" warning logged the whole cookie dict, which may contain a sensitive `value`. Now logs a fixed message without the dict.
+- **`_http_with_retry` retried deterministic validation errors**: `SecurityError`/`ValueError` (bad URL, oversized response body, blocked scheme) were retried 3x with exponential backoff — re-running the same deterministic failure (and, for oversized bodies, re-downloading them). Now surfaces validation errors immediately and retries only transport/network failures.
+
+### Removed (dead code)
+- **`domain_intel.py`** (207 lines): per-domain protection-level tracking was orphaned when v3.5.1 removed domain-intel routing from `smart_fetch`. No production code imported it; the `server.py` comment claiming it was "imported on demand for list_sessions stats only" was false. Removed the module, `tests/test_domain_intel.py`, and the domain-intel test classes/methods in `test_reliability_v3.py`.
+- **`_close_auto_dynamic_session`** + its two `asyncio.create_task` call sites in `_force_fetch`/`_auto_escalate`: the auto dynamic session is never created in production (smart_fetch only uses the stealthy auto session), so this always no-op'd. Removed the method and the no-op task spawns.
+- **`_stealthy_auto_alive`** and **`_acquire_stealthy_session`**: defined but never called anywhere (production or tests). Removed.
+- **`reddit.enhance_old_reddit_extraction`**: stub that returned its input unchanged; never called. Removed.
+
+### Performance
+- **Idle monitor no longer started in keep-alive-forever mode**: with `AUTO_SESSION_IDLE_TIMEOUT = 0` (the default), `_ensure_idle_monitor` now no-ops instead of spawning a background task that wakes every 60s only to `continue`.
+
+### Notes
+- No new features. No public API changes. `open_session(session_type="dynamic")` and the `fetch`/`bulk_fetch` dynamic methods remain supported public API; only the dead auto-routing scaffolding was removed.
+- Test count unchanged in spirit: removed 8 dead domain-intel tests, added focused regression tests for the robots/bulk/proxy fixes.
+
 ## [3.6.0] - 2026-06-16
 
 ### Added

@@ -152,20 +152,3 @@ def parse_old_reddit_listing(html: str) -> str:
     
     # Fallback: return original content if parsing failed
     return html
-
-
-def enhance_old_reddit_extraction(content: str, url: str) -> str:
-    """Enhance extraction from old.reddit.com HTML.
-    
-    old.reddit.com has a simpler HTML structure than www.reddit.com.
-    This function extracts more useful content from the simpler layout.
-    """
-    if not content or len(content) < 100:
-        return content
-    
-    # For now, return the content as-is
-    # The basic extraction already works reasonably well
-    # Future enhancement: parse old.reddit.com HTML structure
-    # to extract posts, scores, comments in a more structured format
-    
-    return content

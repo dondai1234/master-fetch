@@ -230,6 +230,30 @@ class TestValidateProxy:
         with pytest.raises(SecurityError, match="Unknown proxy config"):
             validate_proxy({"server": "http://proxy:8080", "evil": "value"})
 
+    def test_dict_socks5_server_accepted(self):
+        """Dict proxy with a socks5 server should be accepted, matching the
+        string form. Regression: previously validate_proxy called validate_url
+        on the server, which only permits http/https, so socks5 dicts were
+        rejected while socks5 strings were accepted.
+        """
+        result = validate_proxy({"server": "socks5://proxy:1080"})
+        assert result == {"server": "socks5://proxy:1080"}
+
+    def test_dict_socks5h_server_accepted(self):
+        result = validate_proxy({"server": "socks5h://proxy:1080"})
+        assert result["server"] == "socks5h://proxy:1080"
+
+    def test_dict_local_proxy_server_allowed(self):
+        """Local/internal proxy hosts must still be accepted (proxies are often
+        on localhost). Regression: the fix must not re-introduce an IP block.
+        """
+        result = validate_proxy({"server": "http://127.0.0.1:8080"})
+        assert result["server"] == "http://127.0.0.1:8080"
+
+    def test_dict_rejects_bad_scheme(self):
+        with pytest.raises(SecurityError, match="scheme must be"):
+            validate_proxy({"server": "ftp://proxy:21"})
+
 
 class TestValidateTimeout:
     """Timeout validation."""
