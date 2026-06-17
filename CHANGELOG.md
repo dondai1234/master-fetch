@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.6.3] - 2026-06-17
+
+### Fixed
+- **`hound -u` self-update hardened cross-platform with a bulletproof fallback.** The 3.6.2 fix (rename the running `hound.exe` aside so pip can replace it) is now wrapped in a two-layer updater that guarantees no user ever hits `WinError 32`:
+  - **Layer 1 — launcher staging (Windows):** `_stage_running_launcher()` renames `hound.exe` → `hound.exe.old` before pip runs (Windows allows renaming a running .exe even though it forbids overwriting it). pip then writes a fresh `hound.exe`. The `.old` is swept on the next launch by `_cleanup_old_launcher()`.
+  - **Layer 2 — detached fallback (Windows):** if staging fails (read-only install, unusual layout) AND pip still hits the file lock, `_spawn_detached_updater()` spawns a background child that waits for the current process to exit (releasing the lock) and then runs pip, logging the outcome to `~/.master_fetch_cache/hound_updater.log`.
+  - **macOS/Linux:** no file lock exists, so staging is skipped entirely and pip runs synchronously. None of the Windows `.exe` logic is touched on POSIX.
+- **Every pip failure now prints the manual recovery command** (`python -m pip install --upgrade hound-mcp[all]`), so a user is never left without a path forward.
+- **Detached-updater generated script bug:** the child one-liner double-braced the `{r.returncode}` placeholder, which would have emitted a literal string instead of the pip result. Fixed and covered by a compile-check test so it can't regress silently.
+
+### Notes
+- No new features. No public API changes. The codebase was audited end-to-end for platform-specific code: the only platform-conditional logic in the entire package is this updater section, all guarded by `sys.platform == "win32"`. Everything else (`cache`, `robots`, `security`, `server`, `trafilatura_extractor`, `reddit`, `search`) uses `Path.home()`, stdlib, and cross-platform deps (scrapling, aiosqlite, trafilatura, mcp, pydantic) — fully native on macOS/Linux/Windows.
+- Verified end-to-end on Windows: staging moves the real `hound.exe` aside and real `pip` writes a fresh one (sha changed, returncode 0).
+- To get onto 3.6.3 from <=3.6.1 (broken updater), run pip directly once: `python -m pip install --upgrade hound-mcp[all]`. From 3.6.2+, `hound -u` works normally.
+
 ## [3.6.2] - 2026-06-17
 
 ### Fixed

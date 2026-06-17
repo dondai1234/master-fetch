@@ -25,8 +25,12 @@ from master_fetch.server import (
     MasterFetchServer,
     MAX_BULK_URLS,
     AUTO_SESSION_IDLE_TIMEOUT,
-    _hound_exe_path,
+    _hound_launcher_path,
+    _stage_running_launcher,
     _cleanup_old_launcher,
+    _spawn_detached_updater,
+    _looks_like_file_lock_error,
+    _do_update,
 )
 
 
@@ -213,24 +217,33 @@ class TestDeadCodeRemoved:
             importlib.import_module("master_fetch.domain_intel")
 
 
-# ─── hound -u self-update: Windows launcher staging (WinError 32 fix) ────────
+# ─── hound -u self-update: cross-platform, Windows-lock-safe ──────────────
 
 class TestSelfUpdateLauncherStaging:
     """`hound -u` ran pip inside the running hound.exe, so Windows locked
     hound.exe against the overwrite pip was attempting (WinError 32). The fix
-    renames the live launcher to hound.exe.old before pip runs; pip writes a
-    fresh hound.exe; the .old is swept on the next launch.
+    stages the live launcher to hound.exe.old before pip runs (layer 1), with a
+    detached background updater as a fallback when staging fails (layer 2).
+    macOS/Linux have no file lock and skip staging entirely.
     """
 
-    def test_hound_exe_path_returns_str_or_none(self):
-        p = _hound_exe_path()
+    def test_launcher_path_returns_str_or_none(self):
+        p = _hound_launcher_path()
         assert p is None or isinstance(p, str)
 
-    def test_cleanup_noop_when_no_old(self, tmp_path):
-        # Point _hound_exe_path at a temp exe with no .old sibling.
+    def test_stage_returns_none_on_non_windows(self, tmp_path, monkeypatch):
+        # Force POSIX: staging must be a no-op regardless of launcher presence.
+        monkeypatch.setattr(sys, "platform", "linux")
         exe = tmp_path / "hound.exe"
         exe.write_text("fake")
-        with patch("master_fetch.server._hound_exe_path", return_value=str(exe)):
+        monkeypatch.setattr("master_fetch.server._hound_launcher_path", lambda: str(exe))
+        assert _stage_running_launcher() is None
+        assert exe.exists(), "POSIX staging must never touch the launcher"
+
+    def test_cleanup_noop_when_no_old(self, tmp_path):
+        exe = tmp_path / "hound.exe"
+        exe.write_text("fake")
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)):
             _cleanup_old_launcher()
         assert exe.exists()
         assert not (tmp_path / "hound.exe.old").exists()
@@ -241,15 +254,29 @@ class TestSelfUpdateLauncherStaging:
         exe.write_text("fake")
         old = tmp_path / "hound.exe.old"
         old.write_text("stale")
-        with patch("master_fetch.server._hound_exe_path", return_value=str(exe)):
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)):
             _cleanup_old_launcher()
         assert exe.exists()
         assert not old.exists(), "stale .old must be swept on launch"
 
     @pytest.mark.skipif(sys.platform != "win32", reason="launcher staging is Windows-only")
-    def test_do_update_renames_exe_before_pip_runs(self, tmp_path):
-        from master_fetch.server import _do_update
+    def test_stage_renames_running_exe(self, tmp_path):
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)):
+            old = _stage_running_launcher()
+        assert old is not None and old.endswith("hound.exe.old")
+        assert not exe.exists(), "live launcher must be moved aside"
+        assert (tmp_path / "hound.exe.old").exists()
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="launcher staging is Windows-only")
+    def test_stage_returns_none_when_rename_fails(self, tmp_path):
+        exe = tmp_path / "missing.exe"  # os.rename on a missing src raises
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)):
+            assert _stage_running_launcher() is None
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="launcher staging is Windows-only")
+    def test_do_update_renames_exe_before_pip_runs(self, tmp_path):
         exe = tmp_path / "hound.exe"
         exe.write_text("live")
 
@@ -261,13 +288,12 @@ class TestSelfUpdateLauncherStaging:
             stdout = ""
 
         def fake_run(cmd, **kwargs):
-            # At the moment pip runs, the live exe must already be staged aside.
             state["renamed_at_pip_time"] = (
                 not exe.exists() and (tmp_path / "hound.exe.old").exists()
             )
             return FakeResult()
 
-        with patch("master_fetch.server._hound_exe_path", return_value=str(exe)), \
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
              patch("master_fetch.server._check_version",
                    side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
              patch("subprocess.run", side_effect=fake_run):
@@ -277,3 +303,125 @@ class TestSelfUpdateLauncherStaging:
             "hound.exe must be renamed to .old BEFORE pip runs, so pip can write a fresh one"
         )
         assert (tmp_path / "hound.exe.old").exists(), "staged .old must remain for post-exit sweep"
+
+
+class TestSelfUpdateDetachedFallback:
+    """Layer 2: when staging fails and pip hits the file lock, spawn a detached
+    updater that runs pip after the current process exits.
+    """
+
+    def test_file_lock_detector(self):
+        assert _looks_like_file_lock_error(
+            "OSError: [WinError 32] The process cannot access the file "
+            "because it is being used by another process: 'hound.exe'"
+        )
+        assert not _looks_like_file_lock_error("ERROR: No matching distribution")
+        assert not _looks_like_file_lock_error("")
+
+    def test_spawn_detached_updater_returns_false_on_popen_error(self):
+        import subprocess as sp
+        with patch.object(sp, "Popen", side_effect=OSError("boom")):
+            assert _spawn_detached_updater(["py", "-m", "pip", "install", "-q", "x"]) is False
+
+    def test_detached_updater_child_source_compiles_and_substitutes(self):
+        """The generated one-liner handed to the detached child must be valid
+        Python and must actually substitute r.returncode (not emit a literal
+        '{r.returncode}'). Regression: an earlier version double-braced the
+        placeholder, silently producing a useless log file.
+        """
+        import subprocess as sp
+        captured = {}
+        class FakeProc:
+            pass
+        def fake_popen(args, **kwargs):
+            captured["args"] = args
+            return FakeProc()
+        with patch.object(sp, "Popen", side_effect=fake_popen):
+            assert _spawn_detached_updater([sys.executable, "-m", "pip", "install", "-q", "pkg"]) is True
+        # args = [python, '-c', child_src]
+        child_src = captured["args"][2]
+        # Must compile cleanly.
+        compile(child_src, "<detached_updater>", "exec")
+        # Must contain a real f-string substitution for r.returncode, not a literal.
+        assert "f'pip returncode={r.returncode}" in child_src, (
+            "child source must substitute r.returncode, not emit a literal"
+        )
+        assert "{{r.returncode}}" not in child_src, "double-braced placeholder must not survive"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="detached fallback is Windows-only")
+    def test_spawn_detached_updater_detaches_on_windows(self):
+        import subprocess as sp
+        with patch.object(sp, "Popen") as m:
+            ok = _spawn_detached_updater(["py", "-m", "pip", "install", "-q", "x"])
+        assert ok is True
+        assert m.called
+        flags = m.call_args.kwargs.get("creationflags", 0)
+        assert flags & 0x00000008, "must set DETACHED_PROCESS on Windows"
+        assert m.call_args.kwargs.get("close_fds") is True
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="detached fallback is Windows-only")
+    def test_do_update_falls_back_to_detached_when_staging_fails(self, tmp_path, capsys):
+        # Staging fails (launcher path missing) AND pip returns WinError 32 ->
+        # _do_update must spawn the detached updater and return (no sys.exit).
+        exe = tmp_path / "missing.exe"
+
+        class LockResult:
+            returncode = 1
+            stderr = ("OSError: [WinError 32] The process cannot access the file "
+                      "because it is being used by another process: 'hound.exe'")
+            stdout = ""
+
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
+             patch("master_fetch.server._check_version",
+                   side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
+             patch("subprocess.run", return_value=LockResult()), \
+             patch("master_fetch.server._spawn_detached_updater", return_value=True) as mock_spawn:
+            _do_update()  # must NOT raise / sys.exit
+        out = capsys.readouterr().out
+        assert mock_spawn.called, "detached updater must be spawned on file-lock failure"
+        assert "hound -v" in out
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="detached fallback is Windows-only")
+    def test_do_update_non_lock_failure_prints_recovery_and_exits(self, tmp_path, capsys):
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")  # staging succeeds -> no detached fallback
+
+        class NetResult:
+            returncode = 1
+            stderr = "ERROR: Could not find a version that satisfies the requirement torch"
+            stdout = ""
+
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
+             patch("master_fetch.server._check_version",
+                   side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
+             patch("subprocess.run", return_value=NetResult()), \
+             patch("master_fetch.server._spawn_detached_updater", return_value=True) as mock_spawn:
+            with pytest.raises(SystemExit):
+                _do_update()
+        out = capsys.readouterr().out
+        assert not mock_spawn.called, "non-lock failure must not spawn detached updater"
+        assert "Manual recovery" in out
+
+
+class TestSelfUpdatePosix:
+    """On macOS/Linux there is no file lock; staging is skipped and pip runs
+    synchronously. No Windows .exe logic is touched.
+    """
+
+    def test_do_update_posix_skips_staging(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        class OkResult:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        with patch("master_fetch.server._check_version",
+                   side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
+             patch("subprocess.run", return_value=OkResult()) as mock_run, \
+             patch("master_fetch.server._stage_running_launcher", return_value=None) as mock_stage:
+            _do_update()
+        out = capsys.readouterr().out
+        assert mock_stage.called, "staging helper is consulted but no-ops on POSIX"
+        assert mock_run.called, "pip must run synchronously on POSIX"
+        assert "old launcher" not in out, "POSIX must not mention Windows .old cleanup"
