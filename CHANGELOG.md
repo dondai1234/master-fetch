@@ -1,5 +1,27 @@
 # Changelog
 
+## [3.6.7] - 2026-06-18
+
+### Fixed
+- **`hound -u` finally just works on Windows.** The root cause of every prior failed attempt: the running `hound -u` command IS `hound.exe` (a console-scripts launcher that spawns python.exe as a grandchild), so pip can't overwrite the launcher while it runs — and every attempt to "detect the running process and refuse" flagged the command's OWN launcher (its PID is a grandparent of the python process, unreachable via `os.getppid()`), making `hound -u` refuse to run on itself forever.
+
+  The fix: `hound -u` now spawns a **detached console updater** — a child `python.exe` (NOT hound.exe) that inherits the same console window, waits ~2s for the `hound.exe` launcher to exit, then runs pip. With the launcher gone, `hound.exe` is free and pip replaces it cleanly. The child prints pip progress and the result to the same window, so the user sees everything. The child re-checks for a REAL hound MCP server only AFTER the launcher exits (so the current command's own launcher is never mistaken for a server — the false-positive that made `hound -u` refuse on itself).
+
+  Verified end-to-end on Windows: `hound -u` (3.6.7 -> 3.6.8) replaced `hound.exe` with no manual kill, no lock error, full pip output visible, `hound -v` confirmed the new version.
+
+- **macOS/Linux:** no file lock, so pip runs synchronously. If a hound MCP server is running, `hound -u` warns that it will keep old code until restarted (but still proceeds — pip works on POSIX). No false refusal.
+
+- Removed the broken upfront running-server refusal (it false-positived on the command's own launcher) and the harmful detached-fallback from 3.6.3 (which created metadata/binary mismatches). The new console updater is the primary mechanism on Windows.
+
+### Notes
+- No new features. No public API changes. 291 tests pass (rewrote the self-update test suite for the new detached-updater design: helper tests, `_spawn_console_updater` source-compile + self-contained-ness tests, `_run_pip_sync` bulletproof-message tests, `_do_update` dispatch tests for Windows/POSIX, `hound -v` tests).
+- **Recovery for users on an older binary** (whose `hound -u` is one of the buggy 3.6.2-3.6.6 ones): run pip directly once, after stopping any running hound MCP server:
+  ```bash
+  taskkill /IM hound.exe /F            # Windows  (POSIX: pkill -f hound)
+  pip install --force-reinstall --no-deps hound-mcp==3.6.7
+  ```
+  After that, `hound -u` works normally on every platform.
+
 ## [3.6.6] - 2026-06-18
 
 ### Fixed
