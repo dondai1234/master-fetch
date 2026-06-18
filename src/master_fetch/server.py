@@ -2314,6 +2314,18 @@ def _other_hound_pids() -> list[int]:
     return pids
 
 
+def _stop_hound_cmd() -> str:
+    """Platform command to stop all running hound launcher processes."""
+    if sys.platform == "win32":
+        return "taskkill /IM hound.exe /F"
+    return "pkill -f hound"
+
+
+def _reinstall_cmd(ver: str) -> str:
+    """Platform pip command to force-reinstall a specific hound-mcp version."""
+    return f"pip install --force-reinstall --no-deps hound-mcp=={ver}"
+
+
 def _corrupted_install_message() -> str:
     """Message shown when hound-mcp package metadata is missing.
 
@@ -2335,7 +2347,7 @@ def _corrupted_install_message() -> str:
 
 
 def _print_pip_failure(result) -> None:
-    """Print the most useful line from a failed pip run, plus the recovery hint."""
+    """Print the most useful line from a failed pip run. Callers add recovery."""
     err = (result.stderr or "").strip() if result is not None else ""
     printed = False
     for line in err.split("\n"):
@@ -2345,38 +2357,30 @@ def _print_pip_failure(result) -> None:
             break
     if not printed:
         print(f"  {err.split(chr(10))[-1] if err else 'update failed'}")
-    print("  Manual recovery: python -m pip install --upgrade hound-mcp[all]")
 
 
 def _do_update():
-    """Update hound-mcp via pip. Cross-platform; safe against a running server.
+    """Update hound-mcp via pip. Cross-platform; bulletproof error messages.
 
-    A hound MCP server is a long-lived process that holds the launcher
-    (hound.exe on Windows). While it runs, NOTHING can replace hound.exe
-    (Windows locks it; on POSIX the file can be replaced but the running
-    server keeps the old code in memory). So BEFORE touching pip, we check
-    for OTHER running hound processes and refuse to update until they're
-    stopped. This prevents the half-update where pip installs new metadata
-    but cannot replace the locked launcher (metadata says new version, the
-    binary is still the old one).
-
-    On Windows, once no other hound process is running, we also stage the
-    live launcher aside (rename hound.exe -> hound.exe.old) before pip runs,
-    because the `hound -u` process ITSELF holds hound.exe and Windows forbids
-    overwriting a running .exe (rename is allowed). pip writes a fresh
-    hound.exe; the .old is swept on the next launch. macOS/Linux have no
-    file lock, so staging is skipped and pip runs synchronously.
+    Refuses to run while another hound process holds the launcher (a running
+    MCP server), because pip can't replace a locked hound.exe and a half-update
+    leaves the metadata newer than the binary. On Windows, stages the running
+    launcher aside (rename hound.exe -> hound.exe.old) so pip can replace it.
+    Every failure path prints an actionable, platform-aware recovery command
+    (stop command + reinstall command), and a silent no-op (pip returns 0 but
+    the version didn't advance) is detected and explained.
     """
     import subprocess
     installed, latest, is_current = _check_version()
 
     if installed == "unknown":
-        # Metadata missing (interrupted previous update). A reinstall fixes it;
-        # since this binary already has the working updater, just proceed.
+        # Metadata missing (interrupted previous update). A reinstall fixes it.
         print("Hound install metadata is missing; reinstalling to recover...")
 
     if not latest:
-        print(f"Hound v{installed}: can't check for updates.")
+        print(f"Hound v{installed}: couldn't reach PyPI to check for updates.")
+        print("  Check your internet connection, then re-run:  hound -u")
+        print("  or upgrade manually:  pip install --upgrade hound-mcp[all]")
         return
 
     try:
@@ -2384,6 +2388,7 @@ def _do_update():
             print(f"Hound v{installed} (latest)")
             return
     except (ValueError, IndexError):
+        # installed is "unknown" or unparseable — fall through and reinstall.
         pass
 
     # Refuse to update while another hound process holds the launcher. This is
@@ -2391,15 +2396,14 @@ def _do_update():
     others = _other_hound_pids()
     if others:
         print("Cannot update: another hound process is running and holds the")
-        print("launcher against replacement:")
+        print("launcher against replacement (a hound MCP server stays alive and")
+        print("locks hound.exe / hound):")
         for p in others:
             print(f"  PID {p}")
-        print("Stop it first — close the client that runs hound as an MCP server,")
-        if sys.platform == "win32":
-            print("or run:  taskkill /IM hound.exe /F")
-        else:
-            print("or run:  pkill -f hound")
+        print("Stop it first:")
+        print(f"  {_stop_hound_cmd()}")
         print("then re-run:  hound -u")
+        print(f"or recover manually:  {_reinstall_cmd(latest)}")
         sys.exit(1)
 
     pip_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
@@ -2416,24 +2420,45 @@ def _do_update():
     print(f"Updating v{installed} to v{latest}...")
     try:
         result = subprocess.run(pip_cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("  update timed out (pip took too long). Re-run:  hound -u")
+        print(f"  or recover manually:  {_reinstall_cmd(latest)}")
+        sys.exit(1)
     except Exception as e:
         print(f"  update failed: {e}")
-        print("  Manual recovery: python -m pip install --upgrade hound-mcp[all]")
+        print(f"  Recover manually:  {_reinstall_cmd(latest)}")
         sys.exit(1)
 
     if result.returncode != 0:
         if _looks_like_file_lock_error(result.stderr):
-            # Detection missed a running hound process, or another process
-            # grabbed the launcher mid-update. Don't retry in the background
-            # (that risks a metadata/binary mismatch) — tell the user.
-            print("  hound.exe is locked by another process. Stop any running")
-            print("  hound MCP server, then re-run:  hound -u")
-            print("  (or recover manually: python -m pip install --upgrade hound-mcp[all])")
+            print("  hound.exe is locked by another process (a running hound MCP")
+            print("  server). Stop it, then re-run:  hound -u")
+            print(f"    {_stop_hound_cmd()}")
+            print(f"  or recover manually:  {_reinstall_cmd(latest)}")
         else:
             _print_pip_failure(result)
+            print(f"  Recover manually:  {_reinstall_cmd(latest)}")
         sys.exit(1)
 
     new_ver = _check_version()[0]
+    # Detect a silent no-op / partial update: pip returned 0 but the version
+    # didn't advance (hound.exe couldn't be replaced, or metadata got wiped).
+    if new_ver == "unknown":
+        print("  Upgrade failed: package metadata is missing after the update.")
+        print(f"  Recover manually:  {_reinstall_cmd(latest)}")
+        sys.exit(1)
+    try:
+        advanced = _pad_version(new_ver) >= _pad_version(latest)
+    except (ValueError, IndexError):
+        advanced = (new_ver == latest)
+    if not advanced:
+        print(f"  The upgrade to v{latest} did not complete. hound.exe could not be")
+        print("  replaced (a running hound MCP server likely holds it). Stop it:")
+        print(f"    {_stop_hound_cmd()}")
+        print("  then re-run:  hound -u")
+        print(f"  or recover manually:  {_reinstall_cmd(latest)}")
+        sys.exit(1)
+
     print(f"Hound v{new_ver}")
     if staged_old:
         print("  (old launcher will be cleaned up on next launch)")
@@ -2470,19 +2495,20 @@ def main():
             print(_corrupted_install_message())
             if latest:
                 print(f"  Latest known version: v{latest}")
+                print(f"  Recover with:  {_reinstall_cmd(latest)}")
             return
-        if latest and is_current:
+        if latest is None:
+            print(f"Hound v{installed} (couldn't reach PyPI to check for updates).")
+            print("  Check your internet, then re-run:  hound -v")
+            return
+        try:
+            up_to_date = _pad_version(installed) >= _pad_version(latest)
+        except (ValueError, IndexError):
+            up_to_date = bool(is_current)
+        if up_to_date:
             print(f"Hound v{installed} (latest)")
-        elif latest:
-            try:
-                if _pad_version(installed) >= _pad_version(latest):
-                    print(f"Hound v{installed} (latest)")
-                else:
-                    print(f"Hound v{installed}. v{latest} available. Run hound -u to update.")
-            except (ValueError, IndexError):
-                print(f"Hound v{installed}")
         else:
-            print(f"Hound v{installed}")
+            print(f"Hound v{installed}. v{latest} available. Run `hound -u` to update.")
         return
 
     srv = MasterFetchServer(cache_ttl=args.cache_ttl)

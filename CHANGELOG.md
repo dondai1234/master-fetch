@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.6.6] - 2026-06-18
+
+### Fixed
+- **Bulletproof, platform-aware error messages on every `hound -u` / `hound -v` failure path.** No more silent no-ops or dead-ends. Every path now tells the user exactly what to do, with the correct command for their OS.
+- **Silent no-op detection (the bug that stranded users).** Previously, when pip returned 0 but `hound.exe` couldn't be replaced (a running hound MCP server holds it), `hound -u` just printed `Hound v<old>` after `Updating to v<new>...` — looking like success while nothing changed. Now `_do_update` re-reads the version after pip and, if it didn't advance, prints: "The upgrade to vX did not complete. hound.exe could not be replaced (a running hound MCP server likely holds it). Stop it: <platform stop cmd>, then re-run `hound -u`, or recover manually: pip install --force-reinstall --no-deps hound-mcp==X".
+- **Platform-aware recovery commands** via two helpers: `_stop_hound_cmd()` (`taskkill /IM hound.exe /F` on Windows, `pkill -f hound` on macOS/Linux) and `_reinstall_cmd(ver)` (`pip install --force-reinstall --no-deps hound-mcp==ver`, same everywhere). Every failure path (running server, file lock, pip error, timeout, silent no-op, corrupted metadata) prints both the stop command and the reinstall command.
+- **New failure paths covered with messages:**
+  - PyPI unreachable (`hound -v` and `hound -u`): "couldn't reach PyPI to check for updates" + manual upgrade command.
+  - pip timeout: "update timed out (pip took too long)" + reinstall command.
+  - Corrupted result after update (metadata wiped): "package metadata is missing after the update" + reinstall command.
+  - `hound -v` corrupted install now prints the exact reinstall command for the latest known version.
+
+### Notes
+- No new features. No public API changes. 290 tests pass (7 new bulletproof-message tests: silent no-op, PyPI unreachable for -u and -v, pip timeout, platform-aware stop command, reinstall-cmd format, corrupted-install reinstall cmd).
+- **Recovery for users already stuck on an older binary** (whose `hound -u` is the buggy one): run pip directly once, after stopping any running hound MCP server:
+  ```bash
+  taskkill /IM hound.exe /F            # Windows  (POSIX: pkill -f hound)
+  pip install --force-reinstall --no-deps hound-mcp==3.6.6
+  ```
+  After that, `hound -u` gives honest, actionable messages on every failure.
+
 ## [3.6.5] - 2026-06-18
 
 ### Fixed

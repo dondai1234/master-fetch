@@ -30,6 +30,8 @@ from master_fetch.server import (
     _cleanup_old_launcher,
     _looks_like_file_lock_error,
     _other_hound_pids,
+    _stop_hound_cmd,
+    _reinstall_cmd,
     _do_update,
     _corrupted_install_message,
 )
@@ -424,7 +426,8 @@ class TestSelfUpdateRunningServer:
             with pytest.raises(SystemExit):
                 _do_update()
         out = capsys.readouterr().out
-        assert "Manual recovery" in out
+        assert "Recover manually" in out
+        assert "--force-reinstall" in out and "hound-mcp==3.6.4" in out
 
 
 class TestSelfUpdatePosix:
@@ -490,9 +493,98 @@ class TestCorruptedInstallDiagnosis:
 
         cv = MagicMock(side_effect=[("unknown", "3.6.4", False), ("3.6.4", "3.6.4", True)])
         with patch.object(srv_mod, "_check_version", side_effect=cv.side_effect), \
+             patch.object(srv_mod, "_other_hound_pids", return_value=[]), \
              patch.object(srv_mod, "_stage_running_launcher", return_value=None), \
              patch("subprocess.run", return_value=OkResult()):
             srv_mod._do_update()
         out = capsys.readouterr().out
         assert "metadata is missing" in out.lower() or "reinstalling" in out.lower()
         assert "Hound v3.6.4" in out
+
+
+class TestBulletproofErrorMessages:
+    """Every `hound -u` / `hound -v` failure path must print an actionable,
+    platform-aware recovery command. No silent no-ops, no dead-ends.
+    """
+
+    def test_stop_hound_cmd_is_platform_aware(self, monkeypatch):
+        import master_fetch.server as srv_mod
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert srv_mod._stop_hound_cmd() == "taskkill /IM hound.exe /F"
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert srv_mod._stop_hound_cmd() == "pkill -f hound"
+        monkeypatch.setattr(sys, "platform", "darwin")
+        assert srv_mod._stop_hound_cmd() == "pkill -f hound"
+
+    def test_reinstall_cmd_format(self):
+        assert _reinstall_cmd("3.6.6") == "pip install --force-reinstall --no-deps hound-mcp==3.6.6"
+
+    def test_do_update_detects_silent_no_op(self, tmp_path, capsys):
+        # pip returns 0 but the version didn't advance (hound.exe couldn't be
+        # replaced). Must be detected and explained, not silently reported as
+        # the old version.
+        import master_fetch.server as srv_mod
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")
+
+        class OkResult:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        with patch.object(srv_mod, "_hound_launcher_path", return_value=str(exe)), \
+             patch.object(srv_mod, "_check_version",
+                          side_effect=[("3.6.4", "3.6.5", False), ("3.6.4", "3.6.5", False)]), \
+             patch.object(srv_mod, "_other_hound_pids", return_value=[]), \
+             patch.object(srv_mod, "_stage_running_launcher", return_value=str(exe) + ".old"), \
+             patch("subprocess.run", return_value=OkResult()):
+            with pytest.raises(SystemExit):
+                _do_update()
+        out = capsys.readouterr().out
+        assert "did not complete" in out, "must flag the silent no-op"
+        assert "v3.6.5" in out
+        # Must include BOTH the stop command and the manual reinstall command.
+        assert "taskkill /IM hound.exe /F" in out or "pkill -f hound" in out
+        assert "--force-reinstall" in out and "hound-mcp==3.6.5" in out
+
+    def test_do_update_pypi_unreachable_message(self, capsys):
+        import master_fetch.server as srv_mod
+        with patch.object(srv_mod, "_check_version", return_value=("3.6.5", None, None)):
+            _do_update()  # must NOT sys.exit (just prints + returns)
+        out = capsys.readouterr().out
+        assert "couldn't reach PyPI" in out
+        assert "pip install --upgrade hound-mcp[all]" in out
+
+    def test_do_update_timeout_message(self, tmp_path, capsys):
+        import subprocess, master_fetch.server as srv_mod
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")
+        with patch.object(srv_mod, "_hound_launcher_path", return_value=str(exe)), \
+             patch.object(srv_mod, "_check_version",
+                          side_effect=[("3.6.4", "3.6.5", False), ("3.6.5", "3.6.5", True)]), \
+             patch.object(srv_mod, "_other_hound_pids", return_value=[]), \
+             patch.object(srv_mod, "_stage_running_launcher", return_value=str(exe) + ".old"), \
+             patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=["pip"], timeout=300)):
+            with pytest.raises(SystemExit):
+                _do_update()
+        out = capsys.readouterr().out
+        assert "timed out" in out.lower()
+        assert "--force-reinstall" in out and "hound-mcp==3.6.5" in out
+
+    def test_version_command_pypi_unreachable(self, monkeypatch, capsys):
+        import master_fetch.server as srv_mod
+        monkeypatch.setattr(srv_mod, "_check_version", lambda: ("3.6.5", None, None))
+        monkeypatch.setattr(sys, "argv", ["hound", "-v"])
+        srv_mod.main()
+        out = capsys.readouterr().out
+        assert "couldn't reach PyPI" in out
+
+    def test_version_command_corrupted_shows_reinstall_cmd(self, monkeypatch, capsys):
+        import master_fetch.server as srv_mod
+        monkeypatch.setattr(srv_mod, "_check_version", lambda: ("unknown", "3.6.6", False))
+        monkeypatch.setattr(sys, "argv", ["hound", "-v"])
+        srv_mod.main()
+        out = capsys.readouterr().out
+        assert "corrupted" in out.lower()
+        assert "hound-mcp==3.6.6" in out, "corrupted path must print the exact reinstall cmd"
+        assert "vunknown" not in out
