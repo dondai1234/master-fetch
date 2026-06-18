@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.6.5] - 2026-06-18
+
+### Fixed
+- **`hound -u` no longer creates a metadata/binary mismatch when a hound MCP server is running.** The 3.6.3 detached-background-updater fallback was actively harmful in the common case where hound runs as a long-lived MCP server: that server process holds `hound.exe` against replacement, so the detached updater's pip run installed the new package *metadata* but could NOT replace `hound.exe` (WinError 32 on `hound.exe -> hound.exe.deleteme`), leaving the install in a broken state where `hound -v` reported the new version but the binary was still the old one. Removed the detached fallback entirely.
+- **`hound -u` now refuses to update while another hound process is running.** `_other_hound_pids()` (cross-platform: `tasklist` on Windows, `ps` on macOS/Linux) detects other running hound launchers BEFORE pip is invoked. If any are found, `hound -u` prints their PIDs and the exact stop command (`taskkill /IM hound.exe /F` / `pkill -f hound`), then exits without touching pip — so a half-update is now impossible. This is the only reliable fix: a running hound MCP server holds the launcher, and no self-update trick can replace a file another process has locked.
+- **Honest pip-failure message.** If the running-process check misses something and pip still hits the file lock, `hound -u` now prints "hound.exe is locked by another process. Stop any running hound MCP server, then re-run: hound -u" instead of promising a background updater that would silently fail.
+
+### Notes
+- No new features. No public API changes. 283 tests pass (replaced the detached-fallback tests with running-server-detection tests + abort-behavior tests).
+- **Recovery for a machine already in the mismatch state** (metadata newer than the binary, e.g. `hound -v` says 3.6.4 but `hound.exe` is older):
+  ```bash
+  taskkill /IM hound.exe /F            # Windows: stop the running hound MCP server
+  # (POSIX: pkill -f hound)
+  pip install --force-reinstall --no-deps hound-mcp==3.6.5
+  ```
+  The MCP client will respawn hound (now the new binary) on next use.
+
 ## [3.6.4] - 2026-06-17
 
 ### Fixed

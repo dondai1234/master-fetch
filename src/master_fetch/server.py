@@ -2269,54 +2269,49 @@ def _looks_like_file_lock_error(stderr: str) -> bool:
             or "permission denied" in s and "hound" in s)
 
 
-def _spawn_detached_updater(pip_cmd: list) -> bool:
-    """Last-resort fallback: run pip after this process exits.
+def _other_hound_pids() -> list[int]:
+    """PIDs of OTHER running hound launcher processes (excludes this one).
 
-    Used only on Windows when launcher staging failed AND pip hit the file
-    lock. Spawns a detached child that waits for the parent to exit (so the
-    lock on hound.exe is released), then runs pip. Cross-platform-safe: on
-    Windows it detaches with no console window; on POSIX it starts a new
-    session. Returns True if the updater was spawned.
-
-    The child writes its outcome to a log file (hound_updater.log in the
-    cache dir) since it has no console to print to.
+    Cross-platform. Detects a long-running hound MCP server that holds the
+    launcher (hound.exe on Windows, `hound` on POSIX) against an in-place
+    upgrade. Returns [] on detection failure (we never block the update just
+    because we couldn't enumerate processes — the pip-failure path handles it).
     """
     import subprocess
-    log_path = os.path.join(os.path.expanduser("~"), ".master_fetch_cache",
-                            "hound_updater.log")
-    # Serialize the pip command safely for the child one-liner.
-    pip_repr = ",".join(repr(c) for c in pip_cmd)
-    child_src = (
-        "import time, subprocess, sys, os\n"
-        "time.sleep(2)  # let the parent (hound) exit and release the file lock\n"
-        f"r = subprocess.run([{pip_repr}], capture_output=True, text=True, timeout=300)\n"
-        f"os.makedirs(os.path.dirname({log_path!r}), exist_ok=True)\n"
-        f"open({log_path!r}, 'w', encoding='utf-8').write(\n"
-        "    f'pip returncode={r.returncode}\\n' + (r.stdout or '') + (r.stderr or '')\n"
-        ")\n"
-    )
+    my_pid = os.getpid()
+    pids: list[int] = []
     try:
         if sys.platform == "win32":
-            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW:
-            # the child runs with no console, fully independent of the parent.
-            CREATE_NEW_PROCESS_GROUP = 0x00000200
-            DETACHED_PROCESS = 0x00000008
-            CREATE_NO_WINDOW = 0x08000000
-            subprocess.Popen(
-                [sys.executable, "-c", child_src],
-                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-                close_fds=True,
+            out = subprocess.check_output(
+                ["tasklist", "/FI", "IMAGENAME eq hound.exe", "/FO", "CSV", "/NH"],
+                text=True, timeout=10, creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
+            for line in out.splitlines():
+                # Line: "hound.exe","PID","Session","SessionNum","Mem"
+                parts = [p.strip().strip('"') for p in line.split('","')]
+                if len(parts) >= 2 and parts[0].lower() == "hound.exe":
+                    try:
+                        pid = int(parts[1])
+                    except ValueError:
+                        continue
+                    if pid != my_pid:
+                        pids.append(pid)
         else:
-            subprocess.Popen(
-                [sys.executable, "-c", child_src],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-        return True
+            out = subprocess.check_output(["ps", "-eo", "pid=,comm="], text=True, timeout=10)
+            for line in out.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pid_s, comm = line.split(None, 1)
+                    pid = int(pid_s)
+                except ValueError:
+                    continue
+                if os.path.basename(comm.strip()) == "hound" and pid != my_pid:
+                    pids.append(pid)
     except Exception:
-        return False
+        return []
+    return pids
 
 
 def _corrupted_install_message() -> str:
@@ -2354,28 +2349,30 @@ def _print_pip_failure(result) -> None:
 
 
 def _do_update():
-    """Update hound-mcp via pip. Cross-platform; Windows-lock-safe.
+    """Update hound-mcp via pip. Cross-platform; safe against a running server.
 
-    On Windows the running hound.exe locks itself against overwrite, so a
-    naive `pip install --upgrade` fails with WinError 32. We handle it in
-    two layers:
-      1. Stage the live launcher aside (rename hound.exe -> hound.exe.old)
-         before pip runs. Windows allows renaming a running .exe even though
-         it forbids overwriting it. pip then writes a fresh hound.exe. The
-         .old is swept on the next launch.
-      2. If staging failed (read-only install, weird layout) AND pip still
-         hits the file lock, spawn a detached updater that waits for this
-         process to exit (releasing the lock) and then runs pip.
-    On macOS/Linux there is no file lock, so staging is skipped and pip runs
-    synchronously. Every failure path prints the manual recovery command.
+    A hound MCP server is a long-lived process that holds the launcher
+    (hound.exe on Windows). While it runs, NOTHING can replace hound.exe
+    (Windows locks it; on POSIX the file can be replaced but the running
+    server keeps the old code in memory). So BEFORE touching pip, we check
+    for OTHER running hound processes and refuse to update until they're
+    stopped. This prevents the half-update where pip installs new metadata
+    but cannot replace the locked launcher (metadata says new version, the
+    binary is still the old one).
+
+    On Windows, once no other hound process is running, we also stage the
+    live launcher aside (rename hound.exe -> hound.exe.old) before pip runs,
+    because the `hound -u` process ITSELF holds hound.exe and Windows forbids
+    overwriting a running .exe (rename is allowed). pip writes a fresh
+    hound.exe; the .old is swept on the next launch. macOS/Linux have no
+    file lock, so staging is skipped and pip runs synchronously.
     """
     import subprocess
     installed, latest, is_current = _check_version()
 
     if installed == "unknown":
         # Metadata missing (interrupted previous update). A reinstall fixes it;
-        # since this binary already has the working updater, just proceed —
-        # pip install --upgrade will restore the metadata and the launcher.
+        # since this binary already has the working updater, just proceed.
         print("Hound install metadata is missing; reinstalling to recover...")
 
     if not latest:
@@ -2389,15 +2386,31 @@ def _do_update():
     except (ValueError, IndexError):
         pass
 
+    # Refuse to update while another hound process holds the launcher. This is
+    # the only way to avoid a metadata/binary mismatch.
+    others = _other_hound_pids()
+    if others:
+        print("Cannot update: another hound process is running and holds the")
+        print("launcher against replacement:")
+        for p in others:
+            print(f"  PID {p}")
+        print("Stop it first — close the client that runs hound as an MCP server,")
+        if sys.platform == "win32":
+            print("or run:  taskkill /IM hound.exe /F")
+        else:
+            print("or run:  pkill -f hound")
+        print("then re-run:  hound -u")
+        sys.exit(1)
+
     pip_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
                "-qq", "--no-cache-dir", "--disable-pip-version-check",
                "--no-python-version-warning"]
 
-    # Layer 1: stage the running Windows launcher aside (no-op on POSIX).
+    # Windows: stage the running launcher aside so pip can replace it (the
+    # `hound -u` process itself holds hound.exe; rename allowed, overwrite not).
+    # No-op on POSIX.
     staged_old = _stage_running_launcher()
     if sys.platform == "win32" and staged_old is None and _hound_launcher_path():
-        # Launcher exists but could not be staged — warn, but still try pip
-        # (layer 2 will catch a file-lock failure).
         print("  warn: could not stage running launcher; trying direct update.")
 
     print(f"Updating v{installed} to v{latest}...")
@@ -2409,17 +2422,15 @@ def _do_update():
         sys.exit(1)
 
     if result.returncode != 0:
-        # Layer 2: detached fallback only when we could not stage and pip
-        # hit the file lock. No point retrying detached if pip failed for
-        # any other reason (auth, network, missing pip in the venv).
-        if (staged_old is None and sys.platform == "win32"
-                and _looks_like_file_lock_error(result.stderr)):
-            if _spawn_detached_updater(pip_cmd):
-                print("  hound.exe is locked by this running process. A background")
-                print("  updater will finish the upgrade once this command exits.")
-                print("  Re-run 'hound -v' in a few seconds to confirm the new version.")
-                return
-        _print_pip_failure(result)
+        if _looks_like_file_lock_error(result.stderr):
+            # Detection missed a running hound process, or another process
+            # grabbed the launcher mid-update. Don't retry in the background
+            # (that risks a metadata/binary mismatch) — tell the user.
+            print("  hound.exe is locked by another process. Stop any running")
+            print("  hound MCP server, then re-run:  hound -u")
+            print("  (or recover manually: python -m pip install --upgrade hound-mcp[all])")
+        else:
+            _print_pip_failure(result)
         sys.exit(1)
 
     new_ver = _check_version()[0]

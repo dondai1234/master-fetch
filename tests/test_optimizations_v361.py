@@ -28,8 +28,8 @@ from master_fetch.server import (
     _hound_launcher_path,
     _stage_running_launcher,
     _cleanup_old_launcher,
-    _spawn_detached_updater,
     _looks_like_file_lock_error,
+    _other_hound_pids,
     _do_update,
     _corrupted_install_message,
 )
@@ -295,6 +295,7 @@ class TestSelfUpdateLauncherStaging:
             return FakeResult()
 
         with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
+             patch("master_fetch.server._other_hound_pids", return_value=[]), \
              patch("master_fetch.server._check_version",
                    side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
              patch("subprocess.run", side_effect=fake_run):
@@ -306,9 +307,11 @@ class TestSelfUpdateLauncherStaging:
         assert (tmp_path / "hound.exe.old").exists(), "staged .old must remain for post-exit sweep"
 
 
-class TestSelfUpdateDetachedFallback:
-    """Layer 2: when staging fails and pip hits the file lock, spawn a detached
-    updater that runs pip after the current process exits.
+class TestSelfUpdateRunningServer:
+    """A long-running hound MCP server holds hound.exe and blocks any in-place
+    upgrade. `hound -u` must detect it BEFORE running pip and refuse, so pip
+    never installs new metadata it can't pair with a new binary (the
+    metadata/binary mismatch the detached fallback used to cause).
     """
 
     def test_file_lock_detector(self):
@@ -319,52 +322,70 @@ class TestSelfUpdateDetachedFallback:
         assert not _looks_like_file_lock_error("ERROR: No matching distribution")
         assert not _looks_like_file_lock_error("")
 
-    def test_spawn_detached_updater_returns_false_on_popen_error(self):
-        import subprocess as sp
-        with patch.object(sp, "Popen", side_effect=OSError("boom")):
-            assert _spawn_detached_updater(["py", "-m", "pip", "install", "-q", "x"]) is False
-
-    def test_detached_updater_child_source_compiles_and_substitutes(self):
-        """The generated one-liner handed to the detached child must be valid
-        Python and must actually substitute r.returncode (not emit a literal
-        '{r.returncode}'). Regression: an earlier version double-braced the
-        placeholder, silently producing a useless log file.
-        """
-        import subprocess as sp
-        captured = {}
-        class FakeProc:
-            pass
-        def fake_popen(args, **kwargs):
-            captured["args"] = args
-            return FakeProc()
-        with patch.object(sp, "Popen", side_effect=fake_popen):
-            assert _spawn_detached_updater([sys.executable, "-m", "pip", "install", "-q", "pkg"]) is True
-        # args = [python, '-c', child_src]
-        child_src = captured["args"][2]
-        # Must compile cleanly.
-        compile(child_src, "<detached_updater>", "exec")
-        # Must contain a real f-string substitution for r.returncode, not a literal.
-        assert "f'pip returncode={r.returncode}" in child_src, (
-            "child source must substitute r.returncode, not emit a literal"
+    def test_other_pids_parses_tasklist_windows(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        fake_tasklist = (
+            '"hound.exe","11736","Console","10","3,776 K"\r\n'
+            '"hound.exe","99999","Console","10","4,000 K"\r\n'
+            '"python.exe","12345","Console","10","50,000 K"\r\n'
         )
-        assert "{{r.returncode}}" not in child_src, "double-braced placeholder must not survive"
-
-    @pytest.mark.skipif(sys.platform != "win32", reason="detached fallback is Windows-only")
-    def test_spawn_detached_updater_detaches_on_windows(self):
         import subprocess as sp
-        with patch.object(sp, "Popen") as m:
-            ok = _spawn_detached_updater(["py", "-m", "pip", "install", "-q", "x"])
-        assert ok is True
-        assert m.called
-        flags = m.call_args.kwargs.get("creationflags", 0)
-        assert flags & 0x00000008, "must set DETACHED_PROCESS on Windows"
-        assert m.call_args.kwargs.get("close_fds") is True
+        with patch.object(sp, "check_output", return_value=fake_tasklist):
+            pids = _other_hound_pids()
+        # Both hound.exe PIDs except our own (os.getpid() won't be 11736/99999).
+        assert 11736 in pids and 99999 in pids
+        assert 12345 not in pids, "non-hound processes must be ignored"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="detached fallback is Windows-only")
-    def test_do_update_falls_back_to_detached_when_staging_fails(self, tmp_path, capsys):
-        # Staging fails (launcher path missing) AND pip returns WinError 32 ->
-        # _do_update must spawn the detached updater and return (no sys.exit).
-        exe = tmp_path / "missing.exe"
+    def test_other_pids_parses_ps_posix(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        my_pid = __import__("os").getpid()
+        fake_ps = (
+            f"  {my_pid} hound\n"
+            "  11736 hound\n"
+            "  12345 python3\n"
+            "  22001 /usr/local/bin/hound\n"
+        )
+        import subprocess as sp
+        with patch.object(sp, "check_output", return_value=fake_ps):
+            pids = _other_hound_pids()
+        assert 11736 in pids and 22001 in pids, "other hound processes must be found"
+        assert my_pid not in pids, "own PID must be excluded"
+        assert 12345 not in pids, "non-hound processes must be ignored"
+
+    def test_other_pids_returns_empty_on_enumeration_failure(self, monkeypatch):
+        import subprocess as sp
+        with patch.object(sp, "check_output", side_effect=FileNotFoundError("no tasklist")):
+            assert _other_hound_pids() == [], "detection failure must not block the update"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="abort path tested on win32")
+    def test_do_update_aborts_when_other_hound_running(self, tmp_path, capsys):
+        # A running hound MCP server (PID 11736) -> _do_update must refuse and
+        # exit BEFORE calling pip (no metadata/binary mismatch).
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")
+
+        with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
+             patch("master_fetch.server._check_version",
+                   side_effect=[("3.6.3", "3.6.4", False), ("3.6.4", "3.6.4", True)]), \
+             patch("master_fetch.server._other_hound_pids", return_value=[11736]) as mock_pids, \
+             patch("subprocess.run") as mock_run, \
+             patch("master_fetch.server._stage_running_launcher") as mock_stage:
+            with pytest.raises(SystemExit):
+                _do_update()
+        out = capsys.readouterr().out
+        assert mock_pids.called, "must check for running hound processes"
+        assert not mock_run.called, "must NOT run pip while the launcher is locked"
+        assert not mock_stage.called, "must NOT stage before the running-server check"
+        assert "PID 11736" in out
+        assert "taskkill /IM hound.exe /F" in out
+        assert "hound -u" in out
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="file-lock message tested on win32")
+    def test_do_update_file_lock_failure_message_no_detached_spawn(self, tmp_path, capsys):
+        # Detection missed the running server, pip hit the file lock anyway ->
+        # honest message, no background spawn, no metadata/binary mismatch.
+        exe = tmp_path / "hound.exe"
+        exe.write_text("live")  # staging succeeds so we reach pip
 
         class LockResult:
             returncode = 1
@@ -374,18 +395,20 @@ class TestSelfUpdateDetachedFallback:
 
         with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
              patch("master_fetch.server._check_version",
-                   side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
-             patch("subprocess.run", return_value=LockResult()), \
-             patch("master_fetch.server._spawn_detached_updater", return_value=True) as mock_spawn:
-            _do_update()  # must NOT raise / sys.exit
+                   side_effect=[("3.6.3", "3.6.4", False), ("3.6.4", "3.6.4", True)]), \
+             patch("master_fetch.server._other_hound_pids", return_value=[]), \
+             patch("master_fetch.server._stage_running_launcher", return_value=str(exe) + ".old"), \
+             patch("subprocess.run", return_value=LockResult()):
+            with pytest.raises(SystemExit):
+                _do_update()
         out = capsys.readouterr().out
-        assert mock_spawn.called, "detached updater must be spawned on file-lock failure"
-        assert "hound -v" in out
+        assert "locked by another process" in out
+        assert "background" not in out.lower(), "must not promise a background updater"
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="detached fallback is Windows-only")
+    @pytest.mark.skipif(sys.platform != "win32", reason="recovery message tested on win32")
     def test_do_update_non_lock_failure_prints_recovery_and_exits(self, tmp_path, capsys):
         exe = tmp_path / "hound.exe"
-        exe.write_text("live")  # staging succeeds -> no detached fallback
+        exe.write_text("live")
 
         class NetResult:
             returncode = 1
@@ -394,13 +417,13 @@ class TestSelfUpdateDetachedFallback:
 
         with patch("master_fetch.server._hound_launcher_path", return_value=str(exe)), \
              patch("master_fetch.server._check_version",
-                   side_effect=[("3.6.0", "3.6.1", False), ("3.6.1", "3.6.1", True)]), \
-             patch("subprocess.run", return_value=NetResult()), \
-             patch("master_fetch.server._spawn_detached_updater", return_value=True) as mock_spawn:
+                   side_effect=[("3.6.3", "3.6.4", False), ("3.6.4", "3.6.4", True)]), \
+             patch("master_fetch.server._other_hound_pids", return_value=[]), \
+             patch("master_fetch.server._stage_running_launcher", return_value=str(exe) + ".old"), \
+             patch("subprocess.run", return_value=NetResult()):
             with pytest.raises(SystemExit):
                 _do_update()
         out = capsys.readouterr().out
-        assert not mock_spawn.called, "non-lock failure must not spawn detached updater"
         assert "Manual recovery" in out
 
 
