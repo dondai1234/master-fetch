@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🐕 Hound
+# <img src="https://raw.githubusercontent.com/dondai1234/master-fetch/master/docs/hound-logo.png" alt="hound" width="44"> Hound
+
+<img src="https://raw.githubusercontent.com/dondai1234/master-fetch/master/docs/hound-hero.png" alt="Hound - web fetch, anti-bot, PDF and search for AI agents" width="896">
 
 **Give your AI agent the web. $0. Two commands. ~1.3K tokens.**
 
@@ -68,7 +70,7 @@ PDFs used to be a dead end. Now `smart_fetch` detects a PDF (by content-type **o
 - Honest signals: scanned/image-only PDFs return `content_ok=false` with a clear "needs OCR" hint; encrypted PDFs accept a `password`.
 
 ### 🔎 Search that tells the agent what to fetch
-`smart_search` returns results with a `fetch_relevance` tier (high/med/low) computed from query-term overlap and rank, plus a `fetch_hint` ("2 high, 3 med, 5 low — fetch the 'high' results first"). The agent fetches 1 to 2 results instead of all 10, saving tokens and time. Snippets are never enough on their own; the description tells the agent to always fetch the URL.
+`smart_search` returns results with a `fetch_relevance` tier (high/med/low) computed from query-term overlap and rank, plus a `fetch_hint` (`"2 high, 3 med, 5 low - fetch the 'high' results first"`). The agent fetches 1 to 2 results instead of all 10, saving tokens and time. Snippets are never enough on their own; the description tells the agent to always fetch the URL.
 
 ### 🐕 Reddit, optimized
 Reddit URLs are auto-rewritten to old.reddit.com (7x smaller pages) and skip straight to the stealthy browser (www.reddit.com walls HTTP). Subreddit listings are parsed into structured posts (title, score, comments, author, domain) from canonical per-post data attributes, with promoted ads filtered out and sticky/NSFW posts tagged.
@@ -151,6 +153,10 @@ Install the Hound MCP server. Follow every step. Do not skip any.
 ---
 
 ## How it works
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/dondai1234/master-fetch/master/docs/hound-scene.png" alt="Hound retrieving a page from the web" width="768">
+</div>
 
 ```
 smart_fetch(url)
