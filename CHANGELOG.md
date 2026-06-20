@@ -1,5 +1,43 @@
 # Changelog
 
+## [4.0.0] - 2026-06-20
+
+The agent-effectiveness release. Hound now masters itself the moment it connects, reads PDFs, and tells the agent exactly what to do next. **Breaking:** the manual `open_session` / `close_session` / `list_sessions` MCP tools are removed (8 tools → 5); a single warm browser is managed automatically.
+
+### Added — flagship: PDF extraction
+- **`smart_fetch` now extracts PDFs to structured, agent-optimized markdown.** PDFs are detected by content-type or `%PDF` magic bytes and routed to a new `pdf_extractor` built on `pdfplumber` (MIT, no AGPL): multi-column reading order, real tables as markdown tables, font-size heading detection, de-hyphenated paragraphs, a metadata header (title/author/date/subject), and `--- Page N ---` markers for citation.
+- **`pages` param** (`"1-5"`, `"1,3,5-7"`) extracts a PDF subset to save tokens/time on big PDFs. **`password`** for encrypted PDFs. Both flow to the extractor via contextvars (task-local, bulk-safe); the cache key includes `pages` so subsets don't collide with full-PDF entries.
+- Honest PDF signals: scanned/image-only PDFs return `content_ok=false` + a "needs OCR" `next_action`; encrypted PDFs report and accept a password; not-a-PDF/empty/corrupt are reported honestly.
+- `pdfplumber` added to `[all]` (lean install unaffected).
+
+### Added — connect-time mastery + actionable responses
+- **MCP `instructions` at `initialize`.** A concise orientation (~365 tokens, paid once at handshake) gives the agent the 3-tool mental model, the #1 search→fetch workflow, and the known limits.
+- **Agent-facing response fields on every fetch:** `summary` (one-line status), `content_ok` (trust content only if true), `next_action` (the obvious next call: paginate / bypass robots / switch sources), `fetched_at` (ISO-8601 UTC).
+- **`smart_search` `fetch_relevance`** (high/med/low) per result + a `fetch_hint` so the agent fetches 1-2 results instead of all 10.
+- **Promoted `css_selector`, `max_content_chars`, `timeout`** to first-class `smart_fetch` params (were buried in the `options` bag). `max_content_chars` is a token-spend control. Units + defaults on every param description.
+
+### Changed — single warm browser instance
+- **Removed `open_session` / `close_session` / `list_sessions` MCP tools** (and the `list_sessions` method). `open_session`/`close_session` stay as internal helpers. Tool count 8 → 5.
+- **Eager warm-up at server startup** (was: pre-warm on first `smart_search`). The single stealthy Chrome launches when the harness starts the server, in parallel with the handshake.
+- **No second browser ever spawns**: a new `_auto_session_lock` serializes auto-session creation. Keep-alive-forever; graceful shutdown closes the browser when the harness closes.
+- `screenshot` now auto-manages a stealthy session (`session_id` optional); description clarifies it's for multimodal agents.
+
+### Changed — Reddit optimization hardened
+- Reddit URLs now **skip HTTP and go straight to stealthy** (www.reddit.com walls HTTP; saves ~1s). The old.reddit.com rewrite runs before `force_fetcher` so a pinned `http` also benefits.
+- **Listing parser rewritten** to read per-post `data-*` attributes (was: span-scraping that misaligned scores/comment counts on real HTML, e.g. reported score 27 for a post whose real `data-score` was 28). Thing-block detection fixed for real HTML (`class=" thing"` has a leading space). HTML entities unescaped; promoted ads skipped; sticky/NSFW tagged; `1 comment` singular grammar; per-block span fallback for user-profile pages.
+- `rewrite_to_old_reddit` now rejects lookalikes (`notreddit.com`) standalone.
+
+### Fixed — caching + JS-shell detection
+- **Bad content is no longer cached.** `_finalize_result` previously cached JS shells / bot challenges / error statuses for the whole TTL, and the cache-hit path didn't restore `error`, so `content_ok` came back `true` and the agent trusted broken cached pages. New `_is_cacheable`: cache only clean, non-blank, <400 content.
+- **Cache size cap + oldest eviction** (`MAX_CACHE_ENTRIES = 10000`) so a long-lived agent's DB can't grow unbounded.
+- **Search cache key includes `max_results`** (was: a 5-result and 10-result search collided on one cached entry).
+- **JS-shell detection catches SPAs whose shell text doesn't match known phrases** (e.g. `quotes.toscrape.com/js` returned a 29-char nav shell over HTTP with no escalation). New heuristic: HTTP tier + status 200 + large body + <200 chars text → JS shell → escalate to stealthy. Scoped to the HTTP tier so stealthy-rendered low-text pages (image galleries, canvas) don't false-positive.
+
+### Notes
+- No new public API beyond the additions above. Reddit/stealthy-default/PDF/caching are transparent to existing callers.
+- Full suite: 442 tests pass (5 e2e deselected). New test files: `tests/test_agent_qol.py`, `tests/test_cache_qol.py`, `tests/test_pdf_extractor.py`, `tests/test_reddit_routing.py`; real PDF fixtures `tests/background_checks.pdf` + `tests/dummy.pdf`; real Reddit HTML fixture `tests/old_reddit_real.html`.
+- README overhauled: 5-tool table, feature deep-dives, free-fetch comparison (Crawl4AI / Jina Reader / Firecrawl OSS / DIY), honest limits, ~1.3K token claim.
+
 ## [3.6.7] - 2026-06-18
 
 ### Fixed

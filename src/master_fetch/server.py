@@ -21,6 +21,7 @@ import os
 import sys
 from uuid import uuid4
 import asyncio
+import contextvars
 from asyncio import gather, Lock, sleep as asyncio_sleep, to_thread as asyncio_to_thread
 from datetime import datetime, timezone
 from time import time as now
@@ -106,6 +107,31 @@ MAX_BULK_URLS = 100  # hard cap to prevent DoS via unbounded parallel requests
 AUTO_SESSION_IDLE_TIMEOUT = 0  # 0 = keep browser alive forever. Pre-warmed on smart_search, stays idle until needed.
 IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 
+# MCP initialize `instructions` — injected into the agent's context ONCE on
+# connect by clients that support it. This is the connect-time mastery doc:
+# the #1 workflow, the gotchas, and when to use each tool. Kept tight (~300
+# tokens) since it is paid once, not per-turn-per-tool.
+HOUND_INSTRUCTIONS = (
+    "Hound = web access for this agent. 3 tools cover 95% of web work.\n"
+    "\n"
+    "• smart_fetch(url) — get any page. Auto-handles anti-bot (HTTP → stealthy Patchright browser). Returns extracted text + metadata.\n"
+    "  - One section only? pass css_selector (e.g. 'article', '.main').\n"
+    "  - Long page? response has is_truncated + next_offset → call again with offset=next_offset to page through.\n"
+    "  - Seems wrong/empty? check response.content_ok and response.next_action — they tell you what to do.\n"
+    "  - Many URLs? pass urls=['a','b'] (parallel bulk).\n"
+    "  - Raw HTML? extraction_type='html'.\n"
+    "  - PDFs: auto-extracted to structured markdown (tables/headings/metadata). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
+    "  - Cache: cache_ttl=0 forces a fresh fetch (default 1hr).\n"
+    "• smart_search(query) — find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
+    "• screenshot(url) — image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
+    "\n"
+    "#1 workflow (answer a factual question): smart_search → smart_fetch the 2 most relevant (fetch_relevance=high) results → synthesize, citing URLs.\n"
+    "\n"
+    "Known unbypassable (no free tool beats these): DataDome, Akamai, Cloudflare Turnstile (interactive). If smart_fetch fails on one, switch sources — do not retry the same URL.\n"
+    "\n"
+    "Pro tip: open_session once and reuse it for many fetches to skip browser cold-starts (power users only; smart_fetch auto-manages sessions otherwise)."
+)
+
 
 class ResponseModel(BaseModel):
     """Request's response information structure."""
@@ -125,6 +151,11 @@ class ResponseModel(BaseModel):
     next_offset: int = Field(default=0, description="Next offset when is_truncated. 0=no more")
     escalation_path: str = Field(default="", description="e.g. http→stealthy. Pre-v3.5 logs may contain http→dynamic→stealthy entries from the old 3-tier path.")
     retry_count: int = Field(default=0, description="Retries")
+    # Agent-facing signals (set by _with_agent_hints on every finalized response).
+    summary: str = Field(default="", description="One-line status for quick reasoning, e.g. '200 OK · 12.4KB markdown · http · truncated'")
+    content_ok: bool = Field(default=False, description="True = real content retrieved (status<400, no error, not a JS shell/login wall). Check this before trusting content.")
+    next_action: str = Field(default="", description="Suggested next call when one is obvious (paginate/retry/switch source). Empty = nothing to do.")
+    fetched_at: str = Field(default="", description="ISO-8601 UTC timestamp this response was generated. For cached responses, content age is bounded by cache_ttl.")
 
 
 class BulkResponseModel(BaseModel):
@@ -189,6 +220,13 @@ class _SessionEntry:
 
 # ─── Content quality detection (module-level, used by the class) ─────
 
+# Heuristic thresholds for catching JS-rendered SPAs whose HTTP shell text
+# doesn't match the known signal phrases (e.g. quotes.toscrape.com/js returns
+# a nav-only shell). Scoped to the HTTP tier so stealthy-rendered low-text
+# pages (image galleries, canvas apps) don't false-positive.
+_JS_SHELL_MIN_BODY_BYTES = 3000   # raw HTML body must be at least this large
+_JS_SHELL_MIN_TEXT_CHARS = 200    # ...while extracted text is below this
+
 _JS_SHELL_SIGNALS = [
     "enable javascript", "you need to enable javascript",
     "javascript is required", "javascript is disabled",
@@ -236,7 +274,19 @@ def _is_js_shell(result: ResponseModel) -> bool:
     content_str = " ".join(result.content).lower().strip()
     if not content_str:
         return True  # Empty content after extraction = JS shell or blank page
-    return any(signal in content_str for signal in _JS_SHELL_SIGNALS)
+    if any(signal in content_str for signal in _JS_SHELL_SIGNALS):
+        return True
+    # Heuristic: the HTTP tier returned a 200 with a large HTML body but almost
+    # no extractable text -> the page is JS-rendered and HTTP got the empty shell
+    # (e.g. a SPA whose nav-only shell doesn't match the known signal phrases).
+    # Scoped to the HTTP tier: a stealthy result with little text from a large
+    # page is a genuinely low-text page (image gallery / canvas), not a shell.
+    if result.fetcher_used == "http" and result.status == 200 \
+            and result.total_size_bytes > _JS_SHELL_MIN_BODY_BYTES:
+        text_len = sum(len(c) for c in result.content)
+        if text_len < _JS_SHELL_MIN_TEXT_CHARS:
+            return True
+    return False
 
 
 def _detect_content_issue(result: ResponseModel) -> str:
@@ -274,6 +324,100 @@ def _annotate_quality(result: ResponseModel) -> ResponseModel:
     return result
 
 
+def _is_cacheable(result: ResponseModel) -> bool:
+    """True only for clean, usable content worth caching.
+
+    Excludes: error statuses (4xx/5xx), JS shells, bot-challenge pages, geo
+    redirects, all_tiers_failed, and blank/empty extractions. Caching any of
+    those would serve broken pages from cache for the whole TTL.
+    """
+    if not (0 < result.status < 400):
+        return False
+    if result.error:
+        return False
+    return bool(result.content) and any(c.strip() for c in result.content)
+
+
+def _format_size(n: int) -> str:
+    """Human-readable byte size for the summary line."""
+    if not n:
+        return "0B"
+    if n >= 1024 * 1024:
+        return f"{n / 1024 / 1024:.1f}MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f}KB"
+    return f"{n}B"
+
+
+def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
+    """Build (summary, next_action, content_ok) for a finalized fetch result.
+
+    summary       — one-line status agents can pattern-match on at a glance.
+    next_action   — the obvious next call, if any (paginate / bypass robots /
+                    switch sources). Empty when there is nothing to do.
+    content_ok    — True only when real content was retrieved (status<400, no
+                    error, not a JS shell / login wall / empty page). Agents should
+                    check this before trusting content.
+    """
+    has_content = bool(result.content) and any(c.strip() for c in result.content)
+    content_ok = (
+        result.status > 0 and result.status < 400
+        and not result.error
+        and has_content
+    )
+
+    size = result.total_size_bytes or sum(len(c) for c in result.content)
+    parts: list[str] = []
+    if result.status == 0:
+        parts.append("network error")
+    else:
+        parts.append(f"{int(result.status)} {'OK' if result.status < 400 else 'ERR'}")
+    parts.append(f"{_format_size(size)} {result.extracted_type or 'markdown'}")
+    if result.fetcher_used:
+        parts.append(result.fetcher_used)
+    if result.cached:
+        parts.append("cached")
+    if result.is_truncated:
+        parts.append("truncated")
+    summary = " · ".join(parts)
+
+    next_action = ""
+    err = result.error or ""
+    if result.is_truncated and result.next_offset:
+        next_action = f"paginate: call smart_fetch with offset={result.next_offset}"
+    elif err == "robots_txt_disallowed":
+        next_action = "blocked by robots.txt: set options.respect_robots=false to bypass"
+    elif err.startswith("js_shell_detected"):
+        next_action = "page is a JS shell; re-fetch auto-escalates to the stealthy browser"
+    elif err.startswith("bot_challenge_detected"):
+        next_action = "bot challenge page; re-fetch auto-escalates to the stealthy browser"
+    elif err.startswith("geo_redirect_detected"):
+        next_action = "geo redirect: try a different regional URL or a proxy"
+    elif err.startswith("scanned_pdf"):
+        next_action = "scanned/image-only PDF — OCR is not supported; use a vision-capable tool or another source"
+    elif err.startswith("encrypted_pdf"):
+        next_action = "encrypted PDF — pass a password via the 'password' option"
+    elif err.startswith("pdf_deps_missing"):
+        next_action = "PDF support not installed — run: pip install hound-mcp[all]"
+    elif err.startswith("not_a_pdf") or err.startswith("pdf_open_failed") or err.startswith("pdf_extract_failed"):
+        next_action = "PDF could not be parsed — see error field"
+    elif "all_tiers_failed" in err:
+        next_action = "all fetchers failed; site may use unbypassable protection (DataDome/Akamai/Turnstile) — switch sources"
+    elif result.status == 0 or result.status >= 400:
+        next_action = "fetch failed — see error field"
+    return summary, next_action, content_ok
+
+
+def _with_agent_hints(result: ResponseModel) -> ResponseModel:
+    """Stamp agent-facing summary/content_ok/next_action/fetched_at on a result."""
+    summary, next_action, content_ok = _agent_hints(result)
+    result.summary = summary
+    result.content_ok = content_ok
+    result.next_action = next_action
+    result.fetched_at = datetime.now(timezone.utc).isoformat()
+    return result
+
+
 def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, offset: int = 0) -> ResponseModel:
     """Truncate content if it exceeds max_chars, starting from offset.
 
@@ -282,13 +426,14 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
     an agent calls again just to get 55 chars.
 
     Always sets total_extracted_chars so agents can gauge remaining content
-    without making a follow-up call.
+    without making a follow-up call. Stamps agent-facing hints (summary,
+    content_ok, next_action, fetched_at) on every returned result.
     """
     full_text = "\n".join(result.content)
     total_len = len(full_text)
 
     if offset >= total_len:
-        return ResponseModel(
+        return _with_agent_hints(ResponseModel(
             status=result.status, content=["[No more content.]"],
             url=result.url, cached=result.cached, fetcher_used=result.fetcher_used,
             extracted_type=result.extracted_type, session_id=result.session_id,
@@ -297,7 +442,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
             total_extracted_chars=total_len,
             escalation_path=result.escalation_path, retry_count=result.retry_count,
             next_offset=0,
-        )
+        ))
 
     chunk = full_text[offset:offset + max_chars]
     chunk_len = len(chunk)
@@ -319,7 +464,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         # Remaining is small — include it all, no truncation flag
         chunk = full_text[offset:]
 
-    return ResponseModel(
+    return _with_agent_hints(ResponseModel(
         status=result.status, content=[chunk], url=result.url,
         cached=result.cached, fetcher_used=result.fetcher_used,
         extracted_type=result.extracted_type, session_id=result.session_id,
@@ -328,10 +473,48 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         total_extracted_chars=total_len,
         is_truncated=truncated, next_offset=next_off,
         escalation_path=result.escalation_path, retry_count=result.retry_count,
-    )
+    ))
 
 
 # ─── Response translation helpers ──────────────────────────────────
+
+# PDF extraction options flow from smart_fetch down to _translate_response via
+# contextvars (task-local, safe under concurrent bulk fetches) instead of
+# threading two new params through every fetcher signature.
+_PDF_PAGES: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_pdf_pages", default=None)
+_PDF_PASSWORD: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_pdf_password", default=None)
+
+
+def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
+                          extraction_type: str, fetcher_used: str, duration_ms: float) -> ResponseModel:
+    """Build a ResponseModel from a PDF body using the flagship extractor."""
+    pages = _PDF_PAGES.get()
+    password = _PDF_PASSWORD.get()
+    try:
+        from master_fetch.pdf_extractor import extract_pdf, PdfResult
+        result: PdfResult = extract_pdf(body, extraction_type=extraction_type,
+                                        pages=pages, password=password)
+    except ImportError as e:
+        return ResponseModel(
+            status=200, content=[f"[PDF extraction requires hound-mcp[all]. {e}]"],
+            url=url, fetcher_used=fetcher_used, duration_ms=duration_ms,
+            content_type=raw_ct, total_size_bytes=total_size,
+            extracted_type="markdown", error=f"pdf_deps_missing: {e}",
+        )
+    except Exception as e:
+        return ResponseModel(
+            status=200, content=[f"[PDF extraction failed: {str(e)[:200]}]"],
+            url=url, fetcher_used=fetcher_used, duration_ms=duration_ms,
+            content_type=raw_ct, total_size_bytes=total_size,
+            extracted_type="markdown", error=f"pdf_extract_failed: {str(e)[:200]}",
+        )
+    return ResponseModel(
+        status=200, content=result.content, url=url,
+        fetcher_used=fetcher_used, duration_ms=duration_ms,
+        content_type=raw_ct, total_size_bytes=total_size,
+        extracted_type="markdown", error=result.error,
+    )
+
 
 def _translate_response(
     page: _ScraplingResponse,
@@ -373,6 +556,15 @@ def _translate_response(
         except Exception:
             pass  # Fall through to normal extraction if JSON decode fails
 
+    # Detect PDF responses. Route to the flagship PDF extractor instead of the
+    # HTML/text pipeline (which would return a useless "binary content" error).
+    # Many servers serve PDFs as application/octet-stream, so the %PDF magic-byte
+    # check is the reliable detector.
+    is_pdf = raw_ct.startswith('application/pdf') or (bool(raw_body) and raw_body[:5].startswith(b'%PDF'))
+    if is_pdf and raw_body:
+        return _extract_pdf_response(raw_body, raw_ct, total_size, page.url,
+                                     extraction_type, fetcher_used, duration_ms)
+
     s = _get_scrapling()
     content: list[str]
     
@@ -388,7 +580,7 @@ def _translate_response(
         try:
             html_text = raw_body.decode(page.encoding or 'utf-8', errors='replace')
             parsed = parse_old_reddit_listing(html_text)
-            if parsed and len(parsed) > 500:  # Successfully parsed
+            if parsed:  # parser found real posts -> use structured markdown
                 content = [parsed]
             else:
                 # Fallback to normal extraction
@@ -516,7 +708,7 @@ class MasterFetchServer:
         self._auto_dynamic_last_used: float = 0  # timestamp of last auto dynamic session use
         self._auto_stealthy_last_used: float = 0  # timestamp of last auto stealthy session use
         self._idle_monitor_task: Optional[Any] = None  # asyncio.Task for idle session cleanup
-        self._prewarm_triggered: bool = False  # pre-warm stealthy on first smart_search call
+        self._auto_session_lock: Lock = Lock()  # serializes auto-session creation so the startup warm-up + a concurrent fetch never spawn a 2nd browser
 
     # ─── Core helpers ─────────────────────────────────────────────
 
@@ -557,49 +749,62 @@ class MasterFetchServer:
         """
         attr = "_auto_dynamic_id" if session_type == "dynamic" else "_auto_stealthy_id"
         ts_attr = "_auto_dynamic_last_used" if session_type == "dynamic" else "_auto_stealthy_last_used"
+
+        # Fast path: reuse an existing alive session.
         async with self._sessions_lock:
             existing_id = getattr(self, attr)
             if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
                 setattr(self, ts_attr, now())
-                # Ensure monitor is alive (may have crashed since last check)
                 self._ensure_idle_monitor()
                 return existing_id
 
-        # Create session outside lock (expensive — browser launch)
-        sid = await self.open_session(session_type=session_type, headless=True)
-
-        async with self._sessions_lock:
-            # Re-check: another call may have created a session while we were busy
-            existing_id = getattr(self, attr)
-            if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
-                # We lost the race — close ours, use theirs
-                try:
-                    await self.close_session(sid.session_id)
-                except Exception:
-                    pass  # Best effort cleanup
+        # Serialize creation: the startup warm-up and a concurrent fetch share ONE
+        # creation. A second caller waits on the lock, then reuses — never a 2nd
+        # browser instance. (The previous close-the-orphan race can no longer
+        # happen in production, but the final guard below still defends against
+        # any path that sets the attr out-of-band.)
+        async with self._auto_session_lock:
+            # Re-check: another creator may have finished while we waited.
+            async with self._sessions_lock:
+                existing_id = getattr(self, attr)
+                if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
+                    setattr(self, ts_attr, now())
+                    self._ensure_idle_monitor()
+                    return existing_id
+            # Create outside the sessions lock (expensive — browser launch) but
+            # inside the creation lock (no concurrent 2nd launch).
+            sid = await self.open_session(session_type=session_type, headless=True)
+            async with self._sessions_lock:
+                existing_id = getattr(self, attr)
+                if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
+                    try:
+                        await self.close_session(sid.session_id)
+                    except Exception:
+                        pass  # Best effort cleanup
+                    setattr(self, ts_attr, now())
+                    self._ensure_idle_monitor()
+                    return existing_id
+                setattr(self, attr, sid.session_id)
                 setattr(self, ts_attr, now())
-                self._ensure_idle_monitor()
-                return existing_id
-            setattr(self, attr, sid.session_id)
-            setattr(self, ts_attr, now())
 
-        # Start idle monitor if not running
         self._ensure_idle_monitor()
-
         return sid.session_id
 
     async def _prewarm_stealthy(self) -> None:
-        """Pre-warm the stealthy browser in the background.
+        """Warm the single stealthy browser at startup (background, best-effort).
 
-        Called when smart_search fires — the browser is warm by the time
-        the agent calls smart_fetch on the results. No race: search is API-only.
+        Scheduled when the MCP server starts so the browser is warm by the time
+        the agent first needs a stealthy fetch or screenshot — skipping the
+        ~3-5s cold start. Idempotent: _ensure_auto_session reuses any existing
+        session. Fails silently (e.g. chromium not installed); in that case the
+        browser launches on first fetch instead.
         """
         try:
             _get_scrapling()  # Lazy-import scrapling (playwright) if not done yet
             await self._ensure_auto_session("stealthy")
-            logger.debug("Stealthy browser pre-warmed")
+            logger.debug("Stealthy browser warmed at startup")
         except Exception as e:
-            logger.debug(f"Pre-warming failed (will launch on first fetch): {e}")
+            logger.debug(f"Startup warm-up failed (will launch on first fetch): {e}")
 
     async def _start_idle_monitor(self) -> None:
         """Background task: close auto browser sessions after AUTO_SESSION_IDLE_TIMEOUT
@@ -670,6 +875,26 @@ class MasterFetchServer:
         if self._idle_monitor_task is None or self._idle_monitor_task.done():
             self._idle_monitor_task = asyncio.create_task(self._start_idle_monitor())
 
+    async def _shutdown_close_sessions(self) -> None:
+        """Gracefully close all browser sessions when the server is stopping.
+
+        Called from serve()'s finally block so the single warm Chrome instance
+        is torn down cleanly when the agent harness closes the MCP server
+        (stdin closed / process exit), rather than relying on OS child reaping.
+        Best-effort: never raises.
+        """
+        async with self._sessions_lock:
+            entries = list(self._sessions.items())
+            self._sessions.clear()
+            self._auto_stealthy_id = None
+            self._auto_dynamic_id = None
+        for sid, entry in entries:
+            try:
+                await entry.session.close()
+            except Exception:
+                pass
+            entry._alive = False
+
     async def _finalize_result(
         self,
         result: ResponseModel,
@@ -678,6 +903,7 @@ class MasterFetchServer:
         css_selector: Optional[str],
         cache_ttl: int,
         offset: int = 0,
+        max_chars: int = MAX_CONTENT_CHARS,
     ) -> ResponseModel:
         """Apply content quality annotation, cache, and chunking to a fetch result.
 
@@ -685,14 +911,19 @@ class MasterFetchServer:
         that was duplicated 8+ times across smart_fetch.
         """
         result = _annotate_quality(result)
-        if cache_ttl > 0 and result.status > 0:
+        # Only cache CLEAN content. Caching JS shells / bot challenges / geo
+        # redirects / error statuses would serve broken pages from cache for
+        # the whole TTL (and the cache-hit path doesn't restore the error field,
+        # so content_ok would come back True — the agent would trust garbage).
+        if cache_ttl > 0 and _is_cacheable(result):
             await set_cached(
                 url, extraction_type, result.content, result.status,
                 css_selector, cache_ttl,
                 content_type=result.content_type,
                 total_size_bytes=result.total_size_bytes,
+                pages=_PDF_PAGES.get(),
             )
-        return _apply_chunking(result, offset=offset)
+        return _apply_chunking(result, max_chars=max_chars, offset=offset)
 
     def _validate_smart_fetch_params(
         self,
@@ -760,8 +991,8 @@ class MasterFetchServer:
         """Open a persistent browser session that can be reused across multiple fetch calls.
 
         This avoids the overhead of launching a new browser for each request.
-        Use close_session to close the session when done, and list_sessions to see all
-        active sessions.
+        Internal helper — used by _ensure_auto_session to create the single
+        warm stealthy session. Not exposed as an MCP tool.
 
         :param session_type: "dynamic" for standard Playwright, or "stealthy" for anti-bot bypass.
         :param session_id: Optional custom session ID (random 12-char hex if not provided).
@@ -853,23 +1084,12 @@ class MasterFetchServer:
             message=f"Session '{session_id}' closed successfully.",
         )
 
-    async def list_sessions(self) -> List[SessionInfo]:
-        """List all active browser sessions with their details."""
-        async with self._sessions_lock:
-            return [
-                SessionInfo(
-                    session_id=sid, session_type=entry.session_type,
-                    created_at=entry.created_at, is_alive=entry._alive,
-                )
-                for sid, entry in self._sessions.items()
-            ]
-
     # ─── Screenshot ───────────────────────────────────────────────
 
     async def screenshot(
         self,
         url: str,
-        session_id: str,
+        session_id: Optional[str] = None,
         image_type: ScreenshotType = "png",
         full_page: bool = False,
         quality: Optional[int] = None,
@@ -879,11 +1099,14 @@ class MasterFetchServer:
         network_idle: bool = False,
         timeout: int | float = 30000,
     ) -> List[ImageContent | TextContent]:
-        """Capture a screenshot of a web page using an existing browser session.
-        A browser session must be opened first with `open_session`.
+        """Capture a screenshot of a web page.
+
+        If session_id is omitted, a stealthy browser session is auto-managed
+        (reused across calls, so no cold-start after the first screenshot).
+        Pass session_id only to reuse a specific session from open_session.
 
         :param url: The URL to navigate to and capture.
-        :param session_id: ID of an open browser session.
+        :param session_id: Optional ID of an open browser session. If omitted, a stealthy session is auto-managed.
         :param image_type: Image format: "png" (default) or "jpeg".
         :param full_page: Capture full scrollable page instead of viewport.
         :param quality: JPEG quality (0-100), only for jpeg.
@@ -899,7 +1122,12 @@ class MasterFetchServer:
         if quality is not None and image_type != "jpeg":
             raise ValueError("'quality' is only valid when 'image_type' is 'jpeg'.")
 
-        entry = await self._get_session(session_id, expected_type=None)
+        # Auto-manage a stealthy session when none is provided (mirrors smart_fetch).
+        if session_id:
+            ssid = session_id
+        else:
+            ssid = await self._ensure_auto_session("stealthy")
+        entry = await self._get_session(ssid, expected_type=None)
         screenshot_kwargs: Dict[str, Any] = {"type": image_type, "full_page": full_page}
         if quality is not None:
             screenshot_kwargs["quality"] = quality
@@ -1548,6 +1776,9 @@ class MasterFetchServer:
         useragent: Annotated[Optional[str], Field(description="Override browser user agent string.")] = None,
         cookies: Annotated[Sequence[SetCookieParam] | None, Field(description="Cookies as list of {name, value, domain} dicts.")] = None,
         offset: Annotated[int, Field(description="Resume from this character offset when content was truncated. The response tells you the next offset to use.")] = 0,
+        max_content_chars: Annotated[Optional[int], Field(description="Max chars of extracted content to return (default 40000). Lower this to save context tokens on big pages; the rest is paginated via offset/next_offset.")] = None,
+        pages: Annotated[Optional[str], Field(description="PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset of pages (saves tokens/time on big PDFs). None = all pages.")] = None,
+        password: Annotated[Optional[str], Field(description="PDF only: password for an encrypted PDF.")] = None,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -1600,7 +1831,7 @@ class MasterFetchServer:
                 use_trafilatura, cache_ttl, force_fetcher, respect_robots,
                 headless, real_chrome, wait, proxy, timeout, network_idle,
                 solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
-                useragent, cookies,
+                useragent, cookies, max_content_chars,
             )
 
         # Validate all inputs
@@ -1608,6 +1839,21 @@ class MasterFetchServer:
             self._validate_smart_fetch_params(
                 url, extraction_type, css_selector, extra_headers, timeout, proxy, useragent,
             )
+
+        # max_content_chars: token-spend control. Lower = less context per call,
+        # the rest is paginated via offset/next_offset.
+        if max_content_chars is not None:
+            if isinstance(max_content_chars, bool) or not isinstance(max_content_chars, int) \
+                    or max_content_chars < 500:
+                raise ValueError("max_content_chars must be an int >= 500")
+            max_content_chars = min(max_content_chars, 200000)
+        mc = max_content_chars if isinstance(max_content_chars, int) else MAX_CONTENT_CHARS
+
+        # PDF options flow down to _translate_response via contextvars (task-local,
+        # safe under concurrent bulk fetches) and into the cache key so a
+        # pages-subset extraction doesn't collide with a full-PDF cache entry.
+        _PDF_PAGES.set(pages if isinstance(pages, str) else None)
+        _PDF_PASSWORD.set(password if isinstance(password, str) else None)
 
         # 1. Check robots.txt compliance
         if respect_robots and not await is_allowed(url):
@@ -1621,11 +1867,11 @@ class MasterFetchServer:
                 extracted_type=extraction_type, session_id="",
                 duration_ms=0, error="robots_txt_disallowed",
             )
-            return _apply_chunking(disallowed)
+            return _apply_chunking(disallowed, max_chars=mc)
 
         # 2. Check cache
         if cache_ttl > 0:
-            cached = await get_cached(url, extraction_type, css_selector, ttl=cache_ttl)
+            cached = await get_cached(url, extraction_type, css_selector, ttl=cache_ttl, pages=pages if isinstance(pages, str) else None)
             if cached is not None:
                 return _apply_chunking(ResponseModel(
                     url=cached["url"], status=cached["status"], content=cached["content"],
@@ -1633,29 +1879,47 @@ class MasterFetchServer:
                     extracted_type=extraction_type,
                     content_type=cached.get("content_type", ""),
                     total_size_bytes=cached.get("total_size_bytes", 0),
-                ), offset=offset)
+                ), max_chars=mc, offset=offset)
 
-        # 3. Force specific fetcher
+        # 3. Reddit optimization: rewrite listings to old.reddit.com (7x smaller,
+        #    2x faster). Done BEFORE force_fetcher so even an explicit
+        #    force_fetcher="http" benefits from the old.reddit.com rewrite.
+        #    Post pages (/comments/...) stay on www.reddit.com (old.reddit.com
+        #    shows the sidebar instead of full comments) — handled inside
+        #    rewrite_to_old_reddit.
+        is_reddit = is_reddit_url(url)
+        if is_reddit:
+            url = rewrite_to_old_reddit(url)
+
+        # 4. Force specific fetcher (explicit pin wins; uses rewritten url)
         if force_fetcher:
             return await self._force_fetch(
                 url, force_fetcher, extraction_type, css_selector, main_content_only,
                 use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,
                 proxy, timeout, network_idle, solve_cloudflare, block_webrtc,
-                hide_canvas, extra_headers, useragent, cookies,
+                hide_canvas, extra_headers, useragent, cookies, mc,
             )
 
-        # 4. Reddit optimization: rewrite subreddit listings to old.reddit.com
-        # Post pages (/comments/...) are NOT rewritten (old.reddit.com shows
-        # sidebar instead of full comments) — handled inside rewrite_to_old_reddit
-        if is_reddit_url(url):
-            url = rewrite_to_old_reddit(url)
+        # 5. Reddit default: skip HTTP, go straight to stealthy. www.reddit.com
+        #    JS-walls/blocks plain HTTP ~100% of the time, so the HTTP tier is
+        #    ~1s of wasted time before it escalates anyway. old.reddit.com
+        #    listings render fine in the stealthy browser. Saves ~1s per fetch.
+        #    (An explicit force_fetcher above already returned, so this only
+        #    applies to the unpinned/default case.)
+        if is_reddit:
+            return await self._force_fetch(
+                url, "stealthy", extraction_type, css_selector, main_content_only,
+                use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,
+                proxy, timeout, network_idle, solve_cloudflare, block_webrtc,
+                hide_canvas, extra_headers, useragent, cookies, mc,
+            )
 
-        # 5. Auto-escalation
+        # 6. Auto-escalation (HTTP -> stealthy) for everything else
         return await self._auto_escalate(
             url, extraction_type, css_selector, main_content_only,
             use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,
             proxy, timeout, network_idle, solve_cloudflare, block_webrtc,
-            hide_canvas, extra_headers, useragent, cookies,
+            hide_canvas, extra_headers, useragent, cookies, mc,
         )
 
     async def _smart_fetch_bulk(
@@ -1663,7 +1927,7 @@ class MasterFetchServer:
         use_trafilatura, cache_ttl, force_fetcher, respect_robots,
         headless, real_chrome, wait, proxy, timeout, network_idle,
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
-        useragent, cookies,
+        useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
     ) -> BulkResponseModel:
         """Fetch multiple URLs in parallel through the smart fetch pipeline."""
         if len(urls) > MAX_BULK_URLS:
@@ -1683,12 +1947,13 @@ class MasterFetchServer:
                     solve_cloudflare=solve_cloudflare, block_webrtc=block_webrtc,
                     hide_canvas=hide_canvas, extra_headers=extra_headers,
                     useragent=useragent, cookies=cookies,
+                    max_content_chars=max_chars,
                 )
             except Exception as e:
-                return ResponseModel(
+                return _with_agent_hints(ResponseModel(
                     url=u, status=0, content=[f"[Error: {redact_api_key(str(e)[:200])}]"],
                     fetcher_used="none", error=redact_api_key(str(e)[:200]),
-                )
+                ))
 
         # Small delay between URL batches to avoid hammering the same server
         results = []
@@ -1708,7 +1973,7 @@ class MasterFetchServer:
         main_content_only, use_trafilatura, cache_ttl, offset,
         headless, real_chrome, wait, proxy, timeout, network_idle,
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
-        useragent, cookies,
+        useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
     ) -> ResponseModel:
         """Execute a forced fetcher tier and finalize the result."""
         # HTTP fetcher takes seconds; browser timeout is ms. Cap at 30s.
@@ -1723,7 +1988,7 @@ class MasterFetchServer:
                 stealthy_headers=True,
             )
             result.escalation_path = "direct:http"
-            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         else:  # stealthy ("dynamic" also routes here — Patchright handles everything)
             ssid = await self._ensure_auto_session("stealthy")
@@ -1740,13 +2005,13 @@ class MasterFetchServer:
                 session_id=ssid,
             )
             result.escalation_path = "direct:stealthy"
-            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
     async def _auto_escalate(
         self, url, extraction_type, css_selector, main_content_only,
         use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,
         proxy, timeout, network_idle, solve_cloudflare, block_webrtc,
-        hide_canvas, extra_headers, useragent, cookies,
+        hide_canvas, extra_headers, useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
     ) -> ResponseModel:
         """Auto-escalation: try HTTP first, fall back to stealthy if it fails.
 
@@ -1776,7 +2041,7 @@ class MasterFetchServer:
         # Accept if status is OK and content is real (not a JS shell).
         if result.status < 400 and not _is_js_shell(result):
             result.escalation_path = "direct:http"
-            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         # Should we escalate? Two reasons:
         # 1. Status 200 with JS shell -> page needs a real browser
@@ -1784,7 +2049,7 @@ class MasterFetchServer:
         should_escalate = (result.status < 400 and _is_js_shell(result)) or result.status in (403, 503)
         if not should_escalate:
             result.duration_ms = elapsed
-            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         # Tier 2: Stealthy
         errors.append(f"HTTP failed (status {result.status})")
@@ -1807,7 +2072,7 @@ class MasterFetchServer:
 
         if result.status < 400 and not _is_js_shell(result):
             result.escalation_path = "http→stealthy"
-            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         # All tiers failed
         errors.append(f"Stealthy failed (status {result.status})")
@@ -1827,7 +2092,7 @@ class MasterFetchServer:
         result.retry_count = 2
         result.duration_ms = elapsed
         result.error = f"all_tiers_failed: HTTP status {result.status}"
-        return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset)
+        return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
     # ─── Cache Management ──────────────────────────────────────────
 
@@ -1925,80 +2190,55 @@ class MasterFetchServer:
     # Saves ~69% tokens vs FastMCP auto-generated schemas.
     _TOOL_DEFS: list[dict] = [
         {
-            "name": "mcp_open_session",
-            "description": "Open browser session. Returns session_id.",
-            "inputSchema": {
-                "type": "object", "required": ["session_type"],
-                "properties": {
-                    "session_type": {"type": "string", "enum": ["dynamic", "stealthy"], "description": "dynamic or stealthy"},
-                    "headless": {"type": "boolean", "description": "No visible window"},
-                    "options": {"type": "object", "description": "proxy, timeout, cookies, extra_headers, useragent, wait, network_idle, real_chrome, hide_canvas, block_webrtc, solve_cloudflare, session_id", "additionalProperties": True},
-                },
-            },
-            "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
-        },
-        {
-            "name": "close_session",
-            "description": "Close a browser session.",
-            "inputSchema": {
-                "type": "object", "required": ["session_id"],
-                "properties": {
-                    "session_id": {"type": "string", "description": "Session to close"},
-                },
-            },
-            "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
-        },
-        {
-            "name": "list_sessions",
-            "description": "List open browser sessions.",
-            "inputSchema": {"type": "object", "properties": {}},
-            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False},
-        },
-        {
             "name": "mcp_smart_fetch",
-            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto http -> stealthy escalation (2 tiers: plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Offset pages through EXTRACTED text (not raw HTML). If extraction produces 40KB from a 1MB page, offset can't reach beyond that 40KB. Use extraction_type=html for raw HTML. Cache: cache_ttl=0 bypasses cache. is_truncated=true + total_extracted_chars tells you exactly how much remains.",
+            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens. Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "URL to fetch"},
-                    "urls": {"type": "array", "items": {"type": "string"}, "description": "Multiple URLs (parallel)"},
-                    "extraction_type": {"type": "string", "enum": ["markdown", "html", "text", "article", "structured"], "description": "markdown|html|text|article|structured"},
-                    "cache_ttl": {"type": "integer", "description": "Cache seconds. 0=fresh"},
-                    "force_fetcher": {"type": "string", "enum": ["http", "stealthy"], "description": "Pin smart_fetch to one tier. Default behavior already auto-escalates http -> stealthy."},
-                    "offset": {"type": "integer", "description": "Char offset into extracted text (not raw HTML). Use next_offset from previous response. Check total_extracted_chars to see total available."},
-                    "options": {"type": "object", "description": "css_selector, proxy, timeout, cookies, extra_headers, useragent, wait, network_idle, headless, real_chrome, respect_robots, main_content_only, use_trafilatura, solve_cloudflare, block_webrtc, hide_canvas", "additionalProperties": True},
+                    "urls": {"type": "array", "items": {"type": "string"}, "description": "Multiple URLs (fetched in parallel; returns per-URL results)"},
+                    "extraction_type": {"type": "string", "enum": ["markdown", "html", "text", "article", "structured"], "description": "Content format (default markdown). html = raw HTML."},
+                    "css_selector": {"type": "string", "description": "CSS selector to narrow extracted content (e.g. 'article', '.main-content', '#post'). Big token/context saver."},
+                    "max_content_chars": {"type": "integer", "description": "Max chars of extracted content to return (default 40000; min 500). Lower = less context per call; the rest is paginated via offset/next_offset."},
+                    "timeout": {"type": "integer", "description": "Max request time in ms (default 30000). HTTP tier capped at 30s."},
+                    "cache_ttl": {"type": "integer", "description": "Cache seconds (default 3600). 0 = force fresh."},
+                    "force_fetcher": {"type": "string", "enum": ["http", "stealthy"], "description": "Pin to one tier and skip auto-escalation. 'http' = fast HTTP-only (fails on JS/bot walls). 'stealthy' = anti-detect browser. Default = auto http->stealthy."},
+                    "offset": {"type": "integer", "description": "Char offset into EXTRACTED text to resume a truncated page. Use next_offset from the previous response."},
+                    "pages": {"type": "string", "description": "PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset (saves tokens/time on big PDFs). None = all pages."},
+                    "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
+                    "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
             "name": "mcp_screenshot",
-            "description": "Screenshot a URL. Requires open_session.",
+            "description": "Capture a screenshot of a URL as an image. For MULTIMODAL agents only — use when content is rendered as images/canvas/image-of-text that text extraction can't read, or you need visual layout. Text-only agents: prefer smart_fetch. A stealthy browser session is auto-managed (pass session_id only to reuse a specific open_session).",
             "inputSchema": {
-                "type": "object", "required": ["url", "session_id"],
+                "type": "object", "required": ["url"],
                 "properties": {
                     "url": {"type": "string", "description": "URL to screenshot"},
-                    "session_id": {"type": "string", "description": "From open_session"},
-                    "options": {"type": "object", "description": "full_page, image_type, quality, wait, wait_selector, network_idle, timeout", "additionalProperties": True},
+                    "session_id": {"type": "string", "description": "Optional: a session from open_session to reuse. Omit to auto-manage."},
+                    "options": {"type": "object", "description": "full_page (bool, default false), image_type (png|jpeg, default png), quality (0-100, jpeg only), wait (ms), wait_selector (css), network_idle (bool), timeout (ms, default 30000)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
             "name": "mcp_smart_search",
-            "description": "Web search via TinyFish. Returns URLs with short descriptions. Search finds links — descriptions are NOT enough to answer questions. ALWAYS fetch the result URL with smart_fetch for full content. Free key at tinyfish.ai. Results cached 5min (cache_ttl to adjust).",
+            "description": "Web search via TinyFish. Returns URLs with titles + short snippets. NEVER answer from snippets alone — ALWAYS smart_fetch the result URL for full content. Each result has fetch_relevance (high/med/low): fetch 'high' first (1-2), then 'med' if needed, skip 'low'. The response fetch_hint says how many of each. Free key at tinyfish.ai. Results cached 5min.",
             "inputSchema": {
                 "type": "object", "required": ["query"],
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "options": {"type": "object", "description": "max_results, cache_ttl, api_key", "additionalProperties": True},
+                    "options": {"type": "object", "description": "max_results (1-50, default 10), cache_ttl (seconds, default 300), api_key", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
             "name": "cache_clear",
-            "description": "Clear fetch cache. all=true wipes all. Cache stores extracted text per URL+extraction_type. Default TTL: 1hr.",
+            "description": "Clear fetch cache. all=true wipes all (default: expired only). Cache stores extracted text per URL+extraction_type+css_selector; default TTL 1hr.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2021,6 +2261,10 @@ class MasterFetchServer:
         from mcp.types import Tool, TextContent
 
         server = Server(name="Hound", version=__version__)
+        # Connect-time orientation: clients inject this into the agent context
+        # once on initialize (the MCP `instructions` field).
+        server.instructions = HOUND_INSTRUCTIONS
+        server.website_url = "https://github.com/dondai1234/master-fetch"
 
         # ── list_tools: return hand-crafted minimal definitions ──────
         @server.list_tools()
@@ -2050,8 +2294,20 @@ class MasterFetchServer:
             from mcp.server.stdio import stdio_server
 
             async def _run():
-                async with stdio_server() as (read, write):
-                    await server.run(read, write, server.create_initialization_options())
+                # Warm the single stealthy browser at startup so it's ready before
+                # the agent's first stealthy fetch/screenshot. Best-effort, runs in
+                # the background while the server handles the initialize handshake.
+                warm = asyncio.create_task(self._prewarm_stealthy())
+                try:
+                    async with stdio_server() as (read, write):
+                        await server.run(read, write, server.create_initialization_options())
+                finally:
+                    warm.cancel()
+                    try:
+                        await warm
+                    except Exception:
+                        pass
+                    await self._shutdown_close_sessions()
 
             anyio.run(_run)
         else:
@@ -2065,7 +2321,14 @@ class MasterFetchServer:
                 async with sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
                     await server.run(read, write, server.create_initialization_options())
 
-            app = Starlette(routes=[Route("/sse", endpoint=handle_sse), Route("/messages/", endpoint=sse.handle_post_message)])
+            async def _startup():
+                asyncio.create_task(self._prewarm_stealthy())
+
+            app = Starlette(
+                routes=[Route("/sse", endpoint=handle_sse), Route("/messages/", endpoint=sse.handle_post_message)],
+                on_startup=[_startup],
+                on_shutdown=[self._shutdown_close_sessions],
+            )
             import uvicorn
             uvicorn.run(app, host=host, port=port)
 
@@ -2085,54 +2348,40 @@ class MasterFetchServer:
             urls = args.get("urls")
             if not url and not urls:
                 raise ValueError("Either 'url' or 'urls' must be provided")
+            # Promoted first-class params: top-level takes precedence over the
+            # options bag (backward compat: options still accepted as fallback).
+            css_selector = args.get("css_selector") if args.get("css_selector") is not None else options.get("css_selector")
+            max_content_chars = args.get("max_content_chars") if args.get("max_content_chars") is not None else options.get("max_content_chars")
+            timeout = args.get("timeout") if args.get("timeout") is not None else options.get("timeout")
+            pages = args.get("pages") if args.get("pages") is not None else options.get("pages")
+            password = args.get("password") if args.get("password") is not None else options.get("password")
             kw = {k: v for k, v in options.items() if k in (
-                "css_selector", "proxy", "timeout", "cookies", "extra_headers", "useragent",
+                "proxy", "cookies", "extra_headers", "useragent",
                 "wait", "network_idle", "headless", "real_chrome", "respect_robots",
                 "main_content_only", "use_trafilatura", "solve_cloudflare", "block_webrtc", "hide_canvas",
             )}
             result = await self.smart_fetch(
                 url=url, urls=urls,
                 extraction_type=args.get("extraction_type", "markdown"),
+                css_selector=css_selector,
+                max_content_chars=max_content_chars,
+                timeout=timeout if timeout is not None else 30000,
+                pages=pages,
+                password=password,
                 cache_ttl=args.get("cache_ttl", DEFAULT_TTL),
                 force_fetcher=args.get("force_fetcher"),
                 offset=args.get("offset", 0), **kw,
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
-        elif name == "mcp_open_session":
-            kw = {k: v for k, v in options.items() if k in (
-                "proxy", "timeout", "cookies", "extra_headers", "useragent",
-                "wait", "network_idle", "real_chrome", "hide_canvas", "block_webrtc",
-                "solve_cloudflare", "session_id",
-            )}
-            result = await self.open_session(
-                session_type=args["session_type"], headless=args.get("headless", True), **kw,
-            )
-            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
-
-        elif name == "close_session":
-            result = await self.close_session(session_id=args["session_id"])
-            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
-
-        elif name == "list_sessions":
-            result = await self.list_sessions()
-            data = {"sessions": [r.model_dump() for r in result]}
-            return [TextContent(type="text", text=json.dumps(data))], data
-
         elif name == "mcp_screenshot":
             kw = {k: v for k, v in options.items() if k in (
                 "full_page", "image_type", "quality", "wait", "wait_selector", "network_idle", "timeout",
             )}
-            result = await self.screenshot(url=args["url"], session_id=args["session_id"], **kw)
+            result = await self.screenshot(url=args["url"], session_id=args.get("session_id"), **kw)
             return result  # already list[ImageContent|TextContent]
 
         elif name == "mcp_smart_search":
-            # Pre-warm stealthy browser in background while search runs.
-            # smart_search is always called before smart_fetch — the browser
-            # is warm by the time a fetch needs it. No race: search is API-only.
-            if not self._prewarm_triggered:
-                self._prewarm_triggered = True
-                asyncio.create_task(self._prewarm_stealthy())
             kw = {k: v for k, v in options.items() if k in ("max_results", "cache_ttl", "api_key")}
             result = await self.smart_search(query=args["query"], **kw)
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()

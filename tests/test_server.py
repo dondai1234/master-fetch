@@ -99,6 +99,33 @@ class TestJsShellDetection:
         r = _make_response(content=["<html><body>Regular page content</body></html>"])
         assert _is_js_shell(r) is False
 
+    def test_spa_shell_tiny_text_large_body_on_http(self):
+        """HTTP tier returns a nav-only SPA shell (large body, <200 chars text)
+        that doesn't match known signal phrases -> still flagged so smart_fetch
+        escalates to stealthy. (Reproduces the quotes.toscrape.com/js case.)"""
+        r = ResponseModel(status=200, content=["Quotes to Scrape\nLogin\nNext\n\u2192"],
+                          url="https://x.com", fetcher_used="http", total_size_bytes=5700)
+        assert _is_js_shell(r) is True
+
+    def test_spa_shell_not_flagged_on_stealthy(self):
+        """Same low-text/large-body page served by the stealthy tier is a genuinely
+        low-text page (image gallery/canvas), NOT a shell -> not flagged."""
+        r = ResponseModel(status=200, content=["Quotes to Scrape\nLogin\nNext\n\u2192"],
+                          url="https://x.com", fetcher_used="stealthy", total_size_bytes=5700)
+        assert _is_js_shell(r) is False
+
+    def test_short_real_page_not_flagged(self):
+        """A legit short page with a SMALL body is not a JS shell."""
+        r = ResponseModel(status=200, content=["ok"], url="https://x.com",
+                          fetcher_used="http", total_size_bytes=400)
+        assert _is_js_shell(r) is False
+
+    def test_4xx_short_text_not_flagged_as_shell(self):
+        """The tiny-text heuristic only applies to status 200, not errors."""
+        r = ResponseModel(status=404, content=["Not Found"], url="https://x.com",
+                          fetcher_used="http", total_size_bytes=8000)
+        assert _is_js_shell(r) is False
+
     def test_empty_content_is_js_shell(self):
         r = _make_response(content=[""])
         assert _is_js_shell(r) is True

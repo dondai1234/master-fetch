@@ -469,9 +469,6 @@ class TestDispatchErrorHandling:
         srv = MasterFetchServer()
         known_tools = [
             "mcp_smart_fetch",
-            "mcp_open_session",
-            "close_session",
-            "list_sessions",
             "mcp_screenshot",
             "mcp_smart_search",
             "cache_clear",

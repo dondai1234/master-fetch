@@ -18,15 +18,16 @@ _CACHE_DIR = Path.home() / ".master_fetch_cache"
 _DB_NAME = "cache.db"
 
 DEFAULT_TTL = 3600  # 1 hour
+MAX_CACHE_ENTRIES = 10000  # hard cap so a long-lived agent's cache DB can't grow unbounded
 
 # Shared DB path cache — avoids re-running PRAGMA on every operation
 _db_initialized: dict[Path, bool] = {}
 _db_init_lock = asyncio.Lock()
 
 
-def _cache_key(url: str, extraction_type: str, css_selector: str | None = None) -> str:
+def _cache_key(url: str, extraction_type: str, css_selector: str | None = None, pages: str | None = None) -> str:
     """Deterministic cache key from fetch params."""
-    raw = f"{url}|{extraction_type}|{css_selector or ''}"
+    raw = f"{url}|{extraction_type}|{css_selector or ''}|{pages or ''}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -94,13 +95,14 @@ async def get_cached(
     css_selector: str | None = None,
     ttl: int = DEFAULT_TTL,
     cache_dir: Path | None = None,
+    pages: str | None = None,
 ) -> dict | None:
     """Return cached response if fresh, else None.
 
     Uses the *lesser* of the stored TTL and the caller-requested TTL.
     This prevents serving stale cache when caller wants a fresher window.
     """
-    key = _cache_key(url, extraction_type, css_selector)
+    key = _cache_key(url, extraction_type, css_selector, pages)
     db_path = await _ensure_db(cache_dir)
 
     async with aiosqlite.connect(db_path) as db:
@@ -132,13 +134,14 @@ async def set_cached(
     cache_dir: Path | None = None,
     content_type: str = "",
     total_size_bytes: int = 0,
+    pages: str | None = None,
 ) -> None:
     """Store a response in cache.
 
     v3.5.3+: content_type and total_size_bytes round-trip through cache so
     agents preserve MIME info on hits instead of always seeing empty/0.
     """
-    key = _cache_key(url, extraction_type, css_selector)
+    key = _cache_key(url, extraction_type, css_selector, pages)
     db_path = await _ensure_db(cache_dir)
 
     async with aiosqlite.connect(db_path) as db:
@@ -150,6 +153,18 @@ async def set_cached(
             (key, url, extraction_type, json.dumps(content), status,
              time.time(), ttl, content_type, total_size_bytes),
         )
+        # Bound the cache: if over MAX_CACHE_ENTRIES, evict the oldest rows by
+        # fetched_at down to 90% of the cap. Cheaper than per-insert single
+        # evictions and amortizes the cost (only runs when the cap is exceeded).
+        count_cursor = await db.execute("SELECT COUNT(*) FROM cache")
+        (count,) = await count_cursor.fetchone()
+        if count > MAX_CACHE_ENTRIES:
+            excess = count - int(MAX_CACHE_ENTRIES * 0.9)
+            await db.execute(
+                "DELETE FROM cache WHERE key IN "
+                "(SELECT key FROM cache ORDER BY fetched_at ASC LIMIT ?)",
+                (excess,),
+            )
         await db.commit()
 
 
