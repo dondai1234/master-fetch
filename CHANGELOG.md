@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.0.1] - 2026-06-20
+
+### Fixed
+- **`pdfplumber` was missing from the `[all]` extra**, so `pip install hound-mcp[all]` did NOT install it and PDF extraction was broken for real users (it raised "PDF extraction requires pdfplumber. Run: pip install hound-mcp[all]" even after installing `[all]`). The local dev venv had pdfplumber installed manually, which masked the missing declaration; CI's clean environment caught it. `pdfplumber>=0.11.0` is now declared in `[all]`.
+- CI workflow now installs `.[dev,all]` (was `.[dev]`) so the PDF test suite actually exercises the flagship feature instead of failing on the missing optional dependency.
+
+### Notes
+- No code changes. Re-publishing solely to fix the dependency declaration so `hound-mcp[all]` delivers PDF support as documented.
+
 ## [4.0.0] - 2026-06-20
 
 The agent-effectiveness release. Hound now masters itself the moment it connects, reads PDFs, and tells the agent exactly what to do next. **Breaking:** the manual `open_session` / `close_session` / `list_sessions` MCP tools are removed (8 tools → 5); a single warm browser is managed automatically.

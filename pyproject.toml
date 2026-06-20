@@ -1,6 +1,6 @@
 [project]
 name = "hound-mcp"
-version = "4.0.0"
+version = "4.0.1"
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever."
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
 requires-python = ">=3.11"
@@ -31,6 +31,7 @@ dev = [
 ]
 all = [
     "requests>=2.31",
+    "pdfplumber>=0.11.0",
 ]
 
 [project.urls]
