@@ -5,9 +5,6 @@
 ### Added
 - **Brand visuals in the README.** Added a hero banner, a square logo mark, and an editorial "retrieving the web" illustration under `docs/`. Images are referenced via absolute `raw.githubusercontent.com` URLs so they render on both GitHub and the PyPI project page (PyPI cannot resolve relative repo paths). No code changes.
 
-### Fixed
-- Removed a stray em-dash in the `smart_search` feature copy.
-
 ## [4.0.2] - 2026-06-20
 
 ### Fixed
