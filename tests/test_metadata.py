@@ -92,3 +92,29 @@ def test_long_values_truncated():
     html = f'<meta property="og:description" content="{"x" * 2000}">'
     m = extract_metadata(html, "https://x.com")
     assert len(m["description"]) == 500
+
+
+# ─── extract_image_urls ─────────────────────────────────────────────────
+
+from master_fetch.metadata import extract_image_urls
+
+
+def test_image_urls_absolute_and_deduped():
+    html = (
+        '<img src="/a.png"><img src="https://x.com/a.png">'
+        '<img src="https://cdn.y.com/b.jpg"><img src="data:image/png;base64,xxx">'
+    )
+    urls = extract_image_urls(html, "https://x.com/page")
+    assert urls == ["https://x.com/a.png", "https://cdn.y.com/b.jpg"]
+
+
+def test_image_urls_capped():
+    html = "".join(f'<img src="/img{i}.png">' for i in range(30))
+    urls = extract_image_urls(html, "https://x.com/p", max_n=5)
+    assert len(urls) == 5
+    assert urls[0] == "https://x.com/img0.png"
+
+
+def test_image_urls_empty_html():
+    assert extract_image_urls("", "https://x.com") == []
+    assert extract_image_urls(None, "https://x.com") == []

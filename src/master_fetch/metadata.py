@@ -38,6 +38,11 @@ _LD_RE = re.compile(
     r'<script\b[^>]*?type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.IGNORECASE | re.DOTALL,
 )
+_IMG_RE = re.compile(
+    r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_ASSET_SKIP = ("data:image",)
 
 # Map meta keys to our flat field names. First match wins per field (OpenGraph
 # takes priority over Twitter/Dublin Core, etc.).
@@ -133,3 +138,30 @@ def extract_metadata(html: str, url: str) -> dict[str, Any]:
                     meta["author"] = str(a)[:200]
 
     return meta
+
+
+def extract_image_urls(html: str, url: str, max_n: int = 20) -> list[str]:
+    """Extract absolute image URLs from <img src=...> tags. Deduped, order-
+    preserving, capped at max_n. Skips data: URIs. Used by smart_fetch's opt-in
+    include_media flag so a multimodal agent can pull the page's images."""
+    if not html:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _IMG_RE.finditer(html):
+        src = (m.group(1) or "").strip()
+        if not src or src.lower().startswith(_ASSET_SKIP):
+            continue
+        try:
+            absu = urljoin(url, src)
+        except Exception:
+            continue
+        if not absu.startswith(("http://", "https://")):
+            continue
+        if absu in seen:
+            continue
+        seen.add(absu)
+        out.append(absu)
+        if len(out) >= max_n:
+            break
+    return out

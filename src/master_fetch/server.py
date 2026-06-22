@@ -162,6 +162,7 @@ class ResponseModel(BaseModel):
     next_action: str = Field(default="", description="Suggested next call when one is obvious (paginate/retry/switch source). Empty = nothing to do.")
     fetched_at: str = Field(default="", description="ISO-8601 UTC timestamp this response was generated. For cached responses, content age is bounded by cache_ttl.")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Page metadata for citation/relevance: title, description, site_name, type, image, canonical, lang, published_time, author (OpenGraph + JSON-LD + canonical). Empty for non-HTML.")
+    media: List[str] = Field(default_factory=list, description="Image URLs on the page (only populated when include_media=true). Multimodal agents can fetch/screenshot these.")
 
 
 class BulkResponseModel(BaseModel):
@@ -459,6 +460,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
             total_extracted_chars=total_len,
             escalation_path=result.escalation_path, retry_count=result.retry_count,
             metadata=result.metadata,
+            media=result.media,
             next_offset=0,
         ))
 
@@ -492,6 +494,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         is_truncated=truncated, next_offset=next_off,
         escalation_path=result.escalation_path, retry_count=result.retry_count,
         metadata=result.metadata,
+        media=result.media,
     ))
 
 
@@ -506,6 +509,8 @@ _PDF_PASSWORD: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_
 # inside _apply_chunking: the full extracted text is cached once, and different
 # focus queries are just different BM25 views over the same cached content.
 _FOCUS: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_focus", default=None)
+# Opt-in: populate ResponseModel.media with the page's image URLs (multimodal).
+_INCLUDE_MEDIA: contextvars.ContextVar[bool] = contextvars.ContextVar("_include_media", default=False)
 
 
 def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
@@ -715,18 +720,22 @@ def _translate_response(
     # pages. JSON/PDF/image responses return earlier with metadata={}. Cheap
     # regex pass over the raw body; never blocks the response.
     page_metadata: Dict[str, Any] = {}
+    page_media: List[str] = []
     if raw_body and isinstance(raw_body, (bytes, bytearray)):
         try:
             _html = raw_body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace')
-            from master_fetch.metadata import extract_metadata
+            from master_fetch.metadata import extract_metadata, extract_image_urls
             page_metadata = extract_metadata(_html, page_url)
+            if _INCLUDE_MEDIA.get():
+                page_media = extract_image_urls(_html, page_url)
         except Exception as e:
-            logger.debug("metadata extraction failed for %s: %s", page_url, e)
+            logger.debug("metadata/media extraction failed for %s: %s", page_url, e)
 
     return ResponseModel(
         status=page.status, content=content, url=page.url,
         fetcher_used=fetcher_used, duration_ms=duration_ms,
         content_type=raw_ct, total_size_bytes=total_size, metadata=page_metadata,
+        media=page_media,
     )
 
 
@@ -1881,6 +1890,7 @@ class MasterFetchServer:
         password: Annotated[Optional[str], Field(description="PDF only: password for an encrypted PDF.")] = None,
         focus: Annotated[Optional[str], Field(description="Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, saving context on long pages. Works post-cache, so it never triggers a re-fetch. Re-pass the same focus when paginating with offset. Empty = full page.")] = None,
         actions: Annotated[Optional[List[Dict[str, Any]]], Field(description="Page interactions run on the stealthy browser AFTER load, BEFORE extraction: [{click:'button.load-more'}, {fill:{selector:'#q', text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'.item'}]. Forces the stealthy tier; bypasses cache. Reaches content behind a click/form/infinite scroll.")] = None,
+        include_media: Annotated[bool, Field(description="If true, populate the response .media field with up to 20 image URLs found on the page (for multimodal agents). Default false (keeps responses lean).")] = False,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -1962,6 +1972,7 @@ class MasterFetchServer:
         # the parent's focus via the gather context copy instead of resetting it.
         if isinstance(focus, str) and focus.strip():
             _FOCUS.set(focus)
+        _INCLUDE_MEDIA.set(bool(include_media))
         # actions produce post-interaction content unique to the action sequence;
         # bypass the cache so a plain (pre-action) cached copy is never served.
         if actions:
@@ -2388,7 +2399,7 @@ class MasterFetchServer:
                     "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
                     "focus": {"type": "string", "description": "Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, a big context saver on long pages. Runs post-cache (no re-fetch). Re-pass the same focus when paginating with offset."},
                     "actions": {"type": "array", "description": "Page interactions run on the stealthy browser AFTER load, BEFORE extraction. Forces stealthy tier + bypasses cache. Each item is one action: {click:'css'}, {fill:{selector:'css',text:'x'}}, {press:'Enter'} (or {press:{selector:'css',key:'Enter'}}), {wait:500} (ms), {scroll:3} (viewport steps, triggers lazy/infinite scroll), {wait_selector:'css'}. Use for 'load more', search forms, pagination, infinite scroll."},
-                    "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true)", "additionalProperties": True},
+                    "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true), include_media (bool, default false: populate response.media with up to 20 page image URLs for multimodal agents)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -2555,6 +2566,7 @@ class MasterFetchServer:
                 "proxy", "cookies", "extra_headers", "useragent",
                 "wait", "network_idle", "headless", "real_chrome", "respect_robots",
                 "main_content_only", "use_trafilatura", "solve_cloudflare", "block_webrtc", "hide_canvas",
+                "include_media",
             )}
             result = await self.smart_fetch(
                 url=url, urls=urls,
