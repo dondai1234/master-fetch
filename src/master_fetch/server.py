@@ -123,6 +123,7 @@ HOUND_INSTRUCTIONS = (
     "  - PDFs: auto-extracted to structured markdown (tables/headings/metadata). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
     "  - Cache: cache_ttl=0 forces a fresh fetch (default 1hr).\n"
     "  - Long page, one topic? pass focus='...' to get only the BM25-relevant blocks (post-cache, no re-fetch; re-pass it when paginating with offset).\n"
+    "  - Behind a click/form/load-more/infinite-scroll? pass actions=[{click:'button.load-more'},{scroll:3},...] (forces the stealthy browser; runs after load, before extraction; bypasses cache).\n"
     "• smart_search(query) - find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
     "  - Research mode: options={fetch_content:true} auto-fetches the top 3 results' full content in the same call (one call instead of 4). Good for quick factual answers.\n"
     "  - Filters: options={site:'docs.python.org', exclude_sites:['pinterest.com'], location:'US', language:'en', page:0}.\n"
@@ -1616,6 +1617,7 @@ class MasterFetchServer:
         solve_cloudflare: bool = False,
         additional_args: Optional[Dict] = None,
         session_id: Optional[str] = None,
+        page_action=None,
     ) -> ResponseModel:
         """Stealthy fetcher with anti-bot bypass via Patchright (rebrowser-playwright fork).
 
@@ -1674,6 +1676,7 @@ class MasterFetchServer:
             wait_selector_state=wait_selector_state, block_webrtc=block_webrtc,
             allow_webgl=allow_webgl, solve_cloudflare=solve_cloudflare,
             additional_args=additional_args, session_id=session_id,
+            page_action=page_action,
         )
         result = bulk.results[0]
         result.duration_ms = (now() - t0) * 1000
@@ -1708,6 +1711,7 @@ class MasterFetchServer:
         solve_cloudflare: bool = False,
         additional_args: Optional[Dict] = None,
         session_id: Optional[str] = None,
+        page_action=None,
     ) -> BulkResponseModel:
         """Async parallel stealthy fetch with browser fingerprint randomization.
 
@@ -1756,6 +1760,7 @@ class MasterFetchServer:
                     extra_headers=extra_headers, disable_resources=disable_resources,
                     wait_selector=wait_selector, wait_selector_state=wait_selector_state,
                     network_idle=network_idle, proxy=proxy, solve_cloudflare=solve_cloudflare,
+                    page_action=page_action,
                 ))
                 for url in urls
             ]
@@ -1774,7 +1779,7 @@ class MasterFetchServer:
                 disable_resources=disable_resources,
                 wait_selector_state=wait_selector_state,
             ) as session:
-                timed_tasks = [_timed(session.fetch(url)) for url in urls]
+                timed_tasks = [_timed(session.fetch(url, page_action=page_action)) for url in urls]
                 timed_responses = await gather(*timed_tasks, return_exceptions=True)
 
         results = []
@@ -1875,6 +1880,7 @@ class MasterFetchServer:
         pages: Annotated[Optional[str], Field(description="PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset of pages (saves tokens/time on big PDFs). None = all pages.")] = None,
         password: Annotated[Optional[str], Field(description="PDF only: password for an encrypted PDF.")] = None,
         focus: Annotated[Optional[str], Field(description="Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, saving context on long pages. Works post-cache, so it never triggers a re-fetch. Re-pass the same focus when paginating with offset. Empty = full page.")] = None,
+        actions: Annotated[Optional[List[Dict[str, Any]]], Field(description="Page interactions run on the stealthy browser AFTER load, BEFORE extraction: [{click:'button.load-more'}, {fill:{selector:'#q', text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'.item'}]. Forces the stealthy tier; bypasses cache. Reaches content behind a click/form/infinite scroll.")] = None,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -1922,6 +1928,8 @@ class MasterFetchServer:
         """
         # Bulk mode: fetch multiple URLs in parallel
         if urls is not None:
+            if actions:
+                raise ValueError("actions are not supported in bulk mode; call smart_fetch once per URL")
             return await self._smart_fetch_bulk(
                 urls, extraction_type, css_selector, main_content_only,
                 use_trafilatura, cache_ttl, force_fetcher, respect_robots,
@@ -1954,6 +1962,10 @@ class MasterFetchServer:
         # the parent's focus via the gather context copy instead of resetting it.
         if isinstance(focus, str) and focus.strip():
             _FOCUS.set(focus)
+        # actions produce post-interaction content unique to the action sequence;
+        # bypass the cache so a plain (pre-action) cached copy is never served.
+        if actions:
+            cache_ttl = 0
 
         # 1. Check robots.txt compliance
         if respect_robots and not await is_allowed(url):
@@ -1990,6 +2002,24 @@ class MasterFetchServer:
         is_reddit = is_reddit_url(url)
         if is_reddit:
             url = rewrite_to_old_reddit(url)
+
+        # 3.5. actions: page interactions (click/fill/press/wait/scroll) require
+        # the stealthy browser tier. Force it, bypass cache (post-action content
+        # is unique to the action sequence), and pass a page_action callable.
+        if actions:
+            if force_fetcher == "http":
+                raise ValueError("actions require the browser tier; use force_fetcher='stealthy' or omit it")
+            from master_fetch.actions import build_page_action
+            page_action = build_page_action(actions)  # validates; raises on bad input
+            if page_action is None:
+                raise ValueError("actions must be a non-empty list of action dicts")
+            return await self._force_fetch(
+                url, "stealthy", extraction_type, css_selector, main_content_only,
+                use_trafilatura, cache_ttl, offset, headless, real_chrome, wait,
+                proxy, timeout, network_idle, solve_cloudflare, block_webrtc,
+                hide_canvas, extra_headers, useragent, cookies, mc,
+                page_action=page_action,
+            )
 
         # 4. Force specific fetcher (explicit pin wins; uses rewritten url)
         if force_fetcher:
@@ -2074,6 +2104,7 @@ class MasterFetchServer:
         headless, real_chrome, wait, proxy, timeout, network_idle,
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
         useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
+        page_action=None,
     ) -> ResponseModel:
         """Execute a forced fetcher tier and finalize the result."""
         # HTTP fetcher takes seconds; browser timeout is ms. Cap at 30s.
@@ -2103,6 +2134,7 @@ class MasterFetchServer:
                 hide_canvas=hide_canvas, extra_headers=extra_headers,
                 useragent=useragent, cookies=cookies,
                 session_id=ssid,
+                page_action=page_action,
             )
             result.escalation_path = "direct:stealthy"
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
@@ -2355,6 +2387,7 @@ class MasterFetchServer:
                     "pages": {"type": "string", "description": "PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset (saves tokens/time on big PDFs). None = all pages."},
                     "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
                     "focus": {"type": "string", "description": "Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, a big context saver on long pages. Runs post-cache (no re-fetch). Re-pass the same focus when paginating with offset."},
+                    "actions": {"type": "array", "description": "Page interactions run on the stealthy browser AFTER load, BEFORE extraction. Forces stealthy tier + bypasses cache. Each item is one action: {click:'css'}, {fill:{selector:'css',text:'x'}}, {press:'Enter'} (or {press:{selector:'css',key:'Enter'}}), {wait:500} (ms), {scroll:3} (viewport steps, triggers lazy/infinite scroll), {wait_selector:'css'}. Use for 'load more', search forms, pagination, infinite scroll."},
                     "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true)", "additionalProperties": True},
                 },
             },
