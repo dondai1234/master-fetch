@@ -160,6 +160,7 @@ class ResponseModel(BaseModel):
     content_ok: bool = Field(default=False, description="True = real content retrieved (status<400, no error, not a JS shell/login wall). Check this before trusting content.")
     next_action: str = Field(default="", description="Suggested next call when one is obvious (paginate/retry/switch source). Empty = nothing to do.")
     fetched_at: str = Field(default="", description="ISO-8601 UTC timestamp this response was generated. For cached responses, content age is bounded by cache_ttl.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Page metadata for citation/relevance: title, description, site_name, type, image, canonical, lang, published_time, author (OpenGraph + JSON-LD + canonical). Empty for non-HTML.")
 
 
 class BulkResponseModel(BaseModel):
@@ -456,6 +457,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
             content_type=result.content_type, total_size_bytes=result.total_size_bytes,
             total_extracted_chars=total_len,
             escalation_path=result.escalation_path, retry_count=result.retry_count,
+            metadata=result.metadata,
             next_offset=0,
         ))
 
@@ -488,6 +490,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         total_extracted_chars=total_len,
         is_truncated=truncated, next_offset=next_off,
         escalation_path=result.escalation_path, retry_count=result.retry_count,
+        metadata=result.metadata,
     ))
 
 
@@ -707,10 +710,22 @@ def _translate_response(
         note = "[503 via stealthy fetcher. The target server may block headless browser fingerprints. Try smart_fetch or http/dynamic fetcher instead.]"
         content = [note]
 
+    # Metadata enrichment (OpenGraph + JSON-LD + canonical + <title>) for HTML
+    # pages. JSON/PDF/image responses return earlier with metadata={}. Cheap
+    # regex pass over the raw body; never blocks the response.
+    page_metadata: Dict[str, Any] = {}
+    if raw_body and isinstance(raw_body, (bytes, bytearray)):
+        try:
+            _html = raw_body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace')
+            from master_fetch.metadata import extract_metadata
+            page_metadata = extract_metadata(_html, page_url)
+        except Exception as e:
+            logger.debug("metadata extraction failed for %s: %s", page_url, e)
+
     return ResponseModel(
         status=page.status, content=content, url=page.url,
         fetcher_used=fetcher_used, duration_ms=duration_ms,
-        content_type=raw_ct, total_size_bytes=total_size,
+        content_type=raw_ct, total_size_bytes=total_size, metadata=page_metadata,
     )
 
 
