@@ -187,7 +187,7 @@ class TestSearchCacheKey:
         from master_fetch.search import smart_search as _ss, SearchResult
         calls = []
 
-        async def fake_tinyfish(query, max_results=10, api_key=""):
+        async def fake_tinyfish(query, max_results=10, api_key="", **kwargs):
             calls.append(max_results)
             return [
                 SearchResult(title=f"t{i}", url=f"u{i}", snippet="s", source="tinyfish",
@@ -206,6 +206,8 @@ class TestSearchCacheKey:
             monkeypatch.undo()
         # fake_tinyfish called for the first max=2 and the max=3, NOT the second max=2
         assert calls == [2, 3], f"expected [2, 3], got {calls}"
-        # Both keys stored separately
-        assert ("python", "search:v1:2") in dict_cache
-        assert ("python", "search:v1:3") in dict_cache
+        # Both keys stored separately. The cache key now includes every filter
+        # (site/exclude/location/language/page); with none set they collapse to
+        # empty segments, so the key is search:v1:{max}::::0.
+        assert ("python", "search:v1:2:::::0") in dict_cache
+        assert ("python", "search:v1:3:::::0") in dict_cache

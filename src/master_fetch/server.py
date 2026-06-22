@@ -114,21 +114,23 @@ IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 HOUND_INSTRUCTIONS = (
     "Hound = web access for this agent. 3 tools cover 95% of web work.\n"
     "\n"
-    "• smart_fetch(url) — get any page. Auto-handles anti-bot (HTTP → stealthy Patchright browser). Returns extracted text + metadata.\n"
+    "• smart_fetch(url) - get any page. Auto-handles anti-bot (HTTP → stealthy Patchright browser). Returns extracted text + metadata.\n"
     "  - One section only? pass css_selector (e.g. 'article', '.main').\n"
     "  - Long page? response has is_truncated + next_offset → call again with offset=next_offset to page through.\n"
-    "  - Seems wrong/empty? check response.content_ok and response.next_action — they tell you what to do.\n"
+    "  - Seems wrong/empty? check response.content_ok and response.next_action - they tell you what to do.\n"
     "  - Many URLs? pass urls=['a','b'] (parallel bulk).\n"
     "  - Raw HTML? extraction_type='html'.\n"
     "  - PDFs: auto-extracted to structured markdown (tables/headings/metadata). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
     "  - Cache: cache_ttl=0 forces a fresh fetch (default 1hr).\n"
     "  - Long page, one topic? pass focus='...' to get only the BM25-relevant blocks (post-cache, no re-fetch; re-pass it when paginating with offset).\n"
-    "• smart_search(query) — find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
-    "• screenshot(url) — image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
+    "• smart_search(query) - find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
+    "  - Research mode: options={fetch_content:true} auto-fetches the top 3 results' full content in the same call (one call instead of 4). Good for quick factual answers.\n"
+    "  - Filters: options={site:'docs.python.org', exclude_sites:['pinterest.com'], location:'US', language:'en', page:0}.\n"
+    "• screenshot(url) - image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
     "\n"
     "#1 workflow (answer a factual question): smart_search → smart_fetch the 2 most relevant (fetch_relevance=high) results → synthesize, citing URLs.\n"
     "\n"
-    "Known unbypassable (no free tool beats these): DataDome, Akamai, Cloudflare Turnstile (interactive). If smart_fetch fails on one, switch sources — do not retry the same URL.\n"
+    "Known unbypassable (no free tool beats these): DataDome, Akamai, Cloudflare Turnstile (interactive). If smart_fetch fails on one, switch sources - do not retry the same URL.\n"
     "\n"
     "Pro tip: open_session once and reuse it for many fetches to skip browser cold-starts (power users only; smart_fetch auto-manages sessions otherwise)."
 )
@@ -395,17 +397,17 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     elif err.startswith("geo_redirect_detected"):
         next_action = "geo redirect: try a different regional URL or a proxy"
     elif err.startswith("scanned_pdf"):
-        next_action = "scanned/image-only PDF — OCR is not supported; use a vision-capable tool or another source"
+        next_action = "scanned/image-only PDF - OCR is not supported; use a vision-capable tool or another source"
     elif err.startswith("encrypted_pdf"):
-        next_action = "encrypted PDF — pass a password via the 'password' option"
+        next_action = "encrypted PDF - pass a password via the 'password' option"
     elif err.startswith("pdf_deps_missing"):
-        next_action = "PDF support not installed — run: pip install hound-mcp[all]"
+        next_action = "PDF support not installed - run: pip install hound-mcp[all]"
     elif err.startswith("not_a_pdf") or err.startswith("pdf_open_failed") or err.startswith("pdf_extract_failed"):
-        next_action = "PDF could not be parsed — see error field"
+        next_action = "PDF could not be parsed - see error field"
     elif "all_tiers_failed" in err:
-        next_action = "all fetchers failed; site may use unbypassable protection (DataDome/Akamai/Turnstile) — switch sources"
+        next_action = "all fetchers failed; site may use unbypassable protection (DataDome/Akamai/Turnstile) - switch sources"
     elif result.status == 0 or result.status >= 400:
-        next_action = "fetch failed — see error field"
+        next_action = "fetch failed - see error field"
     return summary, next_action, content_ok
 
 
@@ -539,7 +541,7 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
                     result = ocr_result  # encrypted surfaced by OCR path too
                 elif ocr_result.error:
                     # OCR attempted but failed — surface it honestly.
-                    result.content = [f"[Scanned PDF — OCR attempted but failed: {ocr_result.error[:160]}]"]
+                    result.content = [f"[Scanned PDF - OCR attempted but failed: {ocr_result.error[:160]}]"]
                     result.error = f"ocr_failed: {ocr_result.error[:160]}"
             # else: OCR extras not installed -> keep the scanned dead-end below
         except ImportError:
@@ -621,7 +623,7 @@ def _translate_response(
                     )
                 return ResponseModel(
                     status=page.status,
-                    content=["[Image page — OCR detected no extractable text.]"],
+                    content=["[Image page - OCR detected no extractable text.]"],
                     url=page.url, fetcher_used=fetcher_used, duration_ms=duration_ms,
                     content_type=raw_ct, total_size_bytes=total_size,
                     extracted_type="text", error="image_ocr_empty",
@@ -636,7 +638,7 @@ def _translate_response(
         except Exception as e:
             return ResponseModel(
                 status=page.status,
-                content=[f"[Image page — OCR failed: {str(e)[:160]}]"],
+                content=[f"[Image page - OCR failed: {str(e)[:160]}]"],
                 url=page.url, fetcher_used=fetcher_used, duration_ms=duration_ms,
                 content_type=raw_ct, total_size_bytes=total_size,
                 extracted_type="text", error=f"image_ocr_failed: {str(e)[:160]}",
@@ -2225,18 +2227,21 @@ class MasterFetchServer:
         max_results: int = 10,
         cache_ttl: int = 300,
         api_key: str = "",
-    ) -> SearchResponseModel:
+        site: Optional[str] = None,
+        exclude_sites: Optional[List[str]] = None,
+        location: Optional[str] = None,
+        language: Optional[str] = None,
+        page: int = 0,
+        fetch_content: bool = False,
+        fetch_top: int = 3,
+        max_content_chars_per: int = 8000,
+    ) -> Union[SearchResponseModel, "ResearchResponseModel"]:
         """Search the web via TinyFish API and return structured results.
-        Requires TINYFISH_API_KEY env var.
 
-        Free API key (no credit card) at tinyfish.ai.
-        Results are cached for 5 minutes by default.
-
-        :param query: The search query.
-        :param max_results: Maximum number of results (1-50, default 10).
-        :param cache_ttl: Cache TTL in seconds (default 300 = 5 minutes).
-        :param api_key: TinyFish API key. If empty, uses TINYFISH_API_KEY env var.
-            Free key (no credit card) at tinyfish.ai.
+        Filters: site/exclude_sites (domain include/exclude via site: operators),
+        location/language (geo), page (0-10). Research mode (fetch_content=True)
+        auto-fetches the top-N high-relevance results' full content in this call.
+        Requires TINYFISH_API_KEY env var (free key at tinyfish.ai).
         """
         try:
             query = validate_search_query(query)
@@ -2251,7 +2256,12 @@ class MasterFetchServer:
 
         try:
             from master_fetch.search import smart_search as _smart_search
-            return await _smart_search(self, query, max_results, cache_ttl, safe_api_key)
+            return await _smart_search(
+                self, query, max_results, cache_ttl, safe_api_key,
+                site=site, exclude_sites=exclude_sites, location=location,
+                language=language, page=page, fetch_content=fetch_content,
+                fetch_top=fetch_top, max_content_chars_per=max_content_chars_per,
+            )
         except ImportError as e:
             return SearchResponseModel(
                 query=query, results=[], total_results=0,
@@ -2273,7 +2283,7 @@ class MasterFetchServer:
     _TOOL_DEFS: list[dict] = [
         {
             "name": "mcp_smart_fetch",
-            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens; scanned PDFs auto-OCR with [all]. Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
+            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web: this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens; scanned PDFs auto-OCR with [all]. Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2296,7 +2306,7 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_screenshot",
-            "description": "Capture a screenshot of a URL as an image. For MULTIMODAL agents only — use when content is rendered as images/canvas/image-of-text that text extraction can't read, or you need visual layout. Text-only agents: prefer smart_fetch. A stealthy browser session is auto-managed (pass session_id only to reuse a specific open_session).",
+            "description": "Capture a screenshot of a URL as an image. For MULTIMODAL agents only: use when content is rendered as images/canvas/image-of-text that text extraction can't read, or you need visual layout. Text-only agents: prefer smart_fetch. A stealthy browser session is auto-managed (pass session_id only to reuse a specific open_session).",
             "inputSchema": {
                 "type": "object", "required": ["url"],
                 "properties": {
@@ -2309,12 +2319,12 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_search",
-            "description": "Web search via TinyFish. Returns URLs with titles + short snippets. NEVER answer from snippets alone — ALWAYS smart_fetch the result URL for full content. Each result has fetch_relevance (high/med/low): fetch 'high' first (1-2), then 'med' if needed, skip 'low'. The response fetch_hint says how many of each. Free key at tinyfish.ai. Results cached 5min.",
+            "description": "Web search via TinyFish (free key). Returns URLs with titles + snippets; each result has fetch_relevance (high/med/low). NEVER answer from snippets alone: either smart_fetch the 'high' results, OR set fetch_content=true (research mode) to auto-fetch the top-N results' full content in THIS one call (saves round-trips). Filters in options: site/exclude_sites (domain include/exclude), location/language (geo), page (0-10). Results cached 5min.",
             "inputSchema": {
                 "type": "object", "required": ["query"],
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "options": {"type": "object", "description": "max_results (1-50, default 10), cache_ttl (seconds, default 300), api_key", "additionalProperties": True},
+                    "options": {"type": "object", "description": "max_results (1-50, default 10), cache_ttl (seconds, default 300), api_key, site (domain to restrict, e.g. 'docs.python.org'), exclude_sites (list of domains to exclude), location (2-letter country code, e.g. 'US'), language (2-letter code, e.g. 'en'), page (0-10, pagination), fetch_content (bool, default false: research mode, auto-fetch top results' full content in this call), fetch_top (1-5, default 3: how many to fetch in research mode), max_content_chars_per (default 8000: per-result content cap in research mode)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -2465,7 +2475,11 @@ class MasterFetchServer:
             return result  # already list[ImageContent|TextContent]
 
         elif name == "mcp_smart_search":
-            kw = {k: v for k, v in options.items() if k in ("max_results", "cache_ttl", "api_key")}
+            kw = {k: v for k, v in options.items() if k in (
+                "max_results", "cache_ttl", "api_key",
+                "site", "exclude_sites", "location", "language", "page",
+                "fetch_content", "fetch_top", "max_content_chars_per",
+            )}
             result = await self.smart_search(query=args["query"], **kw)
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 

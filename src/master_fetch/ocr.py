@@ -166,7 +166,7 @@ def ocr_pdf(
             return PdfResult(encrypted=True,
                              error="encrypted_pdf: this PDF is password-protected; "
                                    "pass a password via the 'password' option",
-                             content=["[Encrypted PDF — pass a password to OCR it.]"])
+                             content=["[Encrypted PDF - pass a password to OCR it.]"])
         return PdfResult(error=f"pdf_open_failed: {str(e)[:200]}",
                          content=[f"[Could not open PDF for OCR: {str(e)[:200]}]"])
 

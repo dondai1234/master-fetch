@@ -92,7 +92,7 @@ class TestAgentHints:
 
     def test_next_action_network_error(self):
         r = _with_agent_hints(_resp(status=0, content=[""], error="boom"))
-        assert r.next_action == "fetch failed — see error field"
+        assert r.next_action == "fetch failed - see error field"
 
     def test_fetched_at_is_iso(self):
         r = _with_agent_hints(_resp())
@@ -329,7 +329,7 @@ class TestFetchRelevance:
         srv = MasterFetchServer()
         # Stub the network layer to avoid hitting TinyFish.
         import master_fetch.search as search_mod
-        async def fake_tinyfish(query, max_results=10, api_key=""):
+        async def fake_tinyfish(query, max_results=10, api_key="", **kwargs):
             return [
                 SearchResult(title="Python Asyncio Guide", url="https://a.com",
                              snippet="snip", source="tinyfish", position=1,

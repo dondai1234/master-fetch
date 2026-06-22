@@ -279,7 +279,7 @@ def extract_pdf(
             return PdfResult(encrypted=True,
                              error="encrypted_pdf: this PDF is password-protected; "
                                    "pass a password via the 'password' option",
-                             content=["[Encrypted PDF — pass a password to extract.]"])
+                             content=["[Encrypted PDF - pass a password to extract.]"])
         return PdfResult(error=f"pdf_open_failed: {str(e)[:200]}",
                          content=[f"[Could not open PDF: {str(e)[:200]}]"])
 
@@ -326,7 +326,7 @@ def extract_pdf(
                 error="scanned_pdf: this PDF is image-only (no extractable text). "
                       "Install OCR support with `pip install hound-mcp[all]` and hound "
                       "will auto-OCR scanned PDFs; or use a vision-capable tool.",
-                content=["[Scanned/image-only PDF — no extractable text. Install hound-mcp[all] for OCR.]"],
+                content=["[Scanned/image-only PDF - no extractable text. Install hound-mcp[all] for OCR.]"],
             )
 
         # --- Assemble: metadata header + pages ---
