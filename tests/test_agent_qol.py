@@ -408,9 +408,9 @@ class TestSingleBrowserInstance:
         names = {d["name"] for d in srv._TOOL_DEFS}
         for removed in ("mcp_open_session", "close_session", "list_sessions"):
             assert removed not in names, f"{removed} should be removed from tool defs"
-        # The 5 remaining tools
-        assert names == {"mcp_smart_fetch", "mcp_screenshot", "mcp_smart_search",
-                         "cache_clear", "version"}
+        # The 6 tools (v5 added mcp_smart_crawl)
+        assert names == {"mcp_smart_fetch", "mcp_smart_crawl", "mcp_screenshot",
+                         "mcp_smart_search", "cache_clear", "version"}
 
     @pytest.mark.asyncio
     async def test_removed_tools_dispatch_as_unknown(self):

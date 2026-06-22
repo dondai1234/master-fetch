@@ -208,6 +208,17 @@ def _fallback_extract(page, extraction_type: str, css_selector: Optional[str]) -
     ))
 
 
+def extract_content_from_html(html: str, url: str = "", extraction_type: str = "markdown") -> str | None:
+    """Extract content from a raw HTML string (used by smart_crawl, which fetches
+    pages as html once and derives both links and markdown from the same body)."""
+    return _extract_type(html, url, extraction_type)
+
+
+def extract_html_title(html: str) -> str:
+    """Public wrapper for the HTML <title> fallback extractor."""
+    return _extract_html_title(html)
+
+
 def extract_with_trafilatura(
     page,  # Scrapling Response/Selector object
     extraction_type: str = "markdown",

@@ -112,7 +112,7 @@ IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 # the #1 workflow, the gotchas, and when to use each tool. Kept tight (~300
 # tokens) since it is paid once, not per-turn-per-tool.
 HOUND_INSTRUCTIONS = (
-    "Hound = web access for this agent. 3 tools cover 95% of web work.\n"
+    "Hound = web access for this agent. 4 tools cover 95% of web work.\n"
     "\n"
     "• smart_fetch(url) - get any page. Auto-handles anti-bot (HTTP → stealthy Patchright browser). Returns extracted text + metadata.\n"
     "  - One section only? pass css_selector (e.g. 'article', '.main').\n"
@@ -126,6 +126,7 @@ HOUND_INSTRUCTIONS = (
     "• smart_search(query) - find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
     "  - Research mode: options={fetch_content:true} auto-fetches the top 3 results' full content in the same call (one call instead of 4). Good for quick factual answers.\n"
     "  - Filters: options={site:'docs.python.org', exclude_sites:['pinterest.com'], location:'US', language:'en', page:0}.\n"
+    "• smart_crawl(url) - read a whole site/section. BFS same-domain links, returns each page as markdown with content_ok. options: max_pages (default 10), max_depth (default 2), path_include (scope to ['/docs']), discover_only=true (URL map only), focus='query' (crawl relevant pages first + focus-filter). Check next_action if it stopped early.\n"
     "• screenshot(url) - image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
     "\n"
     "#1 workflow (answer a factual question): smart_search → smart_fetch the 2 most relevant (fetch_relevance=high) results → synthesize, citing URLs.\n"
@@ -2276,6 +2277,46 @@ class MasterFetchServer:
                 error=redact_api_key(str(e)[:200]),
             )
 
+    # ─── Crawl ─────────────────────────────────────────────────────
+
+    async def smart_crawl(
+        self,
+        url: str,
+        max_pages: int = 10,
+        max_depth: int = 2,
+        path_include: Optional[List[str]] = None,
+        path_exclude: Optional[List[str]] = None,
+        discover_only: bool = False,
+        focus: Optional[str] = None,
+        max_content_chars_per: int = 4000,
+        max_total_chars: Optional[int] = None,
+        concurrency: int = 3,
+        cache_ttl: int = DEFAULT_TTL,
+        respect_robots: bool = False,
+        force_fetcher: Optional[str] = None,
+        timeout: int = 30000,
+    ) -> "CrawlResponseModel":
+        """Deep-crawl a site: BFS same-domain from `url`, returning each page as
+        markdown with content_ok/summary. discover_only=true returns the URL map
+        only. `focus` prioritizes relevant pages within the budget. Caps:
+        max_pages, max_depth, max_total_chars (token budget). Reuses smart_fetch's
+        anti-bot escalation + cache.
+        """
+        try:
+            from master_fetch.crawl import smart_crawl as _smart_crawl, CrawlResponseModel as _CRM
+            return await _smart_crawl(
+                self, url, max_pages=max_pages, max_depth=max_depth,
+                path_include=path_include, path_exclude=path_exclude,
+                discover_only=discover_only, focus=focus,
+                max_content_chars_per=max_content_chars_per,
+                max_total_chars=max_total_chars, concurrency=concurrency,
+                cache_ttl=cache_ttl, respect_robots=respect_robots,
+                force_fetcher=force_fetcher, timeout=timeout,
+            )
+        except Exception as e:
+            from master_fetch.crawl import CrawlResponseModel as _CRM
+            return _CRM(start_url=url, pages=[], error=redact_api_key(str(e)[:200]))
+
     # ─── Serve ─────────────────────────────────────────────────────
 
     # Minimal hand-crafted tool definitions — no Pydantic schema bloat.
@@ -2300,6 +2341,20 @@ class MasterFetchServer:
                     "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
                     "focus": {"type": "string", "description": "Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, a big context saver on long pages. Runs post-cache (no re-fetch). Re-pass the same focus when paginating with offset."},
                     "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true)", "additionalProperties": True},
+                },
+            },
+            "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
+        },
+        {
+            "name": "mcp_smart_crawl",
+            "description": "Deep-crawl a site from a start URL: walks same-domain links breadth-first and returns each page as clean markdown with content_ok. Use for 'read all the docs on this site' / 'scrape this whole section'. discover_only=true returns just the URL map (no content). focus='query' prioritizes relevant pages within the budget AND focus-filters each page. Caps: max_pages (default 10), max_depth (default 2), max_total_chars (token budget). Each page carries content_ok + summary; check them. next_action tells you if the crawl stopped early (raise the caps or scope with path_include). Reuses smart_fetch anti-bot + cache.",
+            "inputSchema": {
+                "type": "object", "required": ["url"],
+                "properties": {
+                    "url": {"type": "string", "description": "Start URL (crawl stays on this domain)"},
+                    "discover_only": {"type": "boolean", "description": "true = return the URL map only, no page content (map mode). Default false."},
+                    "focus": {"type": "string", "description": "Query: prioritize crawling links relevant to this, and focus-filter each page's content. Big token saver on doc sites."},
+                    "options": {"type": "object", "description": "max_pages (1-100, default 10), max_depth (0-5, default 2), path_include (list of path prefixes to crawl, e.g. ['/docs']), path_exclude (list to skip), max_content_chars_per (default 4000), max_total_chars (token budget, default max_pages*per), concurrency (1-5, default 3), cache_ttl (seconds, default 3600), respect_robots (bool, default false), force_fetcher ('http'|'stealthy'), timeout (ms, default 30000)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -2464,6 +2519,18 @@ class MasterFetchServer:
                 cache_ttl=args.get("cache_ttl", DEFAULT_TTL),
                 force_fetcher=args.get("force_fetcher"),
                 offset=args.get("offset", 0), **kw,
+            )
+            return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
+
+        elif name == "mcp_smart_crawl":
+            kw = {k: v for k, v in options.items() if k in (
+                "max_pages", "max_depth", "path_include", "path_exclude",
+                "max_content_chars_per", "max_total_chars", "concurrency",
+                "cache_ttl", "respect_robots", "force_fetcher", "timeout",
+            )}
+            result = await self.smart_crawl(
+                url=args["url"], discover_only=args.get("discover_only", False),
+                focus=args.get("focus"), **kw,
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 
