@@ -122,6 +122,7 @@ HOUND_INSTRUCTIONS = (
     "  - Raw HTML? extraction_type='html'.\n"
     "  - PDFs: auto-extracted to structured markdown (tables/headings/metadata). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
     "  - Cache: cache_ttl=0 forces a fresh fetch (default 1hr).\n"
+    "  - Long page, one topic? pass focus='...' to get only the BM25-relevant blocks (post-cache, no re-fetch; re-pass it when paginating with offset).\n"
     "• smart_search(query) — find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
     "• screenshot(url) — image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
     "\n"
@@ -430,6 +431,17 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
     content_ok, next_action, fetched_at) on every returned result.
     """
     full_text = "\n".join(result.content)
+    # Query-focused filter (post-cache): if the caller passed `focus`, keep only
+    # the BM25-relevant blocks so the agent loads less context on long pages.
+    # Only applies to text-like extractions (not raw html). Runs before chunking
+    # so offset/next_offset page through the FOCUSED content.
+    focus_q = _FOCUS.get()
+    if focus_q and result.extracted_type in ("markdown", "text", "article", "structured"):
+        try:
+            from master_fetch.focus import focus_content
+            full_text = focus_content(full_text, focus_q)
+        except Exception as e:
+            logger.debug("focus filter failed: %s", e)
     total_len = len(full_text)
 
     if offset >= total_len:
@@ -483,6 +495,10 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
 # threading two new params through every fetcher signature.
 _PDF_PAGES: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_pdf_pages", default=None)
 _PDF_PASSWORD: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_pdf_password", default=None)
+# Query-focused content filter (smart_fetch `focus` param). Applied POST-cache
+# inside _apply_chunking: the full extracted text is cached once, and different
+# focus queries are just different BM25 views over the same cached content.
+_FOCUS: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_focus", default=None)
 
 
 def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
@@ -1840,6 +1856,7 @@ class MasterFetchServer:
         max_content_chars: Annotated[Optional[int], Field(description="Max chars of extracted content to return (default 40000). Lower this to save context tokens on big pages; the rest is paginated via offset/next_offset.")] = None,
         pages: Annotated[Optional[str], Field(description="PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset of pages (saves tokens/time on big PDFs). None = all pages.")] = None,
         password: Annotated[Optional[str], Field(description="PDF only: password for an encrypted PDF.")] = None,
+        focus: Annotated[Optional[str], Field(description="Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, saving context on long pages. Works post-cache, so it never triggers a re-fetch. Re-pass the same focus when paginating with offset. Empty = full page.")] = None,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -1915,6 +1932,10 @@ class MasterFetchServer:
         # pages-subset extraction doesn't collide with a full-PDF cache entry.
         _PDF_PAGES.set(pages if isinstance(pages, str) else None)
         _PDF_PASSWORD.set(password if isinstance(password, str) else None)
+        # focus: set only when provided (truthy) so bulk-mode inner calls inherit
+        # the parent's focus via the gather context copy instead of resetting it.
+        if isinstance(focus, str) and focus.strip():
+            _FOCUS.set(focus)
 
         # 1. Check robots.txt compliance
         if respect_robots and not await is_allowed(url):
@@ -2252,7 +2273,7 @@ class MasterFetchServer:
     _TOOL_DEFS: list[dict] = [
         {
             "name": "mcp_smart_fetch",
-            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens. Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
+            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web — this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens; scanned PDFs auto-OCR with [all]. Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2267,6 +2288,7 @@ class MasterFetchServer:
                     "offset": {"type": "integer", "description": "Char offset into EXTRACTED text to resume a truncated page. Use next_offset from the previous response."},
                     "pages": {"type": "string", "description": "PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset (saves tokens/time on big PDFs). None = all pages."},
                     "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
+                    "focus": {"type": "string", "description": "Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, a big context saver on long pages. Runs post-cache (no re-fetch). Re-pass the same focus when paginating with offset."},
                     "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true)", "additionalProperties": True},
                 },
             },
