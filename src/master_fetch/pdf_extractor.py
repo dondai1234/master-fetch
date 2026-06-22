@@ -323,9 +323,10 @@ def extract_pdf(
                 title=str(meta.get("Title", "") or ""),
                 pages_total=total_pages, pages_extracted=page_nums,
                 scanned=True,
-                error="scanned_pdf: this PDF is image-only (no extractable text); "
-                      "OCR is not supported — use a vision-capable tool or another source",
-                content=["[Scanned/image-only PDF — no extractable text. OCR is not supported.]"],
+                error="scanned_pdf: this PDF is image-only (no extractable text). "
+                      "Install OCR support with `pip install hound-mcp[all]` and hound "
+                      "will auto-OCR scanned PDFs; or use a vision-capable tool.",
+                content=["[Scanned/image-only PDF — no extractable text. Install hound-mcp[all] for OCR.]"],
             )
 
         # --- Assemble: metadata header + pages ---

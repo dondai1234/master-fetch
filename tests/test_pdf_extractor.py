@@ -268,11 +268,19 @@ class TestExtractPdfResponse:
         assert r.error == ""
         assert r.content
 
-    def test_scanned_pdf_response_sets_error(self):
+    def test_scanned_pdf_response_uses_ocr_or_deadend(self):
+        """Scanned PDFs auto-OCR when the OCR extras are installed; otherwise
+        they return an honest dead-end pointing to `hound-mcp[all]`."""
+        from master_fetch.ocr import ocr_available
         body = open(FIX_SCANNED, "rb").read()
         r = _extract_pdf_response(body, "application/pdf", len(body),
                                   "https://example.com/x.pdf", "markdown", "http", 0)
-        assert r.error.startswith("scanned_pdf")
+        if ocr_available():
+            assert r.error == ""
+            assert r.content and "Dummy PDF file" in r.content[0]
+        else:
+            assert r.error.startswith("scanned_pdf")
+            assert "hound-mcp[all]" in r.error
 
     def test_pdf_deps_missing_response(self, monkeypatch):
         """When pdfplumber isn't installed, the response carries a clear error."""

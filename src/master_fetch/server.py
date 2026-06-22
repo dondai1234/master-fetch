@@ -508,6 +508,28 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
             content_type=raw_ct, total_size_bytes=total_size,
             extracted_type="markdown", error=f"pdf_extract_failed: {str(e)[:200]}",
         )
+    # Scanned / image-only PDF: fall back to OCR if the OCR extras are
+    # installed, so the agent gets the text instead of a dead-end. Auto-OCR
+    # (no new param); an explicit `pages` spec is honored, otherwise OCR caps
+    # at the first OCR_DEFAULT_PAGES pages to avoid a multi-minute hang.
+    if result.scanned and not result.encrypted:
+        try:
+            from master_fetch.ocr import ocr_pdf, ocr_available
+            if ocr_available():
+                ocr_result = ocr_pdf(body, pages=pages, password=password)
+                if ocr_result.content and not ocr_result.error:
+                    result = ocr_result  # replace with OCR'd content
+                elif ocr_result.error and ocr_result.encrypted:
+                    result = ocr_result  # encrypted surfaced by OCR path too
+                elif ocr_result.error:
+                    # OCR attempted but failed — surface it honestly.
+                    result.content = [f"[Scanned PDF — OCR attempted but failed: {ocr_result.error[:160]}]"]
+                    result.error = f"ocr_failed: {ocr_result.error[:160]}"
+            # else: OCR extras not installed -> keep the scanned dead-end below
+        except ImportError:
+            pass  # OCR extras not installed
+        except Exception as e:
+            logger.debug("OCR fallback failed for %s: %s", url, e)
     return ResponseModel(
         status=200, content=result.content, url=url,
         fetcher_used=fetcher_used, duration_ms=duration_ms,
@@ -564,6 +586,45 @@ def _translate_response(
     if is_pdf and raw_body:
         return _extract_pdf_response(raw_body, raw_ct, total_size, page.url,
                                      extraction_type, fetcher_used, duration_ms)
+
+    # Image-only page (content-type image/*): OCR it to text if the OCR extras
+    # are installed. Many pages are just a PNG/JPEG (screenshots, scans, memes,
+    # image-of-text); without OCR the agent gets nothing useful.
+    is_image = raw_ct.startswith('image/') and bool(raw_body)
+    if is_image and raw_body:
+        try:
+            from master_fetch.ocr import ocr_image_bytes, ocr_available
+            if ocr_available():
+                text = ocr_image_bytes(raw_body)
+                if text:
+                    return ResponseModel(
+                        status=page.status, content=[text], url=page.url,
+                        fetcher_used=fetcher_used, duration_ms=duration_ms,
+                        content_type=raw_ct, total_size_bytes=total_size,
+                        extracted_type="text",
+                    )
+                return ResponseModel(
+                    status=page.status,
+                    content=["[Image page — OCR detected no extractable text.]"],
+                    url=page.url, fetcher_used=fetcher_used, duration_ms=duration_ms,
+                    content_type=raw_ct, total_size_bytes=total_size,
+                    extracted_type="text", error="image_ocr_empty",
+                )
+            return ResponseModel(
+                status=page.status,
+                content=["[Image page (content-type image/*). Install hound-mcp[all] for OCR text extraction.]"],
+                url=page.url, fetcher_used=fetcher_used, duration_ms=duration_ms,
+                content_type=raw_ct, total_size_bytes=total_size,
+                extracted_type="text", error="image_ocr_unavailable",
+            )
+        except Exception as e:
+            return ResponseModel(
+                status=page.status,
+                content=[f"[Image page — OCR failed: {str(e)[:160]}]"],
+                url=page.url, fetcher_used=fetcher_used, duration_ms=duration_ms,
+                content_type=raw_ct, total_size_bytes=total_size,
+                extracted_type="text", error=f"image_ocr_failed: {str(e)[:160]}",
+            )
 
     s = _get_scrapling()
     content: list[str]

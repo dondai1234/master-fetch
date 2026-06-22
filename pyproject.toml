@@ -33,6 +33,8 @@ dev = [
 all = [
     "requests>=2.31",
     "pdfplumber>=0.11.0",
+    "pypdfium2>=4.30",
+    "rapidocr>=3.0",
 ]
 
 [project.urls]
