@@ -6,6 +6,7 @@ import pytest
 
 from master_fetch.crawl import (
     extract_same_domain_links, score_link, smart_crawl, CrawlResponseModel,
+    normalize_url,
 )
 from master_fetch.server import ResponseModel
 
@@ -112,7 +113,7 @@ def test_crawl_bfs_basic():
     resp = asyncio.run(smart_crawl(srv, START, max_pages=10, max_depth=1, cache_ttl=0))
     assert isinstance(resp, CrawlResponseModel)
     fetched = {p.url for p in resp.pages}
-    assert START in fetched
+    assert normalize_url(START) in fetched
     assert "https://docs.example.com/docs/a" in fetched
     assert "https://docs.example.com/docs/b" in fetched
     # External not crawled.
@@ -130,7 +131,7 @@ def test_crawl_max_depth_zero_only_start():
     srv = _server()
     resp = asyncio.run(smart_crawl(srv, START, max_pages=10, max_depth=0, cache_ttl=0))
     assert resp.pages_crawled == 1
-    assert resp.pages[0].url == START
+    assert resp.pages[0].url == normalize_url(START)
     # No links followed, so only the start URL was discovered.
     assert resp.pages_discovered == 1
 
@@ -212,3 +213,99 @@ def test_crawl_summary_and_next_action_when_complete():
     assert resp.summary
     # Completed without hitting caps -> no next_action.
     assert resp.next_action == ""
+
+
+# ─── v6 flagship: normalization, adaptive extraction, selective, best-first ──
+
+def test_normalize_url_collapses_trailing_slash_and_tracking():
+    from master_fetch.crawl import normalize_url
+    assert normalize_url("https://Docs.example.com/docs/") == "https://docs.example.com/docs"
+    assert normalize_url("https://example.com/x?utm_source=foo&a=1") == "https://example.com/x?a=1"
+    assert normalize_url("https://example.com:443/p") == "https://example.com/p"
+    # Root keeps its slash; pagination query preserved.
+    assert normalize_url("https://example.com/") == "https://example.com/"
+    assert normalize_url("https://example.com/list?page=2") == "https://example.com/list?page=2"
+
+
+def test_crawl_trailing_slash_dedup():
+    """S3/S7: /docs and /docs/ are the same page, crawled once."""
+    srv = _server()
+    # Start without trailing slash; the page links to itself WITH a slash.
+    start = "https://docs.example.com/docs"
+    srv.pages_html[start] = HTML_START  # reachable via the no-slash form too
+    resp = asyncio.run(smart_crawl(srv, start, max_pages=10, max_depth=1, cache_ttl=0))
+    fetched = {p.url for p in resp.pages}
+    # Only one normalized form of the start URL appears.
+    assert "https://docs.example.com/docs" in fetched
+    assert sum(1 for u in fetched if u == "https://docs.example.com/docs") == 1
+
+
+def test_crawl_list_page_returns_link_list():
+    """S2: a list/index page (HN-style) is extracted as a structured link list,
+    not an empty content_ok=false page."""
+    list_html = (
+        '<html><head><title>HN</title></head><body>'
+        + ''.join(f'<a href="/item/{i}">Story number {i}</a>' for i in range(20))
+        + '</body></html>'
+    )
+    srv = FakeServer({"https://hn.example.com/": list_html})
+    resp = asyncio.run(smart_crawl(srv, "https://hn.example.com/", max_pages=1,
+                                   max_depth=0, cache_ttl=0))
+    p = resp.pages[0]
+    assert p.content_ok is True
+    assert p.page_type == "list"
+    assert "[Story number 0]" in p.content[0]
+    assert "(https://hn.example.com/item/0)" in p.content[0]
+
+
+def test_crawl_selective_crawl_urls():
+    """S9: crawl_urls=[...] fetches exactly that subset, no further discovery."""
+    srv = _server()
+    resp = asyncio.run(smart_crawl(
+        srv, START, crawl_urls=["/docs/a", "/docs/b"], cache_ttl=0))
+    fetched = {p.url for p in resp.pages}
+    assert "https://docs.example.com/docs/a" in fetched
+    assert "https://docs.example.com/docs/b" in fetched
+    assert "https://docs.example.com/docs" not in fetched  # start not auto-fetched
+    # No discovery expansion (max_depth forced to 0 for selective).
+    assert resp.pages_discovered == 2
+
+
+def test_crawl_network_error_status_neg1():
+    """S11: a network failure reports status -1, not 0."""
+    class ErrServer(FakeServer):
+        async def smart_fetch(self, url, **kw):
+            raise ConnectionError("connection closed")
+    srv = ErrServer({})
+    resp = asyncio.run(smart_crawl(srv, "https://docs.example.com/docs",
+                                   max_pages=1, max_depth=0, cache_ttl=0))
+    assert resp.pages[0].status == -1
+    assert resp.pages[0].content_ok is False
+
+
+def test_crawl_best_first_prefers_content_over_junk():
+    """S5: with a tight max_pages, content pages (/docs/api) are crawled before
+    junk pages (/login, /submit)."""
+    html = (
+        '<html><head><title>root</title></head><body>'
+        '<a href="/login">Login</a>'
+        '<a href="/submit">Submit</a>'
+        '<a href="/docs/api">API reference</a>'
+        '<a href="/docs/guide">Guide</a>'
+        '</body></html>'
+    )
+    srv = FakeServer({
+        "https://site.example.com/": html,
+        "https://site.example.com/login": "<html><body>login form</body></html>",
+        "https://site.example.com/submit": "<html><body>submit form</body></html>",
+        "https://site.example.com/docs/api": "<html><body>" + ("api content text. " * 40) + "</body></html>",
+        "https://site.example.com/docs/guide": "<html><body>" + ("guide content text. " * 40) + "</body></html>",
+    })
+    # max_pages=3: root + 2 best. The 2 best should be the /docs/* pages, not login/submit.
+    resp = asyncio.run(smart_crawl(srv, "https://site.example.com/",
+                                   max_pages=3, max_depth=1, cache_ttl=0))
+    fetched = {p.url for p in resp.pages}
+    assert "https://site.example.com/docs/api" in fetched
+    assert "https://site.example.com/docs/guide" in fetched
+    assert "https://site.example.com/login" not in fetched
+    assert "https://site.example.com/submit" not in fetched

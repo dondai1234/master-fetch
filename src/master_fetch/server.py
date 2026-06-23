@@ -120,14 +120,14 @@ HOUND_INSTRUCTIONS = (
     "  - Seems wrong/empty? check response.content_ok and response.next_action - they tell you what to do.\n"
     "  - Many URLs? pass urls=['a','b'] (parallel bulk).\n"
     "  - Raw HTML? extraction_type='html'.\n"
-    "  - PDFs: auto-extracted to structured markdown (tables/headings/metadata). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
+    "  - PDFs: auto-extracted to structured markdown (tables/headings/ToC/metadata; scanned + CID-corrupted fonts auto-OCR with [all]; response carries quality_score + table_of_contents). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
     "  - Cache: cache_ttl=0 forces a fresh fetch (default 1hr).\n"
     "  - Long page, one topic? pass focus='...' to get only the BM25-relevant blocks (post-cache, no re-fetch; re-pass it when paginating with offset).\n"
     "  - Behind a click/form/load-more/infinite-scroll? pass actions=[{click:'button.load-more'},{scroll:3},...] (forces the stealthy browser; runs after load, before extraction; bypasses cache).\n"
     "• smart_search(query) - find pages. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low): smart_fetch the 'high' ones first (1-2), then 'med' if needed. Skip 'low'.\n"
     "  - Research mode: options={fetch_content:true} auto-fetches the top 3 results' full content in the same call (one call instead of 4). Good for quick factual answers.\n"
     "  - Filters: options={site:'docs.python.org', exclude_sites:['pinterest.com'], location:'US', language:'en', page:0}.\n"
-    "• smart_crawl(url) - read a whole site/section. BFS same-domain links, returns each page as markdown with content_ok. options: max_pages (default 10), max_depth (default 2), path_include (scope to ['/docs']), discover_only=true (URL map only), focus='query' (crawl relevant pages first + focus-filter). Check next_action if it stopped early.\n"
+    "• smart_crawl(url) - read a whole site/section. Best-first same-domain crawl; returns each page as markdown with content_ok + page_type (article/list/js_shell). List pages (HN/aggregators) come back as a structured link list. options: max_pages (default 10), max_depth (default 2), path_include (scope to ['/docs']), discover_only=true (URL map only), focus query (crawl relevant pages first + focus-filter), crawl_urls list (fetch a chosen subset after discover_only). Check next_action if it stopped early.\n"
     "• screenshot(url) - image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
     "\n"
     "#1 workflow (answer a factual question): smart_search → smart_fetch the 2 most relevant (fetch_relevance=high) results → synthesize, citing URLs.\n"
@@ -161,8 +161,10 @@ class ResponseModel(BaseModel):
     content_ok: bool = Field(default=False, description="True = real content retrieved (status<400, no error, not a JS shell/login wall). Check this before trusting content.")
     next_action: str = Field(default="", description="Suggested next call when one is obvious (paginate/retry/switch source). Empty = nothing to do.")
     fetched_at: str = Field(default="", description="ISO-8601 UTC timestamp this response was generated. For cached responses, content age is bounded by cache_ttl.")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Page metadata for citation/relevance: title, description, site_name, type, image, canonical, lang, published_time, author (OpenGraph + JSON-LD + canonical). Empty for non-HTML.")
-    media: List[str] = Field(default_factory=list, description="Image URLs on the page (only populated when include_media=true). Multimodal agents can fetch/screenshot these.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Page metadata for citation/relevance: title, description, site_name, type, image, canonical, lang, published_time, author (OpenGraph + JSON-LD + canonical). For PDFs: title, author, subject, keywords, creator, producer, creation_date, mod_date. Empty for non-HTML/non-PDF.")
+    media: List[str] = Field(default_factory=list, description="Image URLs on the page (only populated when include_media=true). Multimodal agents can fetch/screenshot these. For PDFs: per-page embedded-image metadata (count + dimensions).")
+    quality_score: float = Field(default=0.0, description="PDF extraction quality 0.0-1.0 (readable-char ratio; 1.0 = clean, low = garbled/CID corruption). 0.0 for non-PDF. Trust PDF content more the closer this is to 1.0.")
+    table_of_contents: list = Field(default_factory=list, description="PDF outline/bookmarks as [{level, title, page}] when the PDF has a ToC. Empty for non-PDF or PDFs without an outline.")
 
 
 class BulkResponseModel(BaseModel):
@@ -367,11 +369,17 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
                     check this before trusting content.
     """
     has_content = bool(result.content) and any(c.strip() for c in result.content)
-    content_ok = (
-        result.status > 0 and result.status < 400
-        and not result.error
-        and has_content
-    )
+    # PDFs carry a quality-based content_ok verdict from the extractor (CID
+    # garbage / corruption -> False even on HTTP 200). Respect it instead of
+    # letting status-200 + has-content mask corruption (the P3 bug).
+    if result.quality_score > 0:
+        content_ok = result.content_ok and result.status > 0 and not result.error and has_content
+    else:
+        content_ok = (
+            result.status > 0 and result.status < 400
+            and not result.error
+            and has_content
+        )
 
     size = result.total_size_bytes or sum(len(c) for c in result.content)
     parts: list[str] = []
@@ -401,7 +409,9 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     elif err.startswith("geo_redirect_detected"):
         next_action = "geo redirect: try a different regional URL or a proxy"
     elif err.startswith("scanned_pdf"):
-        next_action = "scanned/image-only PDF - OCR is not supported; use a vision-capable tool or another source"
+        next_action = "scanned/image-only PDF - install hound-mcp[all] to auto-OCR, or use a vision-capable tool / another source"
+    elif (not result.content_ok) and result.quality_score > 0 and result.quality_score < 0.7 and not err:
+        next_action = "low-quality PDF extraction (CID font corruption / garbled text) - install hound-mcp[all] for auto-OCR, or use a vision tool / screenshot on the flagged pages"
     elif err.startswith("encrypted_pdf"):
         next_action = "encrypted PDF - pass a password via the 'password' option"
     elif err.startswith("pdf_deps_missing"):
@@ -461,6 +471,9 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
             escalation_path=result.escalation_path, retry_count=result.retry_count,
             metadata=result.metadata,
             media=result.media,
+            quality_score=result.quality_score,
+            table_of_contents=result.table_of_contents,
+            content_ok=result.content_ok,
             next_offset=0,
         ))
 
@@ -495,6 +508,9 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         escalation_path=result.escalation_path, retry_count=result.retry_count,
         metadata=result.metadata,
         media=result.media,
+        quality_score=result.quality_score,
+        table_of_contents=result.table_of_contents,
+        content_ok=result.content_ok,
     ))
 
 
@@ -518,10 +534,12 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
     """Build a ResponseModel from a PDF body using the flagship extractor."""
     pages = _PDF_PAGES.get()
     password = _PDF_PASSWORD.get()
+    include_media = _INCLUDE_MEDIA.get()
     try:
         from master_fetch.pdf_extractor import extract_pdf, PdfResult
         result: PdfResult = extract_pdf(body, extraction_type=extraction_type,
-                                        pages=pages, password=password)
+                                        pages=pages, password=password,
+                                        include_media=include_media)
     except ImportError as e:
         return ResponseModel(
             status=200, content=[f"[PDF extraction requires hound-mcp[all]. {e}]"],
@@ -536,26 +554,33 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
             content_type=raw_ct, total_size_bytes=total_size,
             extracted_type="markdown", error=f"pdf_extract_failed: {str(e)[:200]}",
         )
-    # Scanned / image-only PDF: fall back to OCR if the OCR extras are
-    # installed, so the agent gets the text instead of a dead-end. Auto-OCR
-    # (no new param); an explicit `pages` spec is honored, otherwise OCR caps
-    # at the first OCR_DEFAULT_PAGES pages to avoid a multi-minute hang.
+    # Preserve the structured fields from the text pass; the scanned-OCR swap
+    # below only replaces content + the scanned flag, not metadata/toc/quality.
+    base_meta = result.metadata
+    base_toc = result.table_of_contents
+    base_media = result.media
+    # Scanned / image-only PDF: fall back to OCR if the OCR extras are installed.
     if result.scanned and not result.encrypted:
         try:
             from master_fetch.ocr import ocr_pdf, ocr_available
             if ocr_available():
                 ocr_result = ocr_pdf(body, pages=pages, password=password)
                 if ocr_result.content and not ocr_result.error:
-                    result = ocr_result  # replace with OCR'd content
+                    # Swap content but keep the text pass's metadata/toc.
+                    result.content = ocr_result.content
+                    result.error = ""
+                    result.scanned = False
+                    result.ocr_fallback_used = True
+                    result.quality_score = max(result.quality_score, 0.9)
+                    result.content_ok = True
                 elif ocr_result.error and ocr_result.encrypted:
                     result = ocr_result  # encrypted surfaced by OCR path too
                 elif ocr_result.error:
-                    # OCR attempted but failed — surface it honestly.
                     result.content = [f"[Scanned PDF - OCR attempted but failed: {ocr_result.error[:160]}]"]
                     result.error = f"ocr_failed: {ocr_result.error[:160]}"
             # else: OCR extras not installed -> keep the scanned dead-end below
         except ImportError:
-            pass  # OCR extras not installed
+            pass
         except Exception as e:
             logger.debug("OCR fallback failed for %s: %s", url, e)
     return ResponseModel(
@@ -563,6 +588,9 @@ def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
         fetcher_used=fetcher_used, duration_ms=duration_ms,
         content_type=raw_ct, total_size_bytes=total_size,
         extracted_type="markdown", error=result.error,
+        content_ok=result.content_ok, metadata=base_meta or result.metadata,
+        table_of_contents=base_toc or result.table_of_contents,
+        quality_score=result.quality_score, media=base_media or result.media,
     )
 
 
@@ -614,6 +642,26 @@ def _translate_response(
     if is_pdf and raw_body:
         return _extract_pdf_response(raw_body, raw_ct, total_size, page.url,
                                      extraction_type, fetcher_used, duration_ms)
+    # PDF-intent URL (.pdf) that returned HTML, not a PDF: a login/paywall/error
+    # redirect. Don't extract the login HTML as if it were content (P6/P14).
+    _url_path = (page.url or '').lower().split('?')[0]
+    if _url_path.endswith('.pdf') and raw_body and not raw_body[:5].startswith(b'%PDF'):
+        try:
+            head = raw_body[:4096].decode(getattr(page, 'encoding', None) or 'utf-8', errors='ignore').lower()
+        except Exception:
+            head = ''
+        if any(m in head for m in ('sign in', 'log in', 'login', 'password',
+                                   'subscribe', 'paywall', 'access denied', 'authenticate')):
+            err = ("auth_required: URL ends in .pdf but returned a login/paywall page, "
+                   "not the PDF. The content is behind authentication.")
+        else:
+            err = ("not_a_pdf: URL ends in .pdf but the response is HTML, not a PDF "
+                   "(possibly a redirect/error page). Try the direct PDF link.")
+        return ResponseModel(status=getattr(page, 'status', 200), content=[f"[{err}]"],
+                             url=page.url, fetcher_used=fetcher_used,
+                             duration_ms=duration_ms, content_type=raw_ct,
+                             total_size_bytes=total_size, extracted_type="markdown",
+                             error=err, content_ok=False)
 
     # Image-only page (content-type image/*): OCR it to text if the OCR extras
     # are installed. Many pages are just a PNG/JPEG (screenshots, scans, memes,
@@ -2181,6 +2229,13 @@ class MasterFetchServer:
         elapsed = (now() - start_time) * 1000
         result.duration_ms = elapsed
 
+        # PDF-intent URLs (.pdf) are binary; never escalate to a JS browser
+        # (a stealthy render of a PDF URL is always wasted, and the body is
+        # either %PDF or a login/error redirect handled in _translate_response).
+        if url.lower().split('?')[0].endswith('.pdf'):
+            result.escalation_path = "direct:http"
+            return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
+
         # Accept if status is OK and content is real (not a JS shell).
         if result.status < 400 and not _is_js_shell(result):
             result.escalation_path = "direct:http"
@@ -2346,30 +2401,37 @@ class MasterFetchServer:
         path_exclude: Optional[List[str]] = None,
         discover_only: bool = False,
         focus: Optional[str] = None,
-        max_content_chars_per: int = 4000,
+        crawl_urls: Optional[List[str]] = None,
+        max_content_chars_per: int = 8000,
         max_total_chars: Optional[int] = None,
         concurrency: int = 3,
         cache_ttl: int = DEFAULT_TTL,
         respect_robots: bool = False,
         force_fetcher: Optional[str] = None,
         timeout: int = 30000,
+        deadline_ms: int = 120000,
     ) -> "CrawlResponseModel":
-        """Deep-crawl a site: BFS same-domain from `url`, returning each page as
-        markdown with content_ok/summary. discover_only=true returns the URL map
-        only. `focus` prioritizes relevant pages within the budget. Caps:
-        max_pages, max_depth, max_total_chars (token budget). Reuses smart_fetch's
-        anti-bot escalation + cache.
+        """Deep-crawl a site: best-first same-domain from `url`, returning each
+        page as markdown with content_ok/summary/page_type. discover_only=true
+        returns the URL map only. `focus` prioritizes relevant pages AND
+        focus-filters each page's content. crawl_urls=[...] fetches a chosen
+        subset (second-phase selective crawl, no re-discovery). Content-adaptive:
+        article pages -> main content, list/index pages -> structured link list,
+        JS shells -> detected + reported honestly. Caps: max_pages, max_depth,
+        max_total_chars (token budget), deadline_ms (overall time). Reuses
+        smart_fetch anti-bot escalation + cache.
         """
         try:
             from master_fetch.crawl import smart_crawl as _smart_crawl, CrawlResponseModel as _CRM
             return await _smart_crawl(
                 self, url, max_pages=max_pages, max_depth=max_depth,
                 path_include=path_include, path_exclude=path_exclude,
-                discover_only=discover_only, focus=focus,
+                discover_only=discover_only, focus=focus, crawl_urls=crawl_urls,
                 max_content_chars_per=max_content_chars_per,
                 max_total_chars=max_total_chars, concurrency=concurrency,
                 cache_ttl=cache_ttl, respect_robots=respect_robots,
                 force_fetcher=force_fetcher, timeout=timeout,
+                deadline_ms=deadline_ms,
             )
         except Exception as e:
             from master_fetch.crawl import CrawlResponseModel as _CRM
@@ -2382,7 +2444,7 @@ class MasterFetchServer:
     _TOOL_DEFS: list[dict] = [
         {
             "name": "mcp_smart_fetch",
-            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web: this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens; scanned PDFs auto-OCR with [all]. Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
+            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web: this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens; scanned PDFs AND CID-corrupted fonts auto-OCR with [all]. Response carries quality_score (0-1; trust PDF content more the closer to 1.0), table_of_contents (when bookmarks present), metadata (title/author/dates). Low quality_score -> content_ok false (use vision / install [all]). Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2406,14 +2468,14 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_crawl",
-            "description": "Deep-crawl a site from a start URL: walks same-domain links breadth-first and returns each page as clean markdown with content_ok. Use for 'read all the docs on this site' / 'scrape this whole section'. discover_only=true returns just the URL map (no content). focus='query' prioritizes relevant pages within the budget AND focus-filters each page. Caps: max_pages (default 10), max_depth (default 2), max_total_chars (token budget). Each page carries content_ok + summary; check them. next_action tells you if the crawl stopped early (raise the caps or scope with path_include). Reuses smart_fetch anti-bot + cache.",
+            "description": "Deep-crawl a site from a start URL: best-first walk of same-domain links, returning each page as clean markdown with content_ok + page_type. Content-adaptive: article/docs pages -> main content; list/index pages (HN, aggregators, directories) -> a structured link list; JS shells -> detected and reported honestly. discover_only=true returns just the URL map (no content). focus='query' prioritizes relevant pages within the budget AND focus-filters each page. crawl_urls=[...] fetches a chosen subset of discovered URLs (second-phase selective crawl, no re-discovery). Same-domain only by default; URLs normalized so /docs and /docs/ are not crawled twice. Caps: max_pages (default 10), max_depth (default 2), max_total_chars (token budget), deadline_ms (overall time, default 120000). Each page carries content_ok + status (network error = -1) + fetched_at; check them. next_action tells you if the crawl stopped early. cache_ttl=0 forces fresh. Reuses smart_fetch anti-bot + cache.",
             "inputSchema": {
                 "type": "object", "required": ["url"],
                 "properties": {
                     "url": {"type": "string", "description": "Start URL (crawl stays on this domain)"},
                     "discover_only": {"type": "boolean", "description": "true = return the URL map only, no page content (map mode). Default false."},
                     "focus": {"type": "string", "description": "Query: prioritize crawling links relevant to this, and focus-filter each page's content. Big token saver on doc sites."},
-                    "options": {"type": "object", "description": "max_pages (1-100, default 10), max_depth (0-5, default 2), path_include (list of path prefixes to crawl, e.g. ['/docs']), path_exclude (list to skip), max_content_chars_per (default 4000), max_total_chars (token budget, default max_pages*per), concurrency (1-5, default 3), cache_ttl (seconds, default 3600), respect_robots (bool, default false), force_fetcher ('http'|'stealthy'), timeout (ms, default 30000)", "additionalProperties": True},
+                    "options": {"type": "object", "description": "max_pages (1-100, default 10), max_depth (0-5, default 2), path_include (list of path prefixes to crawl, e.g. ['/docs']), path_exclude (list to skip), max_content_chars_per (default 8000), max_total_chars (token budget, default max_pages*per), concurrency (1-5, default 3), cache_ttl (seconds, default 3600; 0 = force fresh), respect_robots (bool, default false), force_fetcher ('http'|'stealthy'), timeout (ms per page, default 30000), deadline_ms (overall crawl time cap, default 120000)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
@@ -2587,10 +2649,11 @@ class MasterFetchServer:
                 "max_pages", "max_depth", "path_include", "path_exclude",
                 "max_content_chars_per", "max_total_chars", "concurrency",
                 "cache_ttl", "respect_robots", "force_fetcher", "timeout",
+                "deadline_ms",
             )}
             result = await self.smart_crawl(
                 url=args["url"], discover_only=args.get("discover_only", False),
-                focus=args.get("focus"), **kw,
+                focus=args.get("focus"), crawl_urls=args.get("crawl_urls"), **kw,
             )
             return [TextContent(type="text", text=result.model_dump_json())], result.model_dump()
 

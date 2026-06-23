@@ -1,27 +1,40 @@
-"""Flagship PDF extraction for Hound — optimized for AI agents.
+"""Flagship PDF extraction for Hound — optimized for AI agents, v6.
 
 Turns a PDF's bytes into clean, structured markdown that an agent can reason
-over: a metadata header, multi-column reading order, real tables as markdown
-tables, font-size-detected headings, de-hyphenated paragraphs, per-page
-markers (for citation), and honest signals for scanned / encrypted PDFs.
+over, with HONEST quality signals so the agent can trust the output and a
+per-page auto-OCR fallback that recovers text from broken font mappings (the
+CID-corruption problem no lightweight extractor handles).
 
-Built on ``pdfplumber`` (MIT, itself built on ``pdfminer.six`` — both MIT, no
-AGPL). ``pdfplumber`` gives char-level font/size data (for heading detection),
-Tabula-inspired table extraction, and layout-aware text — enough to emulate
-the markdown output shape of AGPL-locked alternatives (PyMuPDF4LLM) without
-the license risk for an MIT project.
+Built on ``pdfplumber`` (MIT, on pdfminer.six — both MIT, no AGPL) for text +
+tables + layout + font data, and ``pypdfium2`` (BSD-3) for the PDF outline
+(bookmarks/ToC) and for rendering CID-corrupted pages to images so ``rapidocr``
+can read the VISIBLE text. All pure-pip, no system binaries, MIT-compatible.
 
-Agent design choices:
+The flagship trick — auto-OCR for CID-corrupted pages:
+  Some PDFs embed font subsets without a ToUnicode CMap, so pdfplumber emits
+  ``(cid:71)(cid:302)...`` garbage for those fonts (architecture diagrams,
+  figures, math). But the glyphs RENDER correctly visually — only the
+  text-to-unicode map is broken. So when a page's CID-garbage ratio is high,
+  hound renders that page to an image via pypdfium2 and OCRs it with rapidocr,
+  recovering the real text. This reuses the OCR deps hound already ships and
+  turns the #1 PDF-extraction failure mode (CID garbage) into readable content.
+  If OCR extras aren't installed, the page keeps a low quality_score + an honest
+  marker so the agent knows to use a vision tool.
+
+Agent design:
   * Markdown structure (headings / lists / tables) — agents reason best over it.
-  * Page-range param (``pages="1-5"``) — extract only what you need, saving
-    tokens + time on 500-page PDFs.
-  * A metadata header up top so the agent can decide relevance before reading
-    the body.
-  * ``--- Page N ---`` markers so the agent can cite pages.
-  * Honest ``scanned`` / ``encrypted`` detection with actionable errors instead
-    of pretending a near-empty extraction is content.
-  * Output is a single markdown string → the existing ``_apply_chunking``
-    paginates it via ``offset``/``next_offset`` for huge PDFs.
+  * A metadata header up top so the agent can decide relevance before reading.
+  * ``--- Page N ---`` markers (PDF page labels when available) for citation.
+  * ``table_of_contents`` field from the PDF outline tree (books / reports).
+  * ``quality_score`` (0-1, readable-char ratio) + honest ``content_ok`` so the
+    agent can distinguish a clean extraction from a garbled one (the old
+    content_ok=true-despite-corruption bug).
+  * ``metadata`` populated with title/author/subject/keywords/creator/producer/
+    dates — programmatically available, not just in the markdown header.
+  * Page-range param (``pages="1-5"``) — extract only what you need.
+  * ``include_media`` -> per-page embedded-image metadata (count + dimensions)
+    so multimodal agents know which pages have figures to screenshot.
+  * Honest ``scanned`` / ``encrypted`` detection with actionable errors.
 """
 
 from __future__ import annotations
@@ -31,19 +44,16 @@ import logging
 import re
 import statistics
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger("master-fetch.pdf")
 
 # A page is considered scanned/image-only if it yields fewer than this many
-# characters of extractable text on average. Tuned for typical text PDFs
-# (a half page of text is already ~500 chars).
+# characters of extractable text on average.
 _SCANNED_CHARS_PER_PAGE = 20
 
 # Word-grouping x tolerance. pdfplumber's default (3) jams words together on
-# PDFs that position words with tight inter-word gaps (<3 units, common in
-# academic papers). 1.5 splits them correctly while keeping intra-word chars
-# joined (intra-word glyph gaps are usually <0.5).
+# PDFs that position words with tight inter-word gaps. 1.5 splits them correctly.
 _X_TOL = 1.5
 
 # Heading detection thresholds (ratio of a line's dominant font size to the
@@ -53,6 +63,15 @@ _H2_RATIO = 1.55
 _H3_RATIO = 1.25
 _HEADING_MAX_LEN = 200
 _SENTENCE_END = ". , ; : ? ! ) ]".split()
+
+# CID font garbage: pdfplumber emits "(cid:NN)" for glyphs whose embedded font
+# lacks a ToUnicode CMap. When a page's CID-garbage ratio exceeds this, hound
+# renders + OCRs that page to recover the real visible text.
+_CID_RE = re.compile(r"\(cid:\d+\)")
+_CID_RATIO_THRESHOLD = 0.30
+# Below this readable-char ratio, content_ok is False (the doc is too garbled to
+# trust, even after OCR). Tuned so a doc with one bad page out of many stays ok.
+_QUALITY_OK_THRESHOLD = 0.70
 
 
 @dataclass
@@ -68,6 +87,14 @@ class PdfResult:
     scanned: bool = False
     encrypted: bool = False
     error: str = ""
+    # v6 additions:
+    metadata: dict[str, Any] = field(default_factory=dict)
+    table_of_contents: list[dict] = field(default_factory=list)
+    quality_score: float = 0.0
+    content_ok: bool = False
+    media: list[str] = field(default_factory=list)
+    ocr_fallback_used: bool = False
+    cid_pages_ocr: list[int] = field(default_factory=list)
 
 
 def _get_pdfplumber():
@@ -83,7 +110,7 @@ def _get_pdfplumber():
 
 def _parse_pages(spec: str | None, total: int) -> list[int]:
     """Parse a page spec like '1-5', '1,3,5-7', '1, 2' into a sorted unique
-    list of 1-indexed page numbers clamped to [1, total]. None → all pages."""
+    list of 1-indexed page numbers clamped to [1, total]. None -> all pages."""
     if not spec or not spec.strip():
         return list(range(1, total + 1))
     out: set[int] = set()
@@ -111,39 +138,24 @@ def _parse_pages(spec: str | None, total: int) -> list[int]:
 
 
 def _clean_text(s: str) -> str:
-    """Normalize whitespace inside a line without collapsing meaningful spaces."""
     return re.sub(r"[ \t]+", " ", s).strip()
 
 
 def _dehyphenate_join(prev: str, nxt: str) -> tuple[str, bool]:
-    """Join two consecutive lines, de-hyphenating a soft hyphen break.
-
-    Returns (joined_text, did_join). Only joins when prev ends with a single
-    hyphen AND the next line starts with a lowercase letter — the standard
-    signal for a word broken across a line. Leaves real hyphenated terms
-    (next line starts uppercase/digit) intact by keeping the hyphen.
-    """
+    """Join two consecutive lines, de-hyphenating a soft hyphen break."""
     prev = prev.rstrip()
     nxt = nxt.lstrip()
     if prev.endswith("-") and len(prev) >= 2 and prev[-2] != " ":
-        # Soft hyphen only if next line begins a lowercase continuation.
         if nxt and nxt[0].islower():
             return prev[:-1] + nxt, True
     return prev + " " + nxt, False
 
 
 def _table_to_markdown(table: list[list[str | None]], text_mode: bool = False) -> str:
-    """Render a pdfplumber table (list of rows of cells) as a markdown table.
-
-    Empty tables render as nothing. ``text_mode`` drops the markdown separator
-    row and pipe syntax for plainer output.
-    """
     if not table:
         return ""
-    # Normalize cells: None -> "", collapse internal newlines to spaces.
     rows = [[("" if cell is None else re.sub(r"\s+", " ", str(cell).strip()))
              for cell in row] for row in table]
-    # Drop fully-empty rows.
     rows = [r for r in rows if any(c for c in r)]
     if not rows:
         return ""
@@ -162,7 +174,6 @@ def _table_to_markdown(table: list[list[str | None]], text_mode: bool = False) -
 
 
 def _in_bbox(obj: dict, bbox: tuple[float, float, float, float], tol: float = 1.0) -> bool:
-    """True if a char/line object's center falls inside a bbox (with tolerance)."""
     x0, top, x1, bottom = bbox
     cx = (obj.get("x0", 0) + obj.get("x1", 0)) / 2
     cy = (obj.get("top", 0) + obj.get("bottom", 0)) / 2
@@ -185,7 +196,6 @@ def _is_bold(chars: Iterable[dict]) -> bool:
 
 
 def _heading_level(line_size: float, body_size: float, bold: bool, text: str) -> int:
-    """Return 1/2/3 for a heading, else 0. Conservative to avoid false positives."""
     if body_size <= 0 or line_size <= 0:
         return 0
     t = text.strip()
@@ -202,12 +212,21 @@ def _heading_level(line_size: float, body_size: float, bold: bool, text: str) ->
     elif ratio >= _H3_RATIO:
         level = 3
     if bold and level:
-        level = max(1, level - 1)  # bold bumps up one
+        level = max(1, level - 1)
     return level
 
 
+def _clean_date(d: str) -> str:
+    if not d:
+        return ""
+    if d.startswith("D:"):
+        d = d[2:]
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})", d)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else d
+
+
 def _format_metadata(meta: dict) -> list[str]:
-    """Build the metadata header lines from pdfplumber's .metadata dict."""
+    """Build the markdown metadata header lines from pdfplumber's .metadata."""
     def g(*keys):
         for k in keys:
             v = meta.get(k)
@@ -218,14 +237,7 @@ def _format_metadata(meta: dict) -> list[str]:
     author = g("Author", "author")
     subject = g("Subject", "subject")
     keywords = g("Keywords", "keywords")
-    # PDF dates look like "D:20240115120000Z". Strip the "D:" prefix for readability.
-    def clean_date(d: str) -> str:
-        if d.startswith("D:"):
-            d = d[2:]
-        # Best-effort: trim to YYYYMMDD-ish for a compact, readable form.
-        m = re.match(r"^(\d{4})(\d{2})(\d{2})", d)
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else d
-    created = clean_date(g("CreationDate", "creationdate"))
+    created = _clean_date(g("CreationDate", "creationdate"))
     out = []
     if title:
         out.append(f"# {title}")
@@ -243,28 +255,151 @@ def _format_metadata(meta: dict) -> list[str]:
     return out
 
 
+def _metadata_dict(meta: dict) -> dict[str, Any]:
+    """Full structured metadata for the ResponseModel.metadata field (P7)."""
+    def g(*keys):
+        for k in keys:
+            v = meta.get(k)
+            if v:
+                return str(v)
+        return ""
+    return {
+        "title": g("Title", "title"),
+        "author": g("Author", "author"),
+        "subject": g("Subject", "subject"),
+        "keywords": g("Keywords", "keywords"),
+        "creator": g("Creator", "creator"),
+        "producer": g("Producer", "producer"),
+        "creation_date": _clean_date(g("CreationDate", "creationdate")),
+        "mod_date": _clean_date(g("ModDate", "moddate")),
+    }
+
+
+def _extract_toc(body: bytes) -> list[dict]:
+    """Extract the PDF outline tree (bookmarks) via pypdfium2 -> list of
+    {level, title, page}. Empty for PDFs without an outline (most arxiv papers)."""
+    try:
+        import pypdfium2 as pdfium  # type: ignore
+    except ImportError:
+        return []
+    try:
+        pdf = pdfium.PdfDocument(body)
+        toc = []
+        for bookmark in pdf.get_toc():
+            level = (getattr(bookmark, "level", 0) or 0) + 1  # 0-based -> 1-based
+            try:
+                title = bookmark.get_title() or ""
+            except Exception:
+                title = ""
+            page = None
+            try:
+                dest = bookmark.get_dest()
+                if dest is not None:
+                    idx = dest.get_index()  # 0-based page index
+                    if idx is not None:
+                        page = int(idx) + 1
+            except Exception:
+                page = None
+            toc.append({"level": int(level), "title": str(title).strip(), "page": page})
+        pdf.close()
+        return toc
+    except Exception as e:
+        logger.debug("ToC extraction failed: %s", e)
+        return []
+
+
+def _cid_ratio(text: str) -> tuple[float, int]:
+    """Return (ratio_of_cid_garbage_chars, cid_token_count) for a page's text."""
+    if not text:
+        return (0.0, 0)
+    garbage = sum(len(m) for m in _CID_RE.findall(text))
+    return (garbage / len(text), len(_CID_RE.findall(text)))
+
+
+def _quality_score(text: str) -> float:
+    """Doc/page readable-char ratio in [0,1]: printable chars minus CID garbage,
+    over total chars. ~1.0 = clean; low = garbled (CID garbage not OCR-recovered)."""
+    if not text:
+        return 0.0
+    cid_garbage = sum(len(m) for m in _CID_RE.findall(text))
+    clean = _CID_RE.sub("", text)
+    printable = sum(1 for ch in clean if ch.isprintable() or ch in "\n\t ")
+    # printable is over the cid-stripped text; score it against the ORIGINAL len
+    # so cid garbage counts against quality.
+    return max(0.0, min(1.0, (printable - 0) / max(len(text), 1)))
+
+
+def _ocr_pages(body: bytes, page_nums: list[int], password: Optional[str]) -> dict[int, str]:
+    """OCR a set of pages, returning {page_num: ocr_markdown_body}.
+
+    Uses the existing OCR module (pypdfium2 render + rapidocr). One call for the
+    whole set (one pypdfium2 open). Pages that fail to OCR are omitted from the
+    returned dict (the caller keeps the original cid-garbage text for them)."""
+    if not page_nums:
+        return {}
+    try:
+        from master_fetch.ocr import ocr_pdf, ocr_available
+    except Exception:
+        return {}
+    if not ocr_available():
+        return {}
+    spec = ",".join(str(n) for n in page_nums)
+    try:
+        res = ocr_pdf(body, pages=spec, password=password)
+    except Exception as e:
+        logger.debug("CID-page OCR batch failed: %s", e)
+        return {}
+    if res.error or not res.content:
+        return {}
+    # ocr_pdf returns one markdown string with "--- Page N ---" markers per page.
+    full = res.content[0]
+    out: dict[int, str] = {}
+    # Split into per-page blocks by the "--- Page N ---" marker.
+    parts = re.split(r"(?=^--- Page \d+ ---$)", full, flags=re.MULTILINE)
+    for part in parts:
+        m = re.match(r"^--- Page (\d+) ---$", part, re.MULTILINE)
+        if m:
+            n = int(m.group(1))
+            if n in page_nums:
+                # Strip the marker line; keep the body.
+                body_md = re.sub(r"^--- Page \d+ ---\s*", "", part, count=1).strip()
+                if body_md:
+                    out[n] = body_md
+    return out
+
+
+def _extract_images_metadata(pdf, page_nums: list[int]) -> list[str]:
+    """Per-page embedded raster-image metadata as agent-readable strings (P4).
+    Vector graphics are NOT extractable; we report counts + dimensions so a
+    multimodal agent knows which pages have figures to screenshot."""
+    out: list[str] = []
+    for n in page_nums:
+        try:
+            imgs = pdf.pages[n - 1].images
+        except Exception:
+            continue
+        if not imgs:
+            continue
+        largest = max(imgs, key=lambda im: (im.get("width", 0) * im.get("height", 0)))
+        out.append(
+            f"page {n}: {len(imgs)} embedded image(s); largest "
+            f"{int(largest.get('width', 0))}x{int(largest.get('height', 0))}"
+        )
+    return out
+
+
 def extract_pdf(
     body: bytes,
     extraction_type: str = "markdown",
     pages: str | None = None,
     password: str | None = None,
+    include_media: bool = False,
 ) -> PdfResult:
-    """Extract a PDF's bytes into agent-optimized markdown.
-
-    Args:
-        body: Raw PDF bytes.
-        extraction_type: "markdown" (default) gives full markdown structure;
-            "text" gives plainer output. Other types fall back to markdown.
-        pages: Optional page spec ("1-5", "1,3,5-7"). None = all pages.
-        password: Optional password for encrypted PDFs.
-
-    Returns a PdfResult. Check ``.error`` first — when set, the content is a
-    human-readable explanation and should NOT be treated as real PDF content.
-    """
+    """Extract a PDF's bytes into agent-optimized markdown with honest quality
+    signals + per-page CID-garbage auto-OCR fallback. See module docstring."""
     if not body or not isinstance(body, (bytes, bytearray)):
         return PdfResult(error="empty or non-bytes PDF body", content=["[Empty PDF body.]"])
     if not body[:5].startswith(b"%PDF"):
-        # Not actually a PDF despite the content-type — let the caller fall back.
         return PdfResult(error="not_a_pdf: body does not start with %PDF",
                          content=["[Body is not a PDF despite content-type.]"])
 
@@ -295,34 +430,79 @@ def extract_pdf(
                              content=[f"[No pages in range '{pages}' (PDF has {total_pages} pages).]"])
 
         meta = pdf.metadata or {}
+        meta_dict = _metadata_dict(meta)
+        toc = _extract_toc(body)
+        media = _extract_images_metadata(pdf, page_nums) if include_media else []
 
-        # --- Pass 1: compute the document body font size from selected pages ---
+        # --- Pass 1: document body font size ---
         body_sizes: list[float] = []
         for n in page_nums:
             p = pdf.pages[n - 1]
             body_sizes.extend(c.get("size", 0) for c in p.chars if c.get("text", "").strip())
         body_size = statistics.median(body_sizes) if body_sizes else 0.0
 
-        # --- Pass 2: render each selected page ---
-        rendered_pages: list[str] = []
+        # --- Pass 2: render each page + detect CID corruption ---
+        rendered: dict[int, str] = {}
+        cid_pages: list[int] = []
         total_chars = 0
         for n in page_nums:
             p = pdf.pages[n - 1]
             try:
                 page_md = _render_page(p, body_size, text_mode)
-            except Exception as e:  # per-page failure shouldn't kill the whole doc
+            except Exception as e:
                 logger.debug("PDF page %d render failed: %s", n, e)
-                page_md = f"--- Page {n} ---\n\n[Failed to render this page: {str(e)[:120]}]"
-            rendered_pages.append(f"--- Page {n} ---\n\n{page_md}")
+                page_md = f"[Failed to render this page: {str(e)[:120]}]"
+            rendered[n] = page_md
             total_chars += len(page_md)
+            ratio, _n = _cid_ratio(page_md)
+            if ratio >= _CID_RATIO_THRESHOLD:
+                cid_pages.append(n)
 
-        # --- Scanned / image-only detection ---
+        # --- CID-garbage auto-OCR fallback (the flagship fix for P1) ---
+        ocr_map = _ocr_pages(body, cid_pages, password) if cid_pages else {}
+        ocr_used = bool(ocr_map)
+        cid_pages_ocr = sorted(ocr_map.keys())
+        # Quality score from RAW page text + OCR recovery, so the honest markers
+        # (clean English scaffolding) don't inflate the score and mask garbage.
+        # OCR-recovered pages count as clean; unrecovered CID pages count as low.
+        total_w = 0.0
+        total_len = 0
+        for n in page_nums:
+            raw = rendered[n]
+            if n in ocr_map:
+                q = 1.0  # OCR recovered the visible text -> clean by construction
+                plen = len(ocr_map[n])
+            else:
+                q = _quality_score(raw)
+                plen = len(raw)
+            total_w += q * plen
+            total_len += plen
+        quality = (total_w / total_len) if total_len else 0.0
+        # Now replace CID pages with markers (display only; quality already scored).
+        for n in cid_pages:
+            if n in ocr_map:
+                rendered[n] = (
+                    f"[Page {n}: text recovered by OCR from a broken font mapping — "
+                    f"figures/equations OCR'd as visible symbols; use a vision tool "
+                    f"for precise layout/LaTeX.]\n\n" + ocr_map[n]
+                )
+            else:
+                rendered[n] = (
+                    f"[Page {n}: {int(_cid_ratio(rendered[n])[0]*100)}% of this page "
+                    f"is CID font garbage (embedded font without a Unicode map). "
+                    f"Install OCR with `pip install hound-mcp[all]` to auto-recover it, "
+                    f"or smart_fetch this page with screenshot / a vision tool.]\n\n"
+                    + rendered[n]
+                )
+
+        # --- Scanned / image-only detection (no text layer at all) ---
         scanned = total_chars < _SCANNED_CHARS_PER_PAGE * len(page_nums)
         if scanned:
             return PdfResult(
-                title=str(meta.get("Title", "") or ""),
-                pages_total=total_pages, pages_extracted=page_nums,
-                scanned=True,
+                title=meta_dict.get("title", ""), author=meta_dict.get("author", ""),
+                subject=meta_dict.get("subject", ""), keywords=meta_dict.get("keywords", ""),
+                pages_total=total_pages, pages_extracted=page_nums, scanned=True,
+                metadata=meta_dict, table_of_contents=toc,
                 error="scanned_pdf: this PDF is image-only (no extractable text). "
                       "Install OCR support with `pip install hound-mcp[all]` and hound "
                       "will auto-OCR scanned PDFs; or use a vision-capable tool.",
@@ -331,24 +511,29 @@ def extract_pdf(
 
         # --- Assemble: metadata header + pages ---
         header = _format_metadata(meta)
-        # Page-count + extracted-range line so the agent knows the scope.
         if len(page_nums) == total_pages:
             scope = f"{total_pages} pages"
         else:
-            scope = f"pages {page_nums[0]}–{page_nums[-1]} of {total_pages}" if len(page_nums) > 1 \
-                else f"page {page_nums[0]} of {total_pages}"
+            scope = (f"pages {page_nums[0]}-{page_nums[-1]} of {total_pages}"
+                     if len(page_nums) > 1 else f"page {page_nums[0]} of {total_pages}")
         header.append(f"> PDF · {scope}")
-        body_md = "\n\n".join(rendered_pages).strip()
+        if ocr_used:
+            header.append(f"> OCR fallback used on page(s): {', '.join(str(n) for n in cid_pages_ocr)}")
+        body_md = "\n\n".join(f"--- Page {n} ---\n\n{rendered[n]}" for n in page_nums).strip()
         full = ("\n".join(header).strip() + "\n\n" + body_md).strip()
+
+        # --- Quality score + honest content_ok (P3) ---
+        # `quality` was computed above from raw page text + OCR recovery.
+        content_ok = quality >= _QUALITY_OK_THRESHOLD and not scanned
 
         return PdfResult(
             content=[full],
-            title=str(meta.get("Title", "") or ""),
-            author=str(meta.get("Author", "") or ""),
-            subject=str(meta.get("Subject", "") or ""),
-            keywords=str(meta.get("Keywords", "") or ""),
-            pages_total=total_pages,
-            pages_extracted=page_nums,
+            title=meta_dict.get("title", ""), author=meta_dict.get("author", ""),
+            subject=meta_dict.get("subject", ""), keywords=meta_dict.get("keywords", ""),
+            pages_total=total_pages, pages_extracted=page_nums,
+            metadata=meta_dict, table_of_contents=toc, quality_score=round(quality, 3),
+            content_ok=content_ok, media=media, ocr_fallback_used=ocr_used,
+            cid_pages_ocr=cid_pages_ocr,
         )
     finally:
         try:
@@ -359,15 +544,12 @@ def extract_pdf(
 
 def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
     """Render one page to markdown: layout-aware text + tables merged by y-position."""
-    # Tables on the FULL page (table regions are defined by the page's lines).
     try:
         tables = page.find_tables(table_settings={"text_x_tolerance": _X_TOL, "text_y_tolerance": 3})
     except Exception:
         tables = []
     table_bboxes = [t.bbox for t in tables] if tables else []
 
-    # Non-table text: filter chars outside every table bbox, then get text lines
-    # with positions + chars (for heading detection).
     if table_bboxes:
         filtered = page.filter(
             lambda obj: obj.get("object_type") != "char"
@@ -377,21 +559,13 @@ def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
         filtered = page
 
     try:
-        # layout=False uses pdfminer's word-grouper (inserts spaces between words
-        # by x-gap) while still returning per-line `top` + `chars` for heading
-        # detection and table interleaving. layout=True jams words together on
-        # PDFs that position words without space glyphs (common in academic PDFs).
-        # x_tolerance=1.5 fixes tight-gap PDFs (default 3 jams them).
         text_lines = filtered.extract_text_lines(layout=False, x_tolerance=_X_TOL, return_chars=True)
     except Exception:
         text_lines = []
-    # Fallback: if extract_text_lines yielded nothing but the page has chars,
-    # use plain extract_text so we don't silently return an empty page.
     if not text_lines and filtered.chars:
         txt = filtered.extract_text(layout=False, x_tolerance=_X_TOL) or ""
         return _dehyphenate_block(txt, text_mode)
 
-    # Build blocks: (top, kind, payload). Tables carry their bbox top.
     blocks: list[tuple[float, str, Any]] = []
     for tl in text_lines:
         txt = _clean_text(tl.get("text", ""))
@@ -409,8 +583,6 @@ def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
 
     blocks.sort(key=lambda b: b[0])
 
-    # Paragraph-gap threshold from the page's median line height: a vertical gap
-    # larger than ~1.5 lines means a new paragraph (or a heading / block break).
     line_heights = [float(tl.get("bottom", 0)) - float(tl.get("top", 0))
                     for tl in text_lines if tl.get("text", "").strip()]
     median_lh = statistics.median(line_heights) if line_heights else 12.0
@@ -434,20 +606,18 @@ def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
     for top, kind, payload in blocks:
         if kind == "table":
             flush_paragraph()
-            prev_bottom = None  # a table resets vertical context
+            prev_bottom = None
             md = _table_to_markdown(payload, text_mode=text_mode)
             if md:
                 out.append(md)
             continue
         txt, chars, line_top, line_bottom = payload
-        # Per-line heading detection (conservative): a heading is its own block.
         level = _heading_level(_dominant_size(chars), body_size, _is_bold(chars), txt) if chars else 0
         if level and not text_mode:
             flush_paragraph()
             out.append(f"{'#' * level} {txt}")
             prev_bottom = line_bottom
             continue
-        # Paragraph break on a vertical gap larger than the threshold.
         if prev_bottom is not None and (line_top - prev_bottom) > gap_threshold:
             flush_paragraph()
         para.append(txt)
@@ -458,7 +628,6 @@ def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
 
 
 def _dehyphenate_block(text: str, text_mode: bool) -> str:
-    """Fallback plain-text rendering (no table/heading structure)."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
         return ""
