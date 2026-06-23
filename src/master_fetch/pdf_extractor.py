@@ -441,9 +441,10 @@ def extract_pdf(
             body_sizes.extend(c.get("size", 0) for c in p.chars if c.get("text", "").strip())
         body_size = statistics.median(body_sizes) if body_sizes else 0.0
 
-        # --- Pass 2: render each page + detect CID corruption ---
+        # --- Pass 2: render each page; detect CID corruption + scanned pages ---
         rendered: dict[int, str] = {}
         cid_pages: list[int] = []
+        scan_pages: list[int] = []  # image-only pages in a MIXED PDF (per-page OCR)
         total_chars = 0
         for n in page_nums:
             p = pdf.pages[n - 1]
@@ -457,11 +458,34 @@ def extract_pdf(
             ratio, _n = _cid_ratio(page_md)
             if ratio >= _CID_RATIO_THRESHOLD:
                 cid_pages.append(n)
+            elif len(page_md.strip()) < _SCANNED_CHARS_PER_PAGE:
+                # Low-text page: a scanned image page (has images) vs a blank
+                # divider page (no images). Only flag the image-bearing ones.
+                try:
+                    has_images = len(p.images) > 0
+                except Exception:
+                    has_images = False
+                if has_images:
+                    scan_pages.append(n)
 
-        # --- CID-garbage auto-OCR fallback (the flagship fix for P1) ---
-        ocr_map = _ocr_pages(body, cid_pages, password) if cid_pages else {}
+        # --- All-scanned doc -> honest dead-end (caller runs the scanned-OCR) ---
+        scanned = total_chars < _SCANNED_CHARS_PER_PAGE * len(page_nums)
+        if scanned:
+            return PdfResult(
+                title=meta_dict.get("title", ""), author=meta_dict.get("author", ""),
+                subject=meta_dict.get("subject", ""), keywords=meta_dict.get("keywords", ""),
+                pages_total=total_pages, pages_extracted=page_nums, scanned=True,
+                metadata=meta_dict, table_of_contents=toc,
+                error="scanned_pdf: this PDF is image-only (no extractable text). "
+                      "Install OCR support with `pip install hound-mcp[all]` and hound "
+                      "will auto-OCR scanned PDFs; or use a vision-capable tool.",
+                content=["[Scanned/image-only PDF - no extractable text. Install hound-mcp[all] for OCR.]"],
+            )
+
+        # --- Per-page auto-OCR fallback: CID garbage + scanned pages (mixed PDFs) ---
+        ocr_map = _ocr_pages(body, cid_pages + scan_pages, password) if (cid_pages or scan_pages) else {}
         ocr_used = bool(ocr_map)
-        cid_pages_ocr = sorted(ocr_map.keys())
+        cid_pages_ocr = sorted(n for n in cid_pages if n in ocr_map)
         # Quality score from RAW page text + OCR recovery, so the honest markers
         # (clean English scaffolding) don't inflate the score and mask garbage.
         # OCR-recovered pages count as clean; unrecovered CID pages count as low.
@@ -495,19 +519,18 @@ def extract_pdf(
                     + rendered[n]
                 )
 
-        # --- Scanned / image-only detection (no text layer at all) ---
-        scanned = total_chars < _SCANNED_CHARS_PER_PAGE * len(page_nums)
-        if scanned:
-            return PdfResult(
-                title=meta_dict.get("title", ""), author=meta_dict.get("author", ""),
-                subject=meta_dict.get("subject", ""), keywords=meta_dict.get("keywords", ""),
-                pages_total=total_pages, pages_extracted=page_nums, scanned=True,
-                metadata=meta_dict, table_of_contents=toc,
-                error="scanned_pdf: this PDF is image-only (no extractable text). "
-                      "Install OCR support with `pip install hound-mcp[all]` and hound "
-                      "will auto-OCR scanned PDFs; or use a vision-capable tool.",
-                content=["[Scanned/image-only PDF - no extractable text. Install hound-mcp[all] for OCR.]"],
-            )
+        for n in scan_pages:
+            if n in ocr_map:
+                rendered[n] = (
+                    f"[Page {n}: scanned image page, text recovered by OCR.]\n\n"
+                    + ocr_map[n]
+                )
+            else:
+                rendered[n] = (
+                    f"[Page {n}: scanned image page with no extractable text layer. "
+                    f"Install OCR with `pip install hound-mcp[all]` to auto-recover it, "
+                    f"or use a vision tool / screenshot.]\n\n" + rendered[n]
+                )
 
         # --- Assemble: metadata header + pages ---
         header = _format_metadata(meta)
@@ -518,7 +541,7 @@ def extract_pdf(
                      if len(page_nums) > 1 else f"page {page_nums[0]} of {total_pages}")
         header.append(f"> PDF · {scope}")
         if ocr_used:
-            header.append(f"> OCR fallback used on page(s): {', '.join(str(n) for n in cid_pages_ocr)}")
+            header.append(f"> OCR fallback used on page(s): {', '.join(str(n) for n in sorted(ocr_map.keys()))}")
         body_md = "\n\n".join(f"--- Page {n} ---\n\n{rendered[n]}" for n in page_nums).strip()
         full = ("\n".join(header).strip() + "\n\n" + body_md).strip()
 

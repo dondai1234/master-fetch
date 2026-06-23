@@ -278,3 +278,46 @@ async def test_auto_escalate_non_pdf_url_still_escalates(mocker):
     )
     assert r.fetcher_used == "stealthy"
     assert "stealthy" in r.escalation_path
+
+
+# ─── Mixed PDF: per-page scanned OCR (some text pages + some image pages) ──
+
+def test_mixed_pdf_per_page_scanned_ocr(monkeypatch):
+    """A mixed PDF (text page + scanned image page) OCRs only the scanned page,
+    keeps the text page as-is, and does NOT trigger the all-scanned dead-end."""
+    from master_fetch import pdf_extractor as pe
+
+    class _FakePage:
+        def __init__(self, chars, images):
+            self.chars = chars
+            self.images = images
+    class _FakePdf:
+        def __init__(self):
+            # page 1: text; page 2: image-only (no chars, has images).
+            self.pages = [
+                _FakePage([{"text": "x", "size": 12}] * 50, []),
+                _FakePage([], [{"x0": 0, "y0": 0, "x1": 100, "y1": 100, "width": 100, "height": 100}]),
+            ]
+            self.metadata = {"Title": "Mixed"}
+        def close(self): pass
+    class _FakePdfModule:
+        def open(self, buf, password=""): return _FakePdf()
+
+    monkeypatch.setattr(pe, "_get_pdfplumber", lambda: _FakePdfModule())
+    # _render_page: text for page 1, empty for the scanned page 2 (key off .chars).
+    def fake_render(page, body_size, text_mode):
+        return ("Real article body text. " * 30) if page.chars else ""
+    monkeypatch.setattr(pe, "_render_page", fake_render)
+    monkeypatch.setattr(pe, "_ocr_pages", lambda body, nums, pw: {2: "OCR recovered the scanned page text."})
+    monkeypatch.setattr(pe, "_extract_toc", lambda body: [])
+    monkeypatch.setattr(pe, "_extract_images_metadata", lambda pdf, nums: [])
+
+    r = pe.extract_pdf(b"%PDF- fake mixed", pages="1-2")
+    assert r.error == ""
+    assert r.scanned is False  # mixed, not all-scanned -> no dead-end
+    assert r.ocr_fallback_used is True
+    assert "scanned image page, text recovered by OCR" in r.content[0]
+    assert "OCR recovered the scanned page text" in r.content[0]
+    assert "Real article body text" in r.content[0]  # text page kept
+    assert r.quality_score >= 0.7
+    assert r.content_ok is True

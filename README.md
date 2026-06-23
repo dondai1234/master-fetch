@@ -13,8 +13,7 @@ No accounts. No Docker. No credit card. Runs on your machine.
 [![Python](https://img.shields.io/pypi/pyversions/hound-mcp.svg)](https://pypi.org/project/hound-mcp/)
 [![License: MIT](https://img.shields.io/pypi/l/hound-mcp.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/dondai1234/master-fetch/ci.yml?label=CI)](https://github.com/dondai1234/master-fetch/actions/workflows/ci.yml)
-[![Downloads / month](https://img.shields.io/pypi/dm/hound-mcp.svg)](https://pypi.org/project/hound-mcp/)
-[![Total downloads](https://static.pepy.tech/badge/hound-mcp)](https://pepy.tech/project/hound-mcp)
+[![Downloads](https://static.pepy.tech/badge/hound-mcp)](https://pepy.tech/project/hound-mcp)
 
 ```bash
 pip install hound-mcp[all] && playwright install chromium
