@@ -595,6 +595,32 @@ README rewritten from scratch (clean/organized/star-worthy, no TinyFish; TinyFis
 lives only in CHANGELOG). Reddit post at C:/Users/Dondai/hound-reddit-post.md
 still OUTDATED (says "search takes a free TinyFish key") — UPDATE before posting.
 
+### v7 post-7.0.0 UNRELEASED fixes (accumulating, ship all at once — Dondai's call)
+
+Local commits after v7.0.0 (NOT shipped, NOT version-bumped):
+- **Cold-start timeout fix**: prewarm engine sessions + reranker at startup; hard
+  per-engine deadline (asyncio.wait_for 8s, HOUND_SEARCH_DEADLINE env) so a
+  slow/blocked/escalating engine can never hang the search. Root cause was cold
+  sessions soft-blocked -> stealthy escalation stacking on a cold browser ->
+  >30s -> MCP timeout. Verified: opencode's failing queries now 1.2-2.0s.
+- **Agent QoL**: summary + next_action on every response; results capped at
+  max_results (was returning up to 3x); partial-results note; pagination (page)
+  fixed (was advertised but did nothing — now threads offset to each engine).
+- **Cut research mode** (fetch_content/fetch_top) + **expand** (autoretrieval):
+  bloat. smart_search now always returns SearchResponseModel (URLs + ranking,
+  NOT page content; the agent fetches the ones it wants).
+- **Default max_results 10 -> 9.**
+- **Wikipedia dropped from default engines** (constant bottom-barrel garbage);
+  default = DDG + Bing. Wikipedia + Google are opt-in (engines=).
+- **Google visibility fix**: an engine returning 0 results was in neither
+  engines_used nor engine_blocked (silently vanished). engine_blocked now = any
+  engine that did NOT contribute, so google surfaces there. + google consent-page
+  detection + more robust parser (best-effort; google is opt-in + honest).
+- next_action says "fetch the top 1-2" not "fetch the N high" (neural saturates so
+  all 9 can be high; agent should fetch top 1-2).
+- Removed dead _urllib_get; find_similar source fetch bounded to 6s.
+- 616 tests pass. Live-verified.
+
 #### Search Engine Resilience Layer (SERL) — built 2026-06-24
 Dondai challenged that local keyless scraping exposes the user IP to rate-limits
 / blocks. Designed + built a stateful per-engine coordinator in
