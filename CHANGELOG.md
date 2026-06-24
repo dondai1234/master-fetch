@@ -1,5 +1,71 @@
 # Changelog
 
+## [7.2.0] - 2026-06-24
+
+### diverse independent search pool + cross-engine consensus (rate-limit fix)
+
+Solves the rate-limiting problem once and for all WITHOUT trading away speed
+(no just-add-delays cheating). The unique new feature, built from scratch at zero
+fetch cost: **cross-engine consensus ranking** — a URL returned by several
+independent engines is an authority signal no single-engine tool can produce.
+
+#### Engines
+- **Google REMOVED entirely.** It CAPTCHAs even via the stealthy browser, so it
+  was removed rather than silently contributing nothing. `engines=['google']` is
+  now rejected.
+- **Brave (web) ADDED as a default engine** — an independent 30B-page index that
+  breaks the DuckDuckGo~Bing 99%-overlap problem. The Brave Search API free tier
+  was killed Feb 2026 (metered billing), so Hound scrapes the keyless web UI.
+  curl_cffi/scrapling throws curl error 23 on search.brave.com (every
+  fingerprint), but stdlib urllib returns 200 + 20 clean results, so Brave rides a
+  urllib transport inside the resilience coordinator (still gets the pacer +
+  circuit breaker; stdlib = lean installs get it too).
+- **Mojeek DROPPED** — 403s every HTTP client AND the stealthy Patchright browser
+  (IP-blocked). Unreliable + per-search browser render = a speed cost.
+- **Yahoo ADDED opt-in** — serves Bing's index from a different server, a
+  redundancy source for Bing's index when bing.com rate-limits.
+- **DEFAULT_ENGINES = (duckduckgo, bing, brave)** — three independent index
+  families, all HTTP (no browser needed for the default pool, so search stays
+  fast).
+- **Default max_results 9 -> 6.**
+
+#### Cross-engine consensus ranking
+- `merge_dedupe` tracks which engines returned each URL + stamps
+  `RawResult.consensus` = distinct index-families (`_INDEX_FAMILY`: yahoo counts
+  as the bing family).
+- `_apply_consensus_boost` (additive): `score + 0.2*(consensus-1)`. Consensus
+  AMPLIFIES relevance without overriding it (a strongly-relevant single-engine
+  result still beats a weak consensus hit); also breaks the neural-saturation
+  tie. Zero extra fetches (counted during the merge).
+- New agent-facing `engines_consensus` field per result ("N of M independent
+  indexes") + `source` now shows all agreeing engines (e.g. "brave,duckduckgo").
+
+#### Rate-limit resilience proven live
+- Three independent engines run in PARALLEL (wall-clock = max(slowest, 8s
+  deadline), same as two engines — no slowdown). When one rate-limits, the
+  circuit breaker rests it (15-120s) and the other independent engines carry
+  genuinely different results. Live test: 15 successive searches, Brave blocked
+  on #11 -> DDG+Bing carried, 6 results every time, agent never saw a failure;
+  waited out the cooldown -> Brave rejoined. Full block -> cooldown -> recovery
+  cycle works without issues.
+
+### keyword/BM25 removed; neural is the only reranker + optimized
+
+Dondai: keyword (BM25) is the same speed or slower than neural, so it was removed
+entirely (simpler). Neural is always the top reranker.
+
+- **BM25 / `keyword` mode REMOVED.** `bm25_rerank` deleted; `multi_search` returns
+  the merge order (consensus + engine-position). `mode='keyword'` is now
+  rejected. Lean installs (no model) fall back to cross-engine consensus +
+  engine-position order (rerank_mode "merge"), no lexical rerank.
+- **Neural optimized — min-max normalize per query** (`reranker.rerank`): ms-marco
+  sigmoid saturates (~1.0 for any clearly-relevant snippet) so raw scores cluster
+  and can't discriminate; normalizing to 0..1 across the result set restores
+  meaningful `relevance_score` spread. Ranking order unchanged (monotonic).
+- **Consensus boost switched multiplicative -> additive** (composes cleanly with
+  normalized scores; renormalize to 0..1 only when a bonus pushes a score >1.0).
+- Cache key bumped `search:v3` -> `search:v4` (consensus field). 614 tests pass.
+
 ## [7.1.0] - 2026-06-24
 
 ### smart_search reliability + agent-comfort overhaul
