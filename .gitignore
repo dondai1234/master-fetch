@@ -39,3 +39,14 @@ credentials.json
 htmlcov/
 .coverage
 coverage.xml
+
+# Personal / local-only planning + temp helper scripts (never ship these)
+V7-SEARCH-PLAN.md
+/.fix_*.py
+/.v7*.py
+/.serl*.py
+/.engine_surgery.py
+/.drop_*.py
+/.soften_*.py
+/.release_notes*.md
+hound-mcp-bug-report.md
