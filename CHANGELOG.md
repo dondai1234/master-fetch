@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.3.1] - 2026-06-24
+
+### fix: no more Chrome at startup (lazy stealthy browser)
+
+The stealthy Patchright browser was eagerly prewarmed at server startup (for
+smart_fetch's anti-bot escalation), so a Chrome instance sat idle eating ~150MB
+RAM the moment the agent started — even though search is all-HTTP and never
+needs a browser. The browser is now LAZY: it launches only on the first
+smart_fetch / screenshot / search-all-blocked-last-resort that actually needs
+it. Startup now warms only the cheap search-engine HTTP sessions + the neural
+reranker (no browser). Verified live: 0 stealthy sessions at startup + after a
+search. Trade-off: the first stealthy fetch is a ~3-5s cold launch instead of
+warm (subsequent fetches are warm); search + HTTP fetches are unaffected.
+
 ## [7.3.0] - 2026-06-24
 
 ### speed + smart rate-limit avoidance + Qwant (replaces Brave)

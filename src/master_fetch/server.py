@@ -863,7 +863,7 @@ class MasterFetchServer:
         self._auto_dynamic_last_used: float = 0  # timestamp of last auto dynamic session use
         self._auto_stealthy_last_used: float = 0  # timestamp of last auto stealthy session use
         self._idle_monitor_task: Optional[Any] = None  # asyncio.Task for idle session cleanup
-        self._auto_session_lock: Lock = Lock()  # serializes auto-session creation so the startup warm-up + a concurrent fetch never spawn a 2nd browser
+        self._auto_session_lock: Lock = Lock()  # serializes auto-session creation so a concurrent fetch never spawns a 2nd browser
 
     # ─── Core helpers ─────────────────────────────────────────────
 
@@ -913,7 +913,7 @@ class MasterFetchServer:
                 self._ensure_idle_monitor()
                 return existing_id
 
-        # Serialize creation: the startup warm-up and a concurrent fetch share ONE
+        # Serialize creation: concurrent fetches share ONE
         # creation. A second caller waits on the lock, then reuses — never a 2nd
         # browser instance. (The previous close-the-orphan race can no longer
         # happen in production, but the final guard below still defends against
@@ -946,20 +946,22 @@ class MasterFetchServer:
         return sid.session_id
 
     async def _prewarm_stealthy(self) -> None:
-        """Warm the single stealthy browser at startup (background, best-effort).
+        """Warm the single stealthy browser on demand (background, best-effort).
 
-        Scheduled when the MCP server starts so the browser is warm by the time
-        the agent first needs a stealthy fetch or screenshot — skipping the
-        ~3-5s cold start. Idempotent: _ensure_auto_session reuses any existing
-        session. Fails silently (e.g. chromium not installed); in that case the
-        browser launches on first fetch instead.
+        NOT called at server startup anymore (v7.3): the browser is lazy and
+        launches on the first smart_fetch/screenshot/search-last-resort that
+        actually needs it, so a Chrome instance does not sit idle eating ~150MB
+        before any fetch happens. This helper remains for explicit/on-demand warm
+        (idempotent: _ensure_auto_session reuses any existing session). Fails
+        silently (e.g. chromium not installed); the browser then launches on the
+        first real fetch instead.
         """
         try:
             _get_scrapling()  # Lazy-import scrapling (playwright) if not done yet
             await self._ensure_auto_session("stealthy")
-            logger.debug("Stealthy browser warmed at startup")
+            logger.debug("Stealthy browser warmed")
         except Exception as e:
-            logger.debug(f"Startup warm-up failed (will launch on first fetch): {e}")
+            logger.debug(f"Stealthy warm-up failed (will launch on first fetch): {e}")
 
     async def _start_idle_monitor(self) -> None:
         """Background task: close auto browser sessions after AUTO_SESSION_IDLE_TIMEOUT
@@ -2215,8 +2217,8 @@ class MasterFetchServer:
 
         Two tiers. No domain intel routing. No dynamic tier.
         HTTP is fast (~1s). Stealthy (Patchright) handles everything else.
-        If HTTP succeeds, fire background pre-warm so stealthy is ready
-        for the next call that needs it.
+        The stealthy browser is lazy (launches on first need, not prewarmed at
+        startup) so it only costs RAM when a fetch actually escalates.
         """
         start_time = now()
         errors = []
@@ -2566,20 +2568,22 @@ class MasterFetchServer:
             from mcp.server.stdio import stdio_server
 
             async def _run():
-                # Warm the single stealthy browser at startup so it's ready before
-                # the agent's first stealthy fetch/screenshot. Best-effort, runs in
-                # the background while the server handles the initialize handshake.
-                warm = asyncio.create_task(self._prewarm_stealthy())
+                # Warm the search-engine HTTP sessions + the neural reranker at
+                # startup (both cheap, no browser). The stealthy browser is NOT
+                # prewarmed here - it launches lazily on the first smart_fetch /
+                # screenshot that actually needs it, so a Chrome instance does not
+                # sit idle eating ~150MB before any fetch happens. Search is all-
+                # HTTP (DDG+Bing+Qwant) and never spawns a browser except the rare
+                # all-blocked last-resort.
                 warm_search = asyncio.create_task(prewarm_search_engines())
                 warm_reranker = asyncio.create_task(prewarm_reranker())
                 try:
                     async with stdio_server() as (read, write):
                         await server.run(read, write, server.create_initialization_options())
                 finally:
-                    warm.cancel()
                     warm_search.cancel()
                     warm_reranker.cancel()
-                    for _t in (warm, warm_search, warm_reranker):
+                    for _t in (warm_search, warm_reranker):
                         try:
                             await _t
                         except Exception:
@@ -2599,7 +2603,8 @@ class MasterFetchServer:
                     await server.run(read, write, server.create_initialization_options())
 
             async def _startup():
-                asyncio.create_task(self._prewarm_stealthy())
+                # HTTP sessions + reranker only (cheap, no browser). The stealthy
+                # browser is lazy (launches on first fetch need), not prewarmed.
                 asyncio.create_task(prewarm_search_engines())
                 asyncio.create_task(prewarm_reranker())
 

@@ -394,9 +394,10 @@ class TestInstructionsAndSchema:
 # ─── Single warm browser instance (no open/close/list session tools) ──────
 
 class TestSingleBrowserInstance:
-    """v3.7: one stealthy Chrome, warmed at startup, reused for every stealthy
-    fetch + screenshot. The manual open/close/list session MCP tools are gone;
-    open_session/close_session remain as internal helpers."""
+    """v3.7: one stealthy Chrome, reused for every stealthy fetch + screenshot
+    (lazy since v7.3: launches on first need, not prewarmed at startup). The
+    manual open/close/list session MCP tools are gone; open_session/close_session
+    remain as internal helpers."""
 
     def test_session_tools_removed_from_defs(self):
         srv = MasterFetchServer()
