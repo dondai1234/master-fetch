@@ -1,5 +1,68 @@
 # Changelog
 
+## [7.1.0] - 2026-06-24
+
+### smart_search reliability + agent-comfort overhaul
+
+This release fixes a real reliability bug (first-call timeouts) and simplifies
+smart_search per agent-feedback: cut the bloat, make the response judgment-
+empowering instead of prescriptive, and stop returning low-value results.
+
+#### Fixed: first-call timeout (cold start)
+- Root cause: cold engine sessions (no cookies, cold TLS) got soft-blocked on the
+  first hit, so each engine escalated to the stealthy browser; if that browser
+  was still cold, multiple escalations serialized on one browser and blew past
+  the MCP client timeout. The 2nd call was fast because sessions were warm by then.
+- **Pre-warm engine sessions + the neural reranker at startup** (best-effort,
+  no download for the reranker unless the model is already cached) so the first
+  real search is warm.
+- **Hard per-engine deadline** (`asyncio.wait_for`, 8s, `HOUND_SEARCH_DEADLINE`
+  env) so a slow / blocked / escalating engine can never hang the search; the
+  agent gets partial results from the engines that finished + the cut one in
+  `engine_blocked`.
+- Verified with the failing queries from the field: ~1.2-2.0s, no timeouts.
+
+#### Removed (bloat)
+- **Research mode** (`fetch_content` / `fetch_top` / `max_content_chars_per` +
+  `ResearchResponseModel`): searching + fetching in one call depended on the
+  model picking high-value URLs. smart_search now always returns URLs + ranking,
+  NOT page content; the agent `smart_fetch`es the results it wants itself (one
+  extra call beats guessing which URL is worth fetching).
+- **`expand` (autoretrieval)**: marginal; the model rephrases better itself.
+- Dead `_urllib_get` removed; `find_similar` source fetch bounded to 6s.
+
+#### Changed (agent comfort + token economy)
+- **Default results 10 -> 9.** Results are capped at `max_results` (was returning
+  up to 3x = 30, a token waste). The agent gets the top 9 ranked from the merged
+  DDG+Bing pool.
+- **Wikipedia dropped from default engines** (constant bottom-barrel garbage);
+  default is now **DuckDuckGo + Bing**. `wikipedia` + `google` remain opt-in via
+  `engines=`.
+- **Google visibility fix**: an engine returning 0 results (google often
+  CAPTCHAs/consents) was in neither `engines_used` nor `engine_blocked`, so it
+  silently vanished. `engine_blocked` now lists any engine that did NOT
+  contribute (rate-limited / timed out / parsed no results / consent page), so
+  google surfaces there instead of being invisible. + google consent-page
+  detection + a more robust parser (best-effort; google is opt-in + honest).
+- **Pagination (`page`) fixed**: was advertised but never passed to the engines
+  (only in the cache key, did nothing). Now threads the offset to each engine
+  (DDG `&s=`, Bing `&first=`, Wikipedia `&sroffset=`, Google `&start=`).
+- **`summary` + `next_action` on every search response** (consistency with
+  `smart_fetch`). `next_action` is judgment-empowering, not prescriptive: "Results
+  are ranked by relevance (relevance_score + fetch_relevance). smart_fetch the
+  ones that match what you actually need - the ranking is a hint, not a directive;
+  a lower-ranked result can be the right one, so trust your judgment." (a rigid
+  "fetch 1-2" made the LLM stress over whether to break it when a lower-ranked
+  result was the one it needed).
+- Partial-results note in `fetch_hint` when engines did not contribute.
+- `fetch_relevance` field description + tool def + connect-time `instructions`
+  + README all softened to "fetch what matches your need, use your judgment".
+
+#### Notes
+- `neural` + `find_similar` rerank modes kept (real opt-in capability).
+- 616 tests pass. Live-verified against the real web.
+- TinyFish remains HARD-REMOVED (unchanged from 7.0.0).
+
 ## [7.0.0] - 2026-06-23
 
 ### flagship: 100% local keyless search (TinyFish removed)
