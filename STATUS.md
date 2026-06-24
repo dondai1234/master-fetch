@@ -584,17 +584,18 @@ Phases (each tested + live-verified, no push until all done + Dondai approves):
       pass. **NOT pushed, NOT uploaded to PyPI, NO GitHub release — Dondai
       approves before shipping.**
 
-### v7 status: READY FOR DONDAI REVIEW (built + tested + verified, not shipped)
+### v7 status: SHIPPED 2026-06-24 (v7.0.0 on PyPI + GitHub, CI green)
 
-All 5 phases done locally on master (commits 4c24c08, bb6c030, 77e18d8,
-3a4a922, deep-cut + this SERL phase). To ship after approval: rebase (Dondai
-edits README on GitHub), push, GitHub release v7.0.0, `python -m build &&
-twine upload`, verify on PyPI + CI green. The Reddit post at
-C:/Users/Dondai/hound-reddit-post.md still says "Web search takes a free
-TinyFish key" + has TinyFish referral lines — UPDATE it before posting (search
-is now 100% local keyless + rate-limit resilient via SERL).
+Pushed (fast-forward, no rebase needed — Dondai had not touched remote README
+since v6), tagged v7.0.0, GitHub release (wheel + sdist attached), PyPI upload.
+Fresh-venv verify PASSED: `pip install hound-mcp[all]==7.0.0` -> ver 7.0.0, neural
+search works (9 results, all 3 engines, no blocks), reranker ready, import points
+at site-packages (clean, no dev-venv leakage). CI green on the README commit.
+README rewritten from scratch (clean/organized/star-worthy, no TinyFish; TinyFish
+lives only in CHANGELOG). Reddit post at C:/Users/Dondai/hound-reddit-post.md
+still OUTDATED (says "search takes a free TinyFish key") — UPDATE before posting.
 
-#### Search Engine Resilience Layer (SERL) — added 2026-06-24
+#### Search Engine Resilience Layer (SERL) — built 2026-06-24
 Dondai challenged that local keyless scraping exposes the user IP to rate-limits
 / blocks. Designed + built a stateful per-engine coordinator in
 `search_engines.py` (`_EngineCoordinator` + module singleton `_ENGINES_COORD`):
