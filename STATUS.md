@@ -597,7 +597,11 @@ still OUTDATED (says "search takes a free TinyFish key") — UPDATE before posti
 
 ### v7 post-7.0.0 UNRELEASED fixes (accumulating, ship all at once — Dondai's call)
 
-Local commits after v7.0.0 (NOT shipped, NOT version-bumped):
+SHIPPED as v7.1.0 on 2026-06-24 (PyPI + GitHub release, CI green, fresh-venv
+verify passed: 7.1.0 installs clean, default 9 results ddg+bing neural, reranker
+ready, MCP dispatch gracefully drops removed fetch_content/expand params).
+
+Local commits in this batch (now shipped in 7.1.0):
 - **Cold-start timeout fix**: prewarm engine sessions + reranker at startup; hard
   per-engine deadline (asyncio.wait_for 8s, HOUND_SEARCH_DEADLINE env) so a
   slow/blocked/escalating engine can never hang the search. Root cause was cold
