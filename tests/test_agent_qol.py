@@ -326,7 +326,7 @@ class TestFetchRelevance:
         # Stub the engine layer so no real engine is hit.
         import master_fetch.search as search_mod
         async def fake_multi(query, max_results, *, engines, site, exclude_sites,
-                             region, freshness, server):
+                             region, freshness, page=0, server=None):
             return [
                 RawResult(title="Python Asyncio Guide", url="https://a.com",
                           snippet="python asyncio tutorial", source="duckduckgo", position=1),

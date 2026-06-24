@@ -27,7 +27,7 @@ def _raw(title, url, src="duckduckgo", pos=1, snip="python asyncio"):
 
 def _stub_multi(monkeypatch, results):
     async def fake_multi(query, max_results, *, engines, site, exclude_sites,
-                         region, freshness, server):
+                         region, freshness, page=0, server=None):
         return results, [EngineReport("duckduckgo", ok=True)]
     monkeypatch.setattr(search_mod, "multi_search", fake_multi)
     # Default reranker path to unavailable; neural tests override below.
@@ -191,7 +191,7 @@ def test_expand_runs_subqueries_and_merges(monkeypatch):
     seen = []
 
     async def fake_multi(query, max_results, *, engines, site, exclude_sites,
-                         region, freshness, server):
+                         region, freshness, page=0, server=None):
         seen.append(query)
         return [_raw(query, f"https://{abs(hash(query)) % 9999}.com", snip=query)
                 ], [EngineReport("duckduckgo", ok=True)]
@@ -226,12 +226,12 @@ def test_find_similar_fetches_source_and_reranks_vs_source(monkeypatch):
         _raw("C", "https://c.com", snip="cooking recipes"),
     ]
 
-    async def fake_source(url):
+    async def fake_source(url, timeout=10):
         return ("Asyncio Guide", "this page is about asyncio event loops in python")
     monkeypatch.setattr(search_mod, "fetch_source_for_similar", fake_source)
 
     async def fake_gather(query, expand, max_results, engines, site, exclude_sites,
-                          region, freshness, server):
+                          region, freshness, page=0, server=None):
         return candidates, [EngineReport("duckduckgo", ok=True)]
     monkeypatch.setattr(search_mod, "_gather", fake_gather)
 
@@ -259,7 +259,7 @@ def test_find_similar_requires_url(monkeypatch):
 
 
 def test_find_similar_source_unfetchable(monkeypatch):
-    async def fake_source(url):
+    async def fake_source(url, timeout=10):
         return "", ""
     monkeypatch.setattr(search_mod, "fetch_source_for_similar", fake_source)
     from master_fetch.server import MasterFetchServer
@@ -275,12 +275,12 @@ def test_find_similar_falls_back_to_keyword_when_no_reranker(monkeypatch):
         _raw("cooking", "https://b.com", snip="food recipes"),
     ]
 
-    async def fake_source(url):
+    async def fake_source(url, timeout=10):
         return ("Python Asyncio", "python asyncio event loop content")
     monkeypatch.setattr(search_mod, "fetch_source_for_similar", fake_source)
 
     async def fake_gather(query, expand, max_results, engines, site, exclude_sites,
-                          region, freshness, server):
+                          region, freshness, page=0, server=None):
         return candidates, [EngineReport("duckduckgo", ok=True)]
     monkeypatch.setattr(search_mod, "_gather", fake_gather)
     monkeypatch.setattr(search_mod, "get_reranker", lambda: None)
@@ -293,3 +293,37 @@ def test_find_similar_falls_back_to_keyword_when_no_reranker(monkeypatch):
     # BM25 on derived query "Python Asyncio" -> a.com (python asyncio) first.
     assert resp.results[0].url == "https://a.com"
     assert "keyword BM25" in resp.fetch_hint  # the fallback note
+
+
+# ─── reranker prewarm (no-download-when-absent) ──────────────────────────────
+
+def test_model_present_false_when_model_absent(tmp_path, monkeypatch):
+    import master_fetch.reranker as rer
+    monkeypatch.setattr(rer, "MODEL_DIR", tmp_path)
+    assert rer.model_present() is False
+
+
+def test_prewarm_reranker_skips_when_model_absent(monkeypatch):
+    import master_fetch.reranker as rer
+    # Force "model not cached" so prewarm must NOT call get_reranker (which would
+    # download). If it did call it, the bomb raises.
+    monkeypatch.setattr(rer, "model_present", lambda: False)
+    called = {"yes": False}
+    def bomb():
+        called["yes"] = True
+        raise AssertionError("prewarm must not load the reranker when the model is absent")
+    monkeypatch.setattr(rer, "get_reranker", bomb)
+    asyncio.run(rer.prewarm_reranker())   # must not raise
+    assert called["yes"] is False
+
+
+def test_prewarm_reranker_warms_when_model_present(monkeypatch):
+    import master_fetch.reranker as rer
+    monkeypatch.setattr(rer, "model_present", lambda: True)
+    called = {"yes": False}
+    def fake_get():
+        called["yes"] = True
+        return None
+    monkeypatch.setattr(rer, "get_reranker", fake_get)
+    asyncio.run(rer.prewarm_reranker())
+    assert called["yes"] is True

@@ -19,6 +19,7 @@ import hashlib
 import logging
 import math
 import os
+import asyncio
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -254,5 +255,27 @@ def rerank(query: str, results: list) -> Optional[list[tuple]]:
 
 def unavailable_reason() -> str:
     return _reranker_unavailable_reason
+
+
+def model_present() -> bool:
+    """True if the reranker model + tokenizer are already cached locally (so
+    get_reranker() will NOT trigger a download). Used by startup prewarm to warm
+    the ONNX session only when it is free to do so."""
+    onnx = MODEL_DIR / "model.onnx"
+    tokjson = MODEL_DIR / "tokenizer.json"
+    return (onnx.exists() and onnx.stat().st_size >= MIN_MODEL_BYTES
+            and tokjson.exists())
+
+
+async def prewarm_reranker() -> None:
+    """Best-effort startup prewarm: if the reranker model is already cached, load
+    the ONNX session now (in a worker thread) so the first neural search skips
+    the ~1-2s init. Does NOT download (skips when the model is absent). Never raises."""
+    if not model_present():
+        return
+    try:
+        await asyncio.to_thread(get_reranker)
+    except Exception:
+        pass
 
 

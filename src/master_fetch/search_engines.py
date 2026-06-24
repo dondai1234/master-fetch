@@ -62,6 +62,16 @@ _COOLDOWN_BASE = 15.0   # seconds; doubles each consecutive block
 _COOLDOWN_CAP = 120.0   # max cooldown
 _RECREATE_EVERY = 3     # recreate the persistent session every N consecutive blocks (burned session)
 
+# Hard per-engine deadline: a slow / blocked / escalating engine can never hang
+# the whole search. Engines that don't finish in time are reported as blocked
+# (timed out) and the agent gets results from the engines that did. Bounds total
+# search latency so it stays under typical MCP client timeouts. Tunable via the
+# HOUND_SEARCH_DEADLINE env var (seconds).
+try:
+    SEARCH_ENGINE_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "8") or "8")
+except ValueError:
+    SEARCH_ENGINE_DEADLINE = 8.0
+
 # Power-user env knobs (all optional).
 _PROXY = os.environ.get("HOUND_SEARCH_PROXY") or None
 try:
@@ -115,26 +125,6 @@ def _retry_after(resp) -> float:
     except Exception:
         pass
     return 0.0
-
-
-async def _urllib_get(url: str, *, timeout: int = ENGINE_TIMEOUT) -> tuple[Optional[str], int, bool]:
-    """Stdlib fallback transport (no TLS impersonation). Used only if scrapling's
-    static engine is unavailable on a minimal install."""
-    from urllib.request import Request, urlopen
-    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-          "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-
-    def _do():
-        req = Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
-        with urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8", errors="replace"), r.status
-
-    try:
-        text, status = await asyncio.to_thread(_do)
-        return text, status, _is_blocked(status, text)
-    except Exception as e:
-        logger.debug(f"urllib GET failed for {url[:80]}: {e}")
-        return None, 0, False
 
 
 async def _stealthy_html(server, url: str, timeout: int = ENGINE_TIMEOUT) -> Optional[str]:
@@ -206,6 +196,22 @@ class _EngineCoordinator:
         st = self.state(name)
         st.cooldown_until = 0.0
         st.consecutive_blocks = 0
+
+    async def warmup(self, name: str, url: str, timeout: float = 6.0) -> None:
+        """Best-effort pre-warm: ensure the persistent session + do one throwaway
+        GET so TLS + cookies are established before the first real search. Does
+        NOT touch the circuit breaker or the pacer (so a warmup cannot trigger a
+        cooldown, and the first real search is not paced because of it). Called at
+        server startup; errors are swallowed silently."""
+        st = self.state(name)
+        async with st.lock:
+            await self._ensure_session(st)
+            if st.sess is None:
+                return
+            try:
+                await st.sess.get(url, timeout=timeout)
+            except Exception:
+                pass  # warming is best-effort; a failure here is not a block
 
     def _make_session(self):
         from scrapling.engines.static import FetcherSession
@@ -339,6 +345,28 @@ async def close_search_engines() -> None:
     await _ENGINES_COORD.close_all()
 
 
+# Throwaway warmup URLs that mirror each engine's real search path (same host +
+# endpoint) so the first real search reuses a warm TLS session + cookies.
+_WARMUP_URLS = {
+    "duckduckgo": "https://html.duckduckgo.com/html/?q=test",
+    "bing": "https://www.bing.com/search?q=test",
+    "wikipedia": "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=test&srlimit=1&srprop=snippet&format=json&utf8=1",
+}
+
+
+async def prewarm_search_engines(engines: Optional[list[str]] = None) -> None:
+    """Pre-warm the default engine sessions at startup so the agent's first
+    smart_search is fast (warm TLS + cookies, fewer first-hit blocks, fewer
+    stealthy escalations). Best-effort, fire-and-forget; never raises."""
+    names = [e for e in (engines or list(DEFAULT_ENGINES)) if e in _WARMUP_URLS]
+    if not names:
+        return
+    await asyncio.gather(
+        *[_ENGINES_COORD.warmup(n, _WARMUP_URLS[n]) for n in names],
+        return_exceptions=True,
+    )
+
+
 # ─── DuckDuckGo (html endpoint) ─────────────────────────────────────────────
 
 def _ddg_real_url(href: str) -> str:
@@ -374,12 +402,16 @@ def _parse_ddg(html: str) -> list[RawResult]:
 
 
 async def search_ddg(query: str, max_results: int, *, region: str = "us-en",
-                     freshness: Optional[str] = None, server=None) -> tuple[list[RawResult], EngineReport]:
+                     freshness: Optional[str] = None, page: int = 0,
+                     server=None) -> tuple[list[RawResult], EngineReport]:
     q = query
-    # DDG html endpoint supports a time filter via the `df` param (d/w/m/y).
+    # DDG html endpoint supports a time filter via the `df` param (d/w/m/y) and
+    # pagination via `s` (result start offset).
     params = f"q={quote(q)}&kl={quote(region)}"
     if freshness in ("day", "week", "month", "year"):
         params += f"&df={freshness[0]}"
+    if page > 0:
+        params += f"&s={page * max_results}"
     url = f"https://html.duckduckgo.com/html/?{params}"
     text, status, blocked, cooling = await _engine_get("duckduckgo", url)
     rep = EngineReport(name="duckduckgo")
@@ -446,12 +478,15 @@ def _bing_real_url(cite_text: str) -> str:
 
 
 async def search_bing(query: str, max_results: int, *, region: str = "us-en",
-                      freshness: Optional[str] = None, server=None) -> tuple[list[RawResult], EngineReport]:
+                      freshness: Optional[str] = None, page: int = 0,
+                      server=None) -> tuple[list[RawResult], EngineReport]:
     params = f"q={quote(query)}&count={max(min(max_results * 2, 50), 10)}&setlang=en"
     if freshness in ("day", "week", "month"):
         params += f"&filters=ex1%3a%22ez5_{freshness[0]}1%22"
     elif freshness == "year":
         params += "&filters=ex1%3a%22ez5_y1%22"
+    if page > 0:
+        params += f"&first={page * max_results + 1}"
     url = f"https://www.bing.com/search?{params}"
     text, status, blocked, cooling = await _engine_get("bing", url)
     rep = EngineReport(name="bing")
@@ -511,10 +546,13 @@ def _parse_google(html: str) -> list[RawResult]:
 
 
 async def search_google(query: str, max_results: int, *, region: str = "us-en",
-                        freshness: Optional[str] = None, server=None) -> tuple[list[RawResult], EngineReport]:
+                        freshness: Optional[str] = None, page: int = 0,
+                        server=None) -> tuple[list[RawResult], EngineReport]:
     params = f"q={quote(query)}&hl=en&num={max(min(max_results * 2, 50), 10)}"
     if freshness in ("day", "week", "month", "year"):
         params += f"&tbs=qdr:{freshness[0]}"
+    if page > 0:
+        params += f"&start={page * max_results + 1}"
     url = f"https://www.google.com/search?{params}"
     text, status, blocked, cooling = await _engine_get("google", url)
     rep = EngineReport(name="google")
@@ -541,7 +579,8 @@ async def search_google(query: str, max_results: int, *, region: str = "us-en",
 # ─── Wikipedia (official API, keyless, always works) ─────────────────────────
 
 async def search_wikipedia(query: str, max_results: int, *, region: str = "us-en",
-                           freshness: Optional[str] = None, server=None
+                           freshness: Optional[str] = None, page: int = 0,
+                           server=None
                            ) -> tuple[list[RawResult], EngineReport]:
     lang = "en"
     # region is like 'us-en' (country-language); the Wikipedia host language is
@@ -550,9 +589,10 @@ async def search_wikipedia(query: str, max_results: int, *, region: str = "us-en
         lang = region.split("-")[-1]
     elif region:
         lang = region
+    sroffset = f"&sroffset={page * max_results}" if page > 0 else ""
     url = (f"https://{lang}.wikipedia.org/w/api.php?action=query&list=search"
            f"&srsearch={quote(query)}&srlimit={max(min(max_results, 20), 1)}"
-           f"&srprop=snippet&format=json&utf8=1")
+           f"&srprop=snippet&format=json&utf8=1{sroffset}")
     text, status, blocked, cooling = await _engine_get("wikipedia", url)
     rep = EngineReport(name="wikipedia")
     if not text:
@@ -719,6 +759,7 @@ async def multi_search(
     exclude_sites: Optional[list[str]] = None,
     region: str = "us-en",
     freshness: Optional[str] = None,
+    page: int = 0,
     server=None,
 ) -> tuple[list[RawResult], list[EngineReport]]:
     """Run the chosen engines in parallel, merge, dedup, BM25-rerank.
@@ -734,10 +775,22 @@ async def multi_search(
     names = [e for e in (engines or list(DEFAULT_ENGINES)) if e in _ENGINES]
     if not names:
         names = list(DEFAULT_ENGINES)
-    per_engine = await asyncio.gather(
-        *[_ENGINES[n](query, max_results, region=region, freshness=freshness, server=server) for n in names],
-        return_exceptions=True,
-    )
+
+    async def _run_engine(name: str):
+        # Hard per-engine deadline: a slow / blocked / stealthy-escalating engine
+        # is cut off so it can never hang the whole search. The agent gets results
+        # from the engines that finished; the cut one is reported as timed out.
+        try:
+            return await asyncio.wait_for(
+                _ENGINES[name](query, max_results, region=region, freshness=freshness,
+                               page=page, server=server),
+                timeout=SEARCH_ENGINE_DEADLINE,
+            )
+        except asyncio.TimeoutError:
+            return ([], EngineReport(name=name, blocked=True,
+                                     error=f"timed out ({int(SEARCH_ENGINE_DEADLINE)}s)"))
+
+    per_engine = await asyncio.gather(*[_run_engine(n) for n in names], return_exceptions=True)
     reports: list[EngineReport] = []
     cleaned: list[tuple[list[RawResult], EngineReport]] = []
     for name, res in zip(names, per_engine):
@@ -756,12 +809,18 @@ async def multi_search(
     if (server is not None and "google" not in names
             and len(merged) < 3 and any(r.blocked for _, r in cleaned)):
         try:
-            g_res, g_rep = await search_google(query, max_results, region=region,
-                                               freshness=freshness, server=server)
+            g_res, g_rep = await asyncio.wait_for(
+                search_google(query, max_results, region=region,
+                              freshness=freshness, page=page, server=server),
+                timeout=SEARCH_ENGINE_DEADLINE,
+            )
             if g_res:
                 cleaned.append((g_res, g_rep))
                 reports.append(g_rep)
                 merged = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
+        except asyncio.TimeoutError:
+            reports.append(EngineReport(name="google", blocked=True,
+                                        error=f"timed out ({int(SEARCH_ENGINE_DEADLINE)}s)"))
         except Exception as e:
             logger.debug(f"reserve google fan-out failed: {e}")
 

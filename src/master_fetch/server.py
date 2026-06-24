@@ -84,7 +84,8 @@ from master_fetch.trafilatura_extractor import extract_with_trafilatura
 from master_fetch.robots import is_allowed, clear_robots_cache
 from master_fetch.search import SearchResponseModel
 from master_fetch.reddit import is_reddit_url, rewrite_to_old_reddit, parse_old_reddit_listing
-from master_fetch.search_engines import close_search_engines
+from master_fetch.search_engines import close_search_engines, prewarm_search_engines
+from master_fetch.reranker import prewarm_reranker
 from master_fetch.security import (
     validate_url,
     validate_css_selector,
@@ -2500,7 +2501,7 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_search",
-            "description": "Local keyless web search. No API key, no account. Scrapes DuckDuckGo + Bing + Wikipedia in parallel, merges + ranks by relevance. Each result has relevance_score + fetch_relevance (high/med/low). NEVER answer from snippets alone: either smart_fetch the 'high' results, OR set fetch_content=true (research mode) to auto-fetch the top-N results' full content in THIS one call (saves round-trips). Filters in options: site/exclude_sites (domain include/exclude), location/language/region (geo), page (0-10), freshness (day|week|month|year), engines (list, default ['duckduckgo','bing','wikipedia']; add 'google' to use Google via the stealthy browser). Rate-limit resilient: engine_blocked lists any engine cooling down (results still come from the others, retry shortly).",
+            "description": "Local keyless web search. No API key, no account. Scrapes DuckDuckGo + Bing + Wikipedia in parallel, merges + ranks by relevance. Each result has relevance_score + fetch_relevance (high/med/low); the response carries summary + next_action (the obvious next call: fetch the high results / rephrase / retry) + engine_blocked. NEVER answer from snippets alone: either smart_fetch the 'high' results, OR set fetch_content=true (research mode) to auto-fetch the top-N results' full content in THIS one call (saves round-trips). Filters in options: site/exclude_sites (domain include/exclude), location/language/region (geo), page (0-10), freshness (day|week|month|year), engines (list, default ['duckduckgo','bing','wikipedia']; add 'google' to use Google via the stealthy browser). Rate-limit resilient + bounded latency: engines run in parallel with a hard per-engine deadline, so a slow/blocked engine never hangs the search. engine_blocked lists any engine that cooled down or timed out (results still come from the others, retry shortly for more recall).",
             "inputSchema": {
                 "type": "object", "required": ["query"],
                 "properties": {
@@ -2572,15 +2573,20 @@ class MasterFetchServer:
                 # the agent's first stealthy fetch/screenshot. Best-effort, runs in
                 # the background while the server handles the initialize handshake.
                 warm = asyncio.create_task(self._prewarm_stealthy())
+                warm_search = asyncio.create_task(prewarm_search_engines())
+                warm_reranker = asyncio.create_task(prewarm_reranker())
                 try:
                     async with stdio_server() as (read, write):
                         await server.run(read, write, server.create_initialization_options())
                 finally:
                     warm.cancel()
-                    try:
-                        await warm
-                    except Exception:
-                        pass
+                    warm_search.cancel()
+                    warm_reranker.cancel()
+                    for _t in (warm, warm_search, warm_reranker):
+                        try:
+                            await _t
+                        except Exception:
+                            pass
                     await self._shutdown_close_sessions()
 
             anyio.run(_run)
@@ -2597,6 +2603,8 @@ class MasterFetchServer:
 
             async def _startup():
                 asyncio.create_task(self._prewarm_stealthy())
+                asyncio.create_task(prewarm_search_engines())
+                asyncio.create_task(prewarm_reranker())
 
             app = Starlette(
                 routes=[Route("/sse", endpoint=handle_sse), Route("/messages/", endpoint=sse.handle_post_message)],

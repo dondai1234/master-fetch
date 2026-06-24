@@ -536,7 +536,7 @@ class TestSearchSecurityErrorConsistency:
         srv = MasterFetchServer()
 
         async def boom(query, max_results, *, engines, site, exclude_sites,
-                       region, freshness, server):
+                       region, freshness, page=0, server=None):
             raise RuntimeError("engine exploded")
 
         orig = search_mod.multi_search

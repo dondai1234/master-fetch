@@ -71,7 +71,7 @@ def _stub_multi(monkeypatch, results, reports):
     captured = {}
 
     async def fake_multi(query, max_results, *, engines, site, exclude_sites,
-                         region, freshness, server):
+                         region, freshness, page=0, server=None):
         captured.update(engines=engines, site=site, exclude_sites=exclude_sites,
                         region=region, freshness=freshness)
         return results, reports
@@ -257,3 +257,77 @@ def test_cache_hit_returns_results_without_calling_multi(monkeypatch):
     assert resp.cached is True
     assert resp.results[0].url == "https://x.com"
     assert resp.engines_used == ["duckduckgo"]
+
+
+def test_smart_search_partial_results_note_when_engine_blocked(monkeypatch):
+    # One engine returned results, another was rate-limited/timed out. The agent
+    # must see a clear note that results are partial + to retry, not a failure.
+    results = [_raw("python asyncio", "https://b.com", "duckduckgo", 1, "asyncio event loop")]
+    reports = [EngineReport("duckduckgo", ok=True),
+               EngineReport("bing", blocked=True, error="timed out (8s)")]
+    _stub_multi(monkeypatch, results, reports)
+    from master_fetch.server import MasterFetchServer
+    srv = MasterFetchServer()
+    resp = asyncio.run(_ss(srv, "python asyncio", max_results=5, cache_ttl=0))
+    assert resp.engine_blocked == ["bing"]
+    assert len(resp.results) == 1            # partial results from ddg
+    assert resp.error == ""                  # not an error: results exist
+    assert "timed out" in resp.fetch_hint.lower() or "rate-limited" in resp.fetch_hint.lower()
+    assert "retry" in resp.fetch_hint.lower()
+
+
+# ─── result cap + summary/next_action (agent QoL) ────────────────────────────
+
+def test_smart_search_caps_returned_results_at_max_results(monkeypatch):
+    # multi_search can return a large merged pool (up to 3x); the agent's
+    # max_results must cap what comes back (token economy).
+    big = [_raw(f"python asyncio result {i}", f"https://r{i}.com", "duckduckgo", i, "asyncio python")
+           for i in range(30)]
+    reports = [EngineReport("duckduckgo", ok=True)]
+    _stub_multi(monkeypatch, big, reports)
+    from master_fetch.server import MasterFetchServer
+    srv = MasterFetchServer()
+    resp = asyncio.run(_ss(srv, "python asyncio", max_results=5, cache_ttl=0))
+    assert len(resp.results) == 5            # capped to max_results
+    assert resp.total_results == 5
+
+
+def test_smart_search_next_action_with_high_results(monkeypatch):
+    results = [
+        _raw("python asyncio guide", "https://b.com", "duckduckgo", 1, "asyncio event loop python"),
+        _raw("cooking recipes", "https://a.com", "bing", 2, "food recipes cooking"),
+    ]
+    reports = [EngineReport("duckduckgo", ok=True), EngineReport("bing", ok=True)]
+    _stub_multi(monkeypatch, results, reports)
+    from master_fetch.server import MasterFetchServer
+    srv = MasterFetchServer()
+    resp = asyncio.run(_ss(srv, "python asyncio", max_results=5, cache_ttl=0))
+    assert resp.results[0].fetch_relevance == "high"   # top of a ranked set is high
+    assert "high" in resp.next_action.lower()
+    assert "smart_fetch" in resp.next_action.lower()
+
+
+def test_smart_search_next_action_no_results_blocked(monkeypatch):
+    reports = [EngineReport("duckduckgo", blocked=True, error="timed out (8s)"),
+               EngineReport("bing", blocked=True, error="timed out (8s)")]
+    _stub_multi(monkeypatch, [], reports)
+    from master_fetch.server import MasterFetchServer
+    srv = MasterFetchServer()
+    resp = asyncio.run(_ss(srv, "obscure query xyzzy", max_results=5, cache_ttl=0))
+    assert resp.results == []
+    assert resp.engine_blocked == ["duckduckgo", "bing"]
+    low = resp.next_action.lower()
+    assert ("retry" in low) or ("proxy" in low) or ("no results" in low)
+
+
+def test_smart_search_summary_populated(monkeypatch):
+    results = [_raw("python asyncio", "https://b.com", "duckduckgo", 1, "asyncio python")]
+    reports = [EngineReport("duckduckgo", ok=True), EngineReport("wikipedia", ok=True)]
+    _stub_multi(monkeypatch, results, reports)
+    from master_fetch.server import MasterFetchServer
+    srv = MasterFetchServer()
+    resp = asyncio.run(_ss(srv, "python asyncio", max_results=5, cache_ttl=0))
+    assert resp.summary
+    assert "results" in resp.summary
+    assert "keyword" in resp.summary          # rerank mode present
+    assert "duckduckgo" in resp.summary       # engines present

@@ -190,7 +190,7 @@ class TestSearchCacheKey:
         calls = []
 
         async def fake_multi(query, max_results, *, engines, site, exclude_sites,
-                             region, freshness, server):
+                             region, freshness, page=0, server=None):
             calls.append(max_results)
             return [
                 RawResult(title=f"t{i}", url=f"https://u{i}.com", snippet="python asyncio",

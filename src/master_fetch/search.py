@@ -60,6 +60,8 @@ class SearchResponseModel(BaseModel):
     duration_ms: float = Field(default=0, description="Duration ms")
     error: str = Field(default="", description="Error message (empty = ok)")
     fetch_hint: str = Field(default="", description="How many high/med/low results + which to smart_fetch first")
+    summary: str = Field(default="", description="One-line status of the search (counts + engines + rerank).")
+    next_action: str = Field(default="", description="The obvious next call: fetch the high results, rephrase, retry, etc. Empty = nothing more to do.")
 
 
 class ResearchResult(SearchResult):
@@ -86,6 +88,7 @@ class ResearchResponseModel(BaseModel):
     error: str = Field(default="", description="Error message")
     fetch_hint: str = Field(default="", description="High/med/low breakdown of the full search")
     summary: str = Field(default="", description="One-line status of the research call")
+    next_action: str = Field(default="", description="The obvious next call: paginate a truncated result, fetch more, etc. Empty = nothing more to do.")
 
 
 # ─── tier derivation + hint ──────────────────────────────────────────────────
@@ -109,6 +112,37 @@ def compute_fetch_hint(results: list[SearchResult]) -> str:
     low = sum(1 for r in results if r.fetch_relevance == "low")
     return (f"{high} high, {med} med, {low} low - smart_fetch the 'high' results "
             f"first (then 'med' if needed). Skip 'low' unless nothing else helps.")
+
+
+def _search_summary(query: str, results: list[SearchResult], engines_used: list[str],
+                    rerank_mode: str) -> str:
+    """One-line status for the agent (counts + engines + rerank mode)."""
+    high = sum(1 for r in results if r.fetch_relevance == "high")
+    med = sum(1 for r in results if r.fetch_relevance == "med")
+    low = sum(1 for r in results if r.fetch_relevance == "low")
+    eng = ",".join(engines_used) if engines_used else "none"
+    return (f"Searched {query[:60]!r} -> {len(results)} results "
+            f"({high} high, {med} med, {low} low) from {eng}; rerank={rerank_mode}.")
+
+
+def _search_next_action(results: list[SearchResult], engine_blocked: list[str],
+                         error: str) -> str:
+    """The obvious next call, like smart_fetch's next_action. Agent-actionable."""
+    if not results:
+        if error and ("rate-limited" in error.lower() or "timed out" in error.lower() or engine_blocked):
+            return ("No results (engines rate-limited/timed out). Retry in a moment, "
+                    "or set HOUND_SEARCH_PROXY for sustained heavy use.")
+        return "No results. Rephrase (more specific / different terms) or try mode=neural for semantic matching."
+    high = [r for r in results if r.fetch_relevance == "high"]
+    if high:
+        base = f"Fetch the {len(high)} high-relevance result(s) via smart_fetch first; then 'med' if you need more."
+    elif any(r.fetch_relevance == "med" for r in results):
+        base = "No 'high' results; smart_fetch the top 'med' results, or rephrase for better matches."
+    else:
+        base = "Results are low-relevance; rephrase (more specific) or try mode=neural for semantic matching."
+    if engine_blocked:
+        base += " Some engines timed out; retry shortly for more recall."
+    return base
 
 
 # ─── filter validation (kept from v5; site/exclude/location/language/page) ────
@@ -200,18 +234,18 @@ def _expand_query(query: str, n: int) -> list[str]:
 
 
 async def _gather(query: str, expand: int, max_results: int, engines, site,
-                  exclude_sites, region, freshness, server):
+                  exclude_sites, region, freshness, page, server):
     """Run multi_search, with autoretrieval (expand>1): run sub-query variants in
     parallel across engines, then merge + dedup + filter. Returns (ranked, reports)."""
     if expand <= 1:
         return await multi_search(query, max_results, engines=engines, site=site,
                                   exclude_sites=exclude_sites, region=region,
-                                  freshness=freshness, server=server)
+                                  freshness=freshness, page=page, server=server)
     sub_queries = _expand_query(query, expand)
     subs = await asyncio.gather(*[
         multi_search(sq, max_results, engines=engines, site=site,
                      exclude_sites=exclude_sites, region=region,
-                     freshness=freshness, server=server)
+                     freshness=freshness, page=page, server=server)
         for sq in sub_queries
     ], return_exceptions=True)
     all_results: list[RawResult] = []
@@ -330,7 +364,8 @@ async def smart_search(
             return SearchResponseModel(
                 query=query, results=[], total_results=0,
                 duration_ms=(time() - t0) * 1000,
-                error="find_similar requires a url (pass url=, or the URL as query).")
+                error="find_similar requires a url (pass url=, or the URL as query).",
+                next_action="Pass url= with a page URL to find pages similar to it (or pass the URL as the query).")
 
     # region derives from location/language if not given (e.g. "US" -> "us-en").
     if region is None:
@@ -357,14 +392,19 @@ async def smart_search(
                         rerank_mode=data.get("rerank_mode", "keyword"),
                         fetch_hint=compute_fetch_hint(results_list),
                     )
+                _eu = data.get("engines_used", [])
+                _eb = data.get("engine_blocked", [])
+                _rm = data.get("rerank_mode", "keyword")
                 return SearchResponseModel(
                     query=cache_query, results=results_list,
                     total_results=len(results_list), cached=True,
-                    engines_used=data.get("engines_used", []),
-                    engine_blocked=data.get("engine_blocked", []),
-                    rerank_mode=data.get("rerank_mode", "keyword"),
+                    engines_used=_eu,
+                    engine_blocked=_eb,
+                    rerank_mode=_rm,
                     duration_ms=(time() - t0) * 1000,
                     fetch_hint=compute_fetch_hint(results_list),
+                    summary=_search_summary(cache_query, results_list, _eu, _rm),
+                    next_action=_search_next_action(results_list, _eb, ""),
                 )
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 logger.warning(f"Corrupt search cache for '{cache_query[:50]}': {e}")
@@ -377,17 +417,18 @@ async def smart_search(
     rerank_note = ""
 
     if mode == "find_similar":
-        src_title, src_text = await fetch_source_for_similar(find_sim_url)
+        src_title, src_text = await fetch_source_for_similar(find_sim_url, timeout=6)
         if not src_text:
             return SearchResponseModel(
                 query=find_sim_url, results=[], total_results=0,
                 duration_ms=(time() - t0) * 1000,
-                error="could not fetch the source URL for find_similar (blocked or offline).")
+                error="could not fetch the source URL for find_similar (blocked or offline).",
+                next_action="Retry, or smart_fetch the source URL first to confirm it is reachable, then call smart_search with mode=find_similar.")
         derived_query = src_title or " ".join(src_text.split()[:8]) or query
         try:
             ranked, reports = await _gather(
                 derived_query, 1, max_results, engines, site, exclude_sites,
-                region, freshness, server,
+                region, freshness, page, server,
             )
         except Exception as e:
             error = redact_api_key(str(e)[:200])
@@ -411,6 +452,7 @@ async def smart_search(
             if ranked and get_reranker() is None:
                 rerank_note = ("find_similar used keyword BM25 (neural unavailable). " +
                                (unavailable_reason() or "install hound-mcp[all]"))
+        ranked_list, scores = ranked_list[:max_results], scores[:max_results]
         results_list = _build_results(cache_query, ranked_list, scores)
         sim_note = f"find_similar to {find_sim_url} (searched: {derived_query[:60]!r})"
         fetch_hint = compute_fetch_hint(results_list)
@@ -421,7 +463,7 @@ async def smart_search(
         try:
             ranked, reports = await _gather(
                 query, expand, max_results, engines, site, exclude_sites,
-                region, freshness, server,
+                region, freshness, page, server,
             )
         except Exception as e:
             error = redact_api_key(str(e)[:200])
@@ -435,6 +477,7 @@ async def smart_search(
             )
 
         ranked_list, scores, rerank_used, rerank_note = _rank(query, ranked, mode)
+        ranked_list, scores = ranked_list[:max_results], scores[:max_results]
         results_list = _build_results(query, ranked_list, scores)
         fetch_hint = compute_fetch_hint(results_list)
         if rerank_note:
@@ -442,6 +485,14 @@ async def smart_search(
 
     engines_used = list(dict.fromkeys(r.name for r in reports if r.ok))
     engine_blocked = list(dict.fromkeys(r.name for r in reports if r.blocked))
+
+    # Agent QoL: when some engines were rate-limited / timed out but results
+    # came back from the rest, say so plainly so the agent knows the results are
+    # partial and that a retry may add recall (instead of looking like a failure).
+    if engine_blocked and results_list:
+        _blk_note = (f"Engines {', '.join(engine_blocked)} were rate-limited/timed out; "
+                     f"results are from the rest - retry shortly for more recall.")
+        fetch_hint = (fetch_hint + " | " + _blk_note) if fetch_hint else _blk_note
 
     # Cache successful results (+ engine metadata for cache hits)
     if cache_ttl > 0 and results_list:
@@ -467,6 +518,8 @@ async def smart_search(
         rerank_mode=rerank_used,
         duration_ms=(time() - t0) * 1000, error=error,
         fetch_hint=fetch_hint,
+        summary=_search_summary(cache_query, results_list, engines_used, rerank_used),
+        next_action=_search_next_action(results_list, engine_blocked, error),
     )
 
 
@@ -487,6 +540,7 @@ async def _research_fetch(
             res = await server.smart_fetch(
                 url=r.url, cache_ttl=max(cache_ttl, 3600),
                 max_content_chars=max_content_chars_per,
+                timeout=12000,
             )
             return ResearchResult(
                 title=r.title, url=r.url, snippet=r.snippet, source=r.source,
@@ -507,10 +561,20 @@ async def _research_fetch(
 
     fetched = await asyncio.gather(*[_fetch_one(r) for r in top])
     ok = sum(1 for r in fetched if r.content_ok)
+    trunc = [r for r in fetched if r.is_truncated]
     summary = (
         f"searched {query!r} -> {len(results)} results; fetched {len(fetched)} top "
         f"({ok} content_ok). Paginate any is_truncated result via smart_fetch with offset."
     )
+    if ok == 0 and fetched:
+        next_action = ("All fetches failed/blocked. Retry, or smart_fetch the top URL directly "
+                       "with force_fetcher='stealthy'.")
+    elif trunc:
+        next_action = (f"{len(trunc)} result(s) are truncated; smart_fetch them with offset=next_offset "
+                       f"for the rest of their content.")
+    else:
+        next_action = ("Synthesize from the fetched content; smart_fetch any remaining "
+                       "high-relevance URLs from the search if you need more.")
     return ResearchResponseModel(
         query=query, results=fetched, total_results=len(results),
         fetched_count=len(fetched), cached=cached,
@@ -518,4 +582,5 @@ async def _research_fetch(
         rerank_mode=rerank_mode,
         duration_ms=(time() - t0) * 1000, error=error,
         fetch_hint=fetch_hint or compute_fetch_hint(results), summary=summary,
+        next_action=next_action,
     )
