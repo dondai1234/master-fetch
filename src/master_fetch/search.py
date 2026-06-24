@@ -1,6 +1,6 @@
 """Hound local web search (v7 flagship: keyless, no-account, fully local).
 
-Scrapes public search engines (DuckDuckGo, Bing, Mojeek, Brave, Wikipedia) via the
+Scrapes public search engines (DuckDuckGo, Bing, Qwant, Wikipedia) via the
 hound-native engine layer in search_engines.py - no third-party API, no key, no
 account. Results are merged across engines, deduped by normalized URL, and
 ranked. Merging INDEPENDENT indexes gives a free authority signal: a URL
@@ -46,7 +46,7 @@ class SearchResult(BaseModel):
     title: str = Field(description="Result title")
     url: str = Field(description="Result URL")
     snippet: str = Field(default="", description="Result snippet from the engine")
-    source: str = Field(default="", description="Engine(s) that returned this result (duckduckgo/bing/mojeek/brave/wikipedia/yahoo). Multiple = cross-engine consensus.")
+    source: str = Field(default="", description="Engine(s) that returned this result (duckduckgo/bing/qwant/wikipedia/yahoo). Multiple = cross-engine consensus.")
     position: int = Field(default=0, description="1-indexed rank after merge + rerank")
     relevance_score: float = Field(default=0.0, description="0.0-1.0 relevance to the query (BM25 over title+snippet, or neural cross-encoder score in neural mode), boosted by cross-engine consensus. 1.0 = most relevant in this set.")
     fetch_relevance: str = Field(default="", description="high|med|low - relative relevance hint. smart_fetch what matches your need; the tiers rank results but a lower tier can be the right one - use your judgment.")
@@ -229,6 +229,23 @@ def _build_results(query: str, ranked: list[RawResult], scores: Optional[list[fl
     return out
 
 
+def _quality_filter(results: list[SearchResult], min_keep: int = 3) -> list[SearchResult]:
+    """Drop low-relevance results instead of padding to max_results with garbage.
+    A result is 'low' if fetch_relevance == 'low'. If dropping all low leaves at
+    least min_keep results, drop them; otherwise keep everything (don't go below
+    min_keep). Re-numbers positions 1..N after the drop. Niche/ambiguous queries
+    thus return fewer good results instead of 6 padded with garbage; clear queries
+    keep all (none are 'low'). No quality sacrifice - only garbage is dropped."""
+    if len(results) <= min_keep:
+        return results
+    kept = [r for r in results if r.fetch_relevance != "low"]
+    if len(kept) < min_keep:
+        return results  # not enough good ones -> keep all rather than go below min_keep
+    for i, r in enumerate(kept):
+        r.position = i + 1
+    return kept
+
+
 def _apply_consensus_boost(ranked: list[RawResult], scores: list[float]
                            ) -> tuple[list[RawResult], list[float]]:
     """Boost results returned by multiple independent engines (consensus). A free
@@ -276,7 +293,7 @@ async def smart_search(
     freshness: Optional[str] = None,
 ) -> SearchResponseModel:
     """Local keyless web search (no API key, no account). Engines (default
-    duckduckgo+bing+brave - three independent indexes (all HTTP, no browser);
+    duckduckgo+bing+qwant - three independent indexes (all HTTP, no browser);
     add 'wikipedia' or 'yahoo') are scraped in parallel, merged, deduped, and ranked. A URL returned
     by several independent engines is a consensus hit (engines_consensus field) and
     gets a ranking boost - a free authority signal. Returns URLs + ranking (NOT
@@ -399,6 +416,7 @@ async def smart_search(
         ranked_list, scores = _apply_consensus_boost(ranked_list, scores)
         ranked_list, scores = ranked_list[:max_results], scores[:max_results]
         results_list = _build_results(cache_query, ranked_list, scores, total_families)
+        results_list = _quality_filter(results_list)
         sim_note = f"find_similar to {find_sim_url} (searched: {derived_query[:60]!r})"
         fetch_hint = compute_fetch_hint(results_list)
         fetch_hint = (fetch_hint + " | " + sim_note) if fetch_hint else sim_note
@@ -428,6 +446,7 @@ async def smart_search(
         ranked_list, scores = _apply_consensus_boost(ranked_list, scores)
         ranked_list, scores = ranked_list[:max_results], scores[:max_results]
         results_list = _build_results(query, ranked_list, scores, total_families)
+        results_list = _quality_filter(results_list)
         fetch_hint = compute_fetch_hint(results_list)
         if rerank_note:
             fetch_hint = (fetch_hint + " | " + rerank_note) if fetch_hint else rerank_note

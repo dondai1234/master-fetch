@@ -1,13 +1,13 @@
 """Hound-native keyless search engine scrapers (v7 local search flagship).
 
 No API key, no account, no third-party service. Scrapes public search engines
-(DuckDuckGo, Bing, Brave, Wikipedia) over browser-impersonated HTTP
+(DuckDuckGo, Bing, Qwant, Wikipedia) over browser-impersonated HTTP
 (scrapling FetcherSession, a CORE dependency, so lean installs get working
 search), with escalation to hound's warm stealthy Patchright browser when an
 engine blocks. Google is NOT scraped: it CAPTCHAs even via the stealthy browser.
 
 Diversity + consensus (the rate-limit fix that costs zero speed): the default
-pool is three INDEPENDENT indexes (DuckDuckGo, Bing, Brave) run in
+pool is three INDEPENDENT indexes (DuckDuckGo, Bing, Qwant) run in
 parallel. They rarely all rate-limit at once (different clocks), so if 1-2 block
 the others carry genuinely different results. Merging independent indexes also
 yields a free authority signal: a URL returned by several engines is a CONSENSUS
@@ -59,14 +59,14 @@ from master_fetch.crawl import normalize_url
 
 logger = logging.getLogger("master-fetch.search_engines")
 
-DEFAULT_ENGINES = ("duckduckgo", "bing", "brave")
+DEFAULT_ENGINES = ("duckduckgo", "bing", "qwant")
 ENGINE_TIMEOUT = 12  # seconds per engine request
 CAPTCHA_MARKERS = ("captcha", "unusual traffic", "are you a robot", "sorry/image", "ddg-captcha", "blocked", "access denied", "to continue, please agree")
 
 # Per-engine pacing: min seconds between successive requests to the SAME engine.
 # Within a single search all engines fire in parallel (each engine sees 1 req),
 # so this only spreads same-engine bursts across successive searches.
-_PACE = {"duckduckgo": 1.2, "bing": 1.5, "brave": 1.2, "wikipedia": 0.3, "yahoo": 1.5}
+_PACE = {"duckduckgo": 1.2, "bing": 1.5, "qwant": 1.0, "wikipedia": 0.3, "yahoo": 1.5}
 _COOLDOWN_BASE = 15.0   # seconds; doubles each consecutive block
 _COOLDOWN_CAP = 120.0   # max cooldown
 _RECREATE_EVERY = 3     # recreate the persistent session every N consecutive blocks (burned session)
@@ -77,9 +77,9 @@ _RECREATE_EVERY = 3     # recreate the persistent session every N consecutive bl
 # search latency so it stays under typical MCP client timeouts. Tunable via the
 # HOUND_SEARCH_DEADLINE env var (seconds).
 try:
-    SEARCH_ENGINE_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "8") or "8")
+    SEARCH_ENGINE_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "5") or "5")
 except ValueError:
-    SEARCH_ENGINE_DEADLINE = 8.0
+    SEARCH_ENGINE_DEADLINE = 5.0
 
 # Power-user env knobs (all optional).
 _PROXY = os.environ.get("HOUND_SEARCH_PROXY") or None
@@ -96,36 +96,12 @@ _IMPERSONATE_POOL = ["chrome131", "chrome136", "chrome142", "edge", "safari184",
 # the SERL coordinator so they still get the pacer + circuit breaker. Brave is the
 # key one: independent 30B-page index, but curl_cffi returns curl error 23 on
 # search.brave.com while urllib returns 200 + parseable HTML.
-_URLLIB_ENGINES = {"brave"}
-_BRAVE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                 "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-
-def _urllib_fetch(url: str, timeout: int = ENGINE_TIMEOUT) -> tuple[Optional[str], int]:
-    """Plain stdlib HTTP GET for engines curl_cffi cannot reach (e.g. Brave).
-    No TLS impersonation, but these engines do not require it. Sync - call via
-    asyncio.to_thread. Returns (text, status); (None, 0) on transport error.
-    An HTTPError (4xx/5xx) still returns its body so _is_blocked can inspect it."""
-    import urllib.request, urllib.error, ssl
-    try:
-        ctx = ssl.create_default_context()
-        req = urllib.request.Request(url, headers=_BRAVE_HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            body = r.read()
-            charset = r.headers.get_content_charset() or "utf-8"
-            return body.decode(charset, errors="replace"), int(r.status)
-    except urllib.error.HTTPError as e:
-        try:
-            body = e.read().decode(errors="replace")
-        except Exception:
-            body = ""
-        return body, int(e.code)
-    except Exception:
-        return None, 0
+# Per-engine TLS fingerprint pin. Qwant's bot check (captcha-delivery) only
+# accepts the safari184 fingerprint under curl_cffi - chrome/edge get 403-captcha.
+# Other engines use the rotation pool (_IMPERSONATE_POOL). A pinned engine still
+# gets the pacer + circuit breaker; if the fingerprint stops working the circuit
+# breaker marks it blocked and the other engines carry (no failure).
+_ENGINE_IMPERSONATE = {"qwant": ["safari184"]}
 
 
 @dataclass
@@ -252,14 +228,6 @@ class _EngineCoordinator:
         server startup; errors are swallowed silently."""
         st = self.state(name)
         async with st.lock:
-            if name in _URLLIB_ENGINES:
-                # urllib is stateless (no TLS session to warm); a throwaway GET
-                # only primes DNS. Best-effort.
-                try:
-                    await asyncio.to_thread(_urllib_fetch, url, int(timeout))
-                except Exception:
-                    pass
-                return
             await self._ensure_session(st)
             if st.sess is None:
                 return
@@ -268,14 +236,12 @@ class _EngineCoordinator:
             except Exception:
                 pass  # warming is best-effort; a failure here is not a block
 
-    def _make_session(self):
+    def _make_session(self, name: str = ""):
         from scrapling.engines.static import FetcherSession
-        # impersonate list -> random fingerprint per request (rotation).
-        # retries=2 handles transient connection errors; scrapling does NOT retry
-        # on HTTP 429 (a 429 is a successful response), so the circuit breaker
-        # owns backoff for rate-limits.
+        # Per-engine fingerprint pin (see _ENGINE_IMPERSONATE); default = rotation pool.
+        imp = _ENGINE_IMPERSONATE.get(name, _IMPERSONATE_POOL)
         return FetcherSession(
-            impersonate=_IMPERSONATE_POOL, proxy=_PROXY,
+            impersonate=imp, proxy=_PROXY,
             stealthy_headers=True, retries=2, retry_delay=1,
             follow_redirects="safe", timeout=ENGINE_TIMEOUT,
         )
@@ -293,7 +259,7 @@ class _EngineCoordinator:
             st.recreate = False
         if not st.created or st.sess is None:
             try:
-                st.cm = self._make_session()
+                st.cm = self._make_session(st.name)
                 st.sess = await st.cm.__aenter__()
                 st.created = True
             except Exception as e:
@@ -328,35 +294,29 @@ class _EngineCoordinator:
             text: Optional[str] = None
             status = 0
             try:
-                if name in _URLLIB_ENGINES:
-                    # urllib transport (curl_cffi cannot reach these hosts).
-                    text, status = await asyncio.to_thread(_urllib_fetch, url, timeout)
-                    blocked = _is_blocked(status, text or "")
-                    ra = 0.0
-                else:
-                    await self._ensure_session(st)
-                    if st.sess is not None:
-                        if method == "POST" and form is not None:
-                            resp = await st.sess.post(url, data=form, timeout=timeout)
-                        else:
-                            resp = await st.sess.get(url, timeout=timeout)
+                await self._ensure_session(st)
+                if st.sess is not None:
+                    if method == "POST" and form is not None:
+                        resp = await st.sess.post(url, data=form, timeout=timeout)
                     else:
-                        # Per-request fallback if the persistent session would not create.
-                        cm = self._make_session()
-                        s2 = await cm.__aenter__()
-                        try:
-                            if method == "POST" and form is not None:
-                                resp = await s2.post(url, data=form, timeout=timeout)
-                            else:
-                                resp = await s2.get(url, timeout=timeout)
-                        finally:
-                            await cm.__aexit__(None, None, None)
-                    status = getattr(resp, "status", 0) or 0
-                    body = getattr(resp, "body", None)
-                    if body:
-                        text = body.decode(getattr(resp, "encoding", None) or "utf-8", errors="replace")
-                    blocked = _is_blocked(status, text or "")
-                    ra = _retry_after(resp)
+                        resp = await st.sess.get(url, timeout=timeout)
+                else:
+                    # Per-request fallback if the persistent session would not create.
+                    cm = self._make_session(name)
+                    s2 = await cm.__aenter__()
+                    try:
+                        if method == "POST" and form is not None:
+                            resp = await s2.post(url, data=form, timeout=timeout)
+                        else:
+                            resp = await s2.get(url, timeout=timeout)
+                    finally:
+                        await cm.__aexit__(None, None, None)
+                status = getattr(resp, "status", 0) or 0
+                body = getattr(resp, "body", None)
+                if body:
+                    text = body.decode(getattr(resp, "encoding", None) or "utf-8", errors="replace")
+                blocked = _is_blocked(status, text or "")
+                ra = _retry_after(resp)
             except Exception as e:
                 logger.debug(f"engine {name} GET failed: {e}")
                 return None, 0, False, False  # transport error, not a rate-limit
@@ -411,7 +371,7 @@ async def close_search_engines() -> None:
 _WARMUP_URLS = {
     "duckduckgo": "https://html.duckduckgo.com/html/?q=test",
     "bing": "https://www.bing.com/search?q=test",
-    "brave": "https://search.brave.com/search?q=test&source=web",
+    "qwant": "https://api.qwant.com/v3/search/web?q=test&count=10&locale=en_US&offset=0&device=desktop&safesearch=0&tgp=1",
     "wikipedia": "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=test&srlimit=1&srprop=snippet&format=json&utf8=1",
 }
 
@@ -477,11 +437,6 @@ async def search_ddg(query: str, max_results: int, *, region: str = "us-en",
     url = f"https://html.duckduckgo.com/html/?{params}"
     text, status, blocked, cooling = await _engine_get("duckduckgo", url)
     rep = EngineReport(name="duckduckgo")
-    if blocked and not cooling and server is not None:
-        escalated = await _stealthy_html(server, url)
-        if escalated:
-            text, blocked = escalated, False
-            _ENGINES_COORD.reset("duckduckgo")
     if not text:
         rep.blocked = blocked
         rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('duckduckgo'))}s left)"
@@ -552,11 +507,6 @@ async def search_bing(query: str, max_results: int, *, region: str = "us-en",
     url = f"https://www.bing.com/search?{params}"
     text, status, blocked, cooling = await _engine_get("bing", url)
     rep = EngineReport(name="bing")
-    if blocked and not cooling and server is not None:
-        escalated = await _stealthy_html(server, url)
-        if escalated:
-            text, blocked = escalated, False
-            _ENGINES_COORD.reset("bing")
     if not text:
         rep.blocked = blocked
         rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('bing'))}s left)"
@@ -570,61 +520,78 @@ async def search_bing(query: str, max_results: int, *, region: str = "us-en",
     return results, rep
 
 
-# ─── Brave (independent 30B-page index, keyless web UI) ──────────────────────
+# ─── Qwant (independent index, keyless JSON API) ─────────────────────────────
 
-def _parse_brave(html: str) -> list[RawResult]:
-    soup = BeautifulSoup(html, "lxml")
+def _qwant_locale(region: str) -> str:
+    # region is like 'us-en' (country-lang); Qwant wants 'en_US' (lang_COUNTRY).
+    if region and "-" in region:
+        parts = region.split("-")
+        if len(parts) >= 2:
+            return f"{parts[-1]}_{parts[0]}".upper()
+    return "EN_US"
+
+
+def _parse_qwant_json(text: str, max_results: int) -> list[RawResult]:
+    """Parse Qwant's JSON API response: data.result.items.mainline[] -> web items."""
+    import json
     out: list[RawResult] = []
-    # Brave SERP: each organic result is a div.snippet with data-type="web"; the
-    # result link is a direct http URL (no redirect wrapper). Selectors verified
-    # against the webserp reference impl (MIT) + live.
-    for i, el in enumerate(soup.select('div.snippet[data-type="web"]')):
-        a = el.select_one("a[href]")
-        if not a:
-            continue
-        href = a.get("href", "") or ""
-        if not href.startswith("http"):
-            continue
-        title_el = el.select_one(".snippet-title") or el.select_one(".title")
-        title = title_el.get_text(" ", strip=True) if title_el else a.get_text(" ", strip=True)
-        if not title:
-            continue
-        desc_el = el.select_one(".generic-snippet") or el.select_one(".snippet-description")
-        snippet = desc_el.get_text(" ", strip=True) if desc_el else ""
-        out.append(RawResult(title=title, url=href, snippet=snippet, source="brave", position=i + 1))
+    try:
+        data = json.loads(text)
+    except Exception:
+        return out
+    if data.get("status") != "success":
+        return out  # error_code 24 (rate-limit) / captcha / 403 -> caller treats as blocked
+    mainline = data.get("data", {}).get("result", {}).get("items", {}).get("mainline", [])
+    for row in mainline:
+        if row.get("type") != "web":
+            continue  # skip ads / images / videos / news rows
+        for item in row.get("items", []):
+            title = (item.get("title") or "").strip()
+            url = (item.get("url") or "").strip()
+            if not title or not url or not url.startswith("http"):
+                continue
+            snippet = (item.get("desc") or "").strip()
+            out.append(RawResult(title=title, url=url, snippet=snippet, source="qwant", position=len(out) + 1))
+            if len(out) >= max_results:
+                return out
     return out
 
 
-async def search_brave(query: str, max_results: int, *, region: str = "us-en",
+async def search_qwant(query: str, max_results: int, *, region: str = "us-en",
                        freshness: Optional[str] = None, page: int = 0,
                        server=None) -> tuple[list[RawResult], EngineReport]:
-    # Brave: independent index (30B pages). The Brave Search API free tier was
-    # KILLED Feb 2026 (now metered billing + card + attribution), so hound scrapes
-    # the keyless web UI (search.brave.com/search) instead. Freshness via &tf=
-    # (d/w/m/y). Pagination via &offset=. safesearch=off for unfiltered results.
-    params = f"q={quote(query)}&source=web&safesearch=off"
-    if freshness in ("day", "week", "month", "year"):
-        params += f"&tf={freshness[0]}"
-    if page > 0:
-        params += f"&offset={page * max_results}"
-    url = f"https://search.brave.com/search?{params}"
-    text, status, blocked, cooling = await _engine_get("brave", url)
-    rep = EngineReport(name="brave")
-    if blocked and not cooling and server is not None:
-        escalated = await _stealthy_html(server, url)
-        if escalated:
-            text, blocked = escalated, False
-            _ENGINES_COORD.reset("brave")
+    # Qwant: keyless JSON API (api.qwant.com/v3/search/web). Own index + Bing feed
+    # = independent from DDG. Much more rate-limit-tolerant than HTML-scraping
+    # engines (10/10 rapid calls, 0 blocks in live testing). curl_cffi passes Qwant's bot check ONLY with
+    # the safari184 fingerprint, so the coordinator pins it via _ENGINE_IMPERSONATE.
+    # Clean JSON parsing (no fragile HTML selectors). No native freshness param;
+    # pagination via &offset=. No per-engine stealthy escalation (keeps search fast;
+    # the search-wide last-resort in multi_search covers the all-blocked case).
+    locale = _qwant_locale(region)
+    # Qwant's API REQUIRES count=10 exactly (any other value -> 400 "count must be
+    # equal to 10"). Fetch 10, then _parse_qwant_json slices to max_results.
+    args = (f"q={quote(query)}&count=10&locale={locale}"
+            f"&offset={page * 10}&device=desktop&safesearch=0&tgp=1")
+    url = f"https://api.qwant.com/v3/search/web?{args}"
+    text, status, blocked, cooling = await _engine_get("qwant", url)
+    rep = EngineReport(name="qwant")
     if not text:
         rep.blocked = blocked
-        rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('brave'))}s left)"
+        rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('qwant'))}s left)"
                      if cooling else f"no response (status {status})")
         return [], rep
-    results = _parse_brave(text)[:max_results]
+    results = _parse_qwant_json(text, max_results)
     rep.ok = bool(results)
-    rep.blocked = (not results) and blocked
     if not results:
-        rep.error = "no results parsed"
+        # Qwant sometimes returns HTTP 200 with a non-success JSON body on
+        # rate-limit/captcha (error_code 24 / captchaUrl). Detect + mark blocked.
+        low = text[:600].lower()
+        if ("captcha" in low or '"status":"error"' in low or '"error_code"' in low
+                or status in (403, 429, 202)):
+            rep.blocked = True
+            rep.error = "qwant rate-limit/captcha (no results)"
+        else:
+            rep.error = "no results parsed"
     return results, rep
 
 
@@ -674,11 +641,6 @@ async def search_yahoo(query: str, max_results: int, *, region: str = "us-en",
     url = f"https://search.yahoo.com/search?{params}"
     text, status, blocked, cooling = await _engine_get("yahoo", url)
     rep = EngineReport(name="yahoo")
-    if blocked and not cooling and server is not None:
-        escalated = await _stealthy_html(server, url)
-        if escalated:
-            text, blocked = escalated, False
-            _ENGINES_COORD.reset("yahoo")
     if not text:
         rep.blocked = blocked
         rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('yahoo'))}s left)"
@@ -738,14 +700,14 @@ async def search_wikipedia(query: str, max_results: int, *, region: str = "us-en
 
 # Each engine's independent index "family". Consensus counts DISTINCT families
 # that returned a URL (a free authority signal): bing+yahoo agreeing = 1 family
-# (correlated Bing feed, weak); bing+brave+wikipedia = 3 families (independent, strong).
+# (correlated Bing feed, weak); bing+qwant+wikipedia = 3 families (independent, strong).
 _INDEX_FAMILY = {"duckduckgo": "duckduckgo", "bing": "bing", "yahoo": "bing",
-"brave": "brave", "wikipedia": "wikipedia"}
+"qwant": "qwant", "wikipedia": "wikipedia"}
 
 _ENGINES = {
     "duckduckgo": search_ddg,
     "bing": search_bing,
-    "brave": search_brave,
+    "qwant": search_qwant,
     "yahoo": search_yahoo,
     "wikipedia": search_wikipedia,
 }
@@ -850,7 +812,7 @@ async def multi_search(
     """Run the chosen engines in parallel, merge, dedup, BM25-rerank.
 
     Returns (ranked_results, engine_reports). engines defaults to the four
-    independent indexes (duckduckgo, bing, brave). Unknown engine names
+    independent indexes (duckduckgo, bing, qwant). Unknown engine names
     are ignored. A URL returned by several engines carries a consensus boost
     (see merge_dedupe) - a free authority signal from merging independent indexes.
     """
@@ -862,6 +824,10 @@ async def multi_search(
         # Hard per-engine deadline: a slow / blocked / stealthy-escalating engine
         # is cut off so it can never hang the whole search. The agent gets results
         # from the engines that finished; the cut one is reported as timed out.
+        # Hard per-engine deadline: a slow / blocked engine is cut off so it can
+        # never hang the whole search. (No per-engine stealthy escalation - that
+        # used to add 2-5s on every block; the search-wide last-resort below
+        # covers the rare all-blocked case without taxing the common case.)
         try:
             return await asyncio.wait_for(
                 _ENGINES[name](query, max_results, region=region, freshness=freshness,
@@ -886,6 +852,34 @@ async def multi_search(
             reports.append(rep)
             cleaned.append((results, rep))
     merged = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
+
+    # Search-wide last resort: if EVERY engine came back empty (all blocked /
+    # no results) and a stealthy browser is available, make ONE stealthy DDG
+    # SERP fetch as a hail-mary. This preserves the anti-bot flagship move
+    # for the rare all-blocked case WITHOUT the per-engine stealthy escalation
+    # that used to add 2-5s on every single block (the common case: one engine
+    # blocks, the others carry, no stealthy needed -> no latency cut).
+    if not merged and server is not None and any(r.blocked for _, r in cleaned):
+        lr_params = f"q={quote(query)}&kl={quote(region)}"
+        if freshness in ("day", "week", "month", "year"):
+            lr_params += f"&df={freshness[0]}"
+        if page > 0:
+            lr_params += f"&s={page * max_results}"
+        try:
+            lr_html = await asyncio.wait_for(
+                _stealthy_html(server, f"https://html.duckduckgo.com/html/?{lr_params}"),
+                timeout=SEARCH_ENGINE_DEADLINE)
+            if lr_html:
+                lr_results = _parse_ddg(lr_html)[:max_results]
+                if lr_results:
+                    lr_rep = EngineReport(name="duckduckgo", ok=True)
+                    cleaned.append((lr_results, lr_rep))
+                    reports.append(lr_rep)
+                    merged = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
+        except asyncio.TimeoutError:
+            pass
+        except Exception as e:
+            logger.debug(f"last-resort stealthy ddg failed: {e}")
 
     ranked = merged  # merge_dedupe already sorts by cross-engine consensus then engine position
     return ranked, reports

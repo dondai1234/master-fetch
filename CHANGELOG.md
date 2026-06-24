@@ -1,5 +1,50 @@
 # Changelog
 
+## [7.3.0] - 2026-06-24
+
+### speed + smart rate-limit avoidance + Qwant (replaces Brave)
+
+Dondai: Brave rate-limits too fast to be usable; the per-engine stealthy
+escalation adds a 0.6-1s+ cut when an engine blocks; want lower rate-limiting,
+faster search, less garbage, and a smart (not brute-force) rate-limit bypass.
+
+#### Engines
+- **Qwant REPLACES Brave** as the third default engine. Qwant is a keyless JSON
+  API (`api.qwant.com/v3/search/web`, own index + Bing feed = independent from
+  DDG). Clean JSON parsing (no fragile HTML selectors). MUCH more rate-limit-
+  tolerant than Brave: 25 rapid back-to-back searches, Qwant contributed 25/25,
+  zero blocks (Brave blocked in ~10). curl_cffi passes Qwant's bot check only
+  with the `safari184` fingerprint (chrome/edge get 403-captcha), so the SERL
+  coordinator pins safari184 for qwant via `_ENGINE_IMPERSONATE`. Qwant's API
+  requires `count=10` exactly (a real gotcha: any other value -> 400).
+- **Brave DROPPED entirely** (rate-limits too fast per Dondai; urllib, no TLS
+  impersonation). The `_URLLIB_ENGINES` / `_urllib_fetch` urllib transport is
+  gone. `DEFAULT_ENGINES = (duckduckgo, bing, qwant)`.
+
+#### Smart rate-limit bypass (not brute force)
+- **Per-engine stealthy escalation REMOVED.** Previously when DDG/Bing got a
+  403/202, hound escalated THAT engine to the warm stealthy browser (a 2-5s
+  render) — the latency cut Dondai saw. Now a rate-limited engine just returns
+  its 403 in <1s and the other engines carry; no slow stealthy path in the
+  common case. The stealthy browser is now a **search-wide last resort only**
+  (one stealthy DDG fetch, fired solely when ALL engines blocked and 0 results —
+  rare), preserving the anti-bot flagship move without taxing the common case.
+- **Hard per-engine deadline 8s -> 5s** (engines normally return 1-2s; the
+  deadline is just a cap for the rare hang).
+
+#### Smarter search / less garbage
+- **Quality filter**: drop low-relevance results (`fetch_relevance == 'low'`)
+  instead of padding to max_results with garbage, when at least 3 good results
+  remain. Niche/ambiguous queries return fewer good results, not 6 padded with
+  garbage; clear queries keep all (none are 'low').
+
+#### Robustness proven live
+- 25 rapid successive searches: all 3 engines contributed 25/25, zero blocks,
+  every search got results, max latency 3.8s (most 1.3-2.3s), no stealthy cut.
+- Simulated block test: Qwant blocked (cooldown) -> DDG+Bing carried (6 results,
+  no failure) -> Qwant rejoined after cooldown. Full block -> failover ->
+  recovery cycle works. 616 tests pass.
+
 ## [7.2.0] - 2026-06-24
 
 ### diverse independent search pool + cross-engine consensus (rate-limit fix)

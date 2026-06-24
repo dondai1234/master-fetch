@@ -736,27 +736,55 @@ accuracy; test the rate-limiting hard.
   'jaguar' (ambiguous) 0.7-1.0, 'rust tokio runtime' (clear) 0.833-1.0 (narrow is
   honest - all results relevant); consensus surfaces tokio.rs + github to #1-2.
 
+### v7.3 (SHIPPED 2026-06-24 as v7.3.0) — speed + smart rate-limit avoidance + Qwant
+
+Dondai: Brave rate-limits too fast; per-engine stealthy escalation adds a
+0.6-1s+ cut on block; want lower rate-limiting, faster search, less garbage,
+smart (not brute-force) rate-limit bypass. Researched engine landscape: Qwant
+(keyless JSON API, own index, tolerant), Yandex (aggressive captcha - dead),
+Ecosia (own index now - future option).
+
+- **Qwant REPLACES Brave** as the third default. Keyless JSON API
+  (`api.qwant.com/v3/search/web`), scrapling with safari184 PINNED (chrome/edge
+  get 403-captcha, safari passes) via `_ENGINE_IMPERSONATE`. MUCH more tolerant:
+  25 rapid searches, 25/25, 0 blocks (Brave blocked ~10). Clean JSON parsing.
+  GOTCHA: Qwant API requires `count=10` exactly (any other value -> 400 "count
+  must be equal to 10") - fetch 10, slice to max_results in the parser.
+- **Brave DROPPED entirely** + the `_URLLIB_ENGINES`/`_urllib_fetch` urllib
+  transport removed. `DEFAULT_ENGINES = (duckduckgo, bing, qwant)`.
+- **Per-engine stealthy escalation REMOVED** (was the 0.6-1s+ cut: a blocked
+  engine triggered a 2-5s browser render). Now a blocked engine 403s in <1s +
+  others carry; stealthy is a search-wide LAST RESORT only (one stealthy DDG fetch
+  when ALL engines blocked + 0 results, rare).
+- **Hard deadline 8s -> 5s.** **Quality filter**: drop low-relevance results
+  (fetch_relevance=='low') when >=3 good remain (less garbage; niche queries
+  return fewer good results, not 6 padded).
+- ROBUSTNESS LIVE-PROVEN: 25 rapid searches all-3-engines 25/25 0-blocks
+  all-got-results max 3.8s; simulated Qwant block -> ddg+bing carried (6 res, no
+  failure) -> Qwant rejoined after cooldown. 616 tests pass. Cache key v4 (unchanged).
+
 ## Dev notes / API quirks
 
-- **v7.2 engine transport quirks (search_engines.py):**
-  - **Brave (search.brave.com) FAILS under curl_cffi/scrapling** with curl error
-    23 (CURLE_WRITE_ERROR) on EVERY impersonate fingerprint (chrome/edge/safari/
-    firefox), but stdlib `urllib` returns 200 + 20 parseable results (no TLS
-    impersonation needed). So Brave uses a urllib transport (`_URLLIB_ENGINES`,
-    `_urllib_fetch` via `asyncio.to_thread`) INSIDE the SERL coordinator (keeps
-    the pacer + circuit breaker). urllib is stdlib -> lean installs get Brave.
-  - **Mojeek 403s ALL HTTP** (scrapling + plain requests + Mozilla UA) AND 403s
-    the stealthy Patchright browser (`<title>403 - Forbidden</title>`) - IP-blocked
-    in this environment. Dropped entirely; only a real browser on a clean IP works.
-  - **Brave Search API free tier was KILLED Feb 2026** (now metered billing + card
-    + attribution requirement) - that's why hound scrapes the keyless web UI, not
-    the API. Bing Search API was also killed by Microsoft summer 2025.
-  - **Brave selectors** (verified live): `div.snippet[data-type="web"]` -> `a[href]`
-    (direct URL, no redirect), `.snippet-title`/`.title`, `.generic-snippet`. URL
-    params: `q=`, `source=web`, `safesearch=off`, `tf={d|w|m|y}` (freshness),
-    `offset=` (pagination).
-  - **Yahoo selectors**: `div.algo-sr`/`div.algo` -> `a[href]` (RU= redirect,
-    decode `/RU=ENCODED/RK=`), `h3.title`, `.compText`. Bing-feed (redundancy).
+- **v7.2/v7.3 engine transport quirks (search_engines.py):**
+  - **Qwant** (api.qwant.com/v3/search/web) is a keyless JSON API (own index +
+    Bing feed). curl_cffi passes its bot check (captcha-delivery) ONLY with the
+    `safari184` fingerprint (chrome/edge -> 403-captcha); pinned via
+    `_ENGINE_IMPERSONATE = {"qwant": ["safari184"]}`. The coordinator's
+    `_make_session(name)` uses the per-engine pin. JSON parse:
+    `data.result.items.mainline[]` -> items with title/url/desc (skip type!=web
+    + ads). **REQUIRES count=10 exactly** (else 400 "count must be equal to 10").
+    locale: region 'us-en' -> 'en_US' (lang_COUNTRY). Much more rate-limit-
+    tolerant than Brave (25/25 rapid, 0 blocks) but burst-sensitive: rapid
+    hammering can temporarily flag the IP (lifts after a pause); the circuit
+    breaker handles it (cooldown + retry + failover to ddg+bing).
+  - **Brave REMOVED** (v7.3): rate-limited too fast (urllib, no TLS
+    impersonation). The urllib transport (`_URLLIB_ENGINES`/`_urllib_fetch`) is
+    gone. (v7.2 note: Brave failed under curl_cffi with curl error 23 on every
+    fingerprint while urllib worked - but urllib rate-limited fast, so dropped.)
+  - **Brave Search API free tier was KILLED Feb 2026** (metered billing + card +
+    attribution); Bing Search API killed by Microsoft summer 2025. Yandex is
+    aggressively captcha'd (dead). Ecosia now has its own index (Staan) - future
+    option. Mojeek 403s all HTTP + the stealthy browser (dead).
 
 - **Dev venv ships a BUILT WHEEL, not an editable install**: master-fetch's dev
   venv (`.venv/`) contains a BUILT WHEEL in `site-packages/`, NOT an editable

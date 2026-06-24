@@ -3,7 +3,7 @@
 No network: SERP parsers are fed fixture HTML, the Wikipedia JSON path is fed
 canned JSON, and multi_search is run against stubbed engine funcs. Verifies
 DDG uddg-redirect decoding, Bing <cite> breadcrumb reconstruction,
-Brave/Yahoo parsing, cross-engine consensus merge, site filters, and the
+Qwant/Yahoo parsing, cross-engine consensus merge, site filters, and the
 multi-engine orchestrator.
 """
 
@@ -15,7 +15,7 @@ import pytest
 from master_fetch import search_engines as se
 from master_fetch.search_engines import (
     RawResult, EngineReport, _ddg_real_url, _bing_real_url, _parse_ddg,
-    _parse_bing, _parse_brave, _parse_yahoo, _yahoo_real_url,
+    _parse_bing, _parse_qwant_json, _qwant_locale, _parse_yahoo, _yahoo_real_url,
     merge_dedupe, multi_search,
 )
 
@@ -101,26 +101,38 @@ def test_parse_bing_skips_when_no_cite():
     assert _parse_bing(html) == []
 
 
-# ─── Brave (independent index, data-type="web" snippets) ─────────────────────
+# ─── Qwant (independent index, keyless JSON API) ─────────────────────────────
 
-def test_parse_brave_extracts_web_snippets_only():
-    html = """
-    <div class="snippet" data-type="web">
-      <a href="https://rust-lang.org/">Rust</a>
-      <div class="snippet-title">The Rust Programming Language</div>
-      <div class="generic-snippet">A language empowering everyone to build reliable software.</div>
-    </div>
-    <div class="snippet" data-type="news">
-      <a href="https://news.example.com/">News</a>
-      <div class="snippet-title">News result (must be skipped)</div>
-    </div>
-    """
-    out = _parse_brave(html)
-    assert len(out) == 1  # only data-type="web" is organic
-    assert out[0].title == "The Rust Programming Language"
-    assert out[0].url == "https://rust-lang.org/"
-    assert out[0].source == "brave"
-    assert "reliable software" in out[0].snippet
+def test_qwant_locale_maps_region():
+    # region 'us-en' (country-lang) -> Qwant locale 'en_US' (lang_COUNTRY, upper).
+    assert _qwant_locale("us-en") == "EN_US"
+    assert _qwant_locale("fr-fr") == "FR_FR"
+    assert _qwant_locale("de-de") == "DE_DE"
+    assert _qwant_locale("") == "EN_US"  # fallback (uppercase, consistent)
+
+
+def test_parse_qwant_json_extracts_web_items_only():
+    payload = (
+        '{"status":"success","data":{"result":{"items":{"mainline":['
+        '{"type":"web","items":['
+        '{"title":"Tokio","url":"https://tokio.rs/","desc":"An async Rust runtime."},'
+        '{"title":"GitHub","url":"https://github.com/tokio-rs/tokio","desc":"tokio repo"}'
+        ']},'
+        '{"type":"ads","items":[{"title":"Ad","url":"https://ad.com/","desc":"buy now"}]}'
+        ']}}}}'
+    )
+    out = _parse_qwant_json(payload, 10)
+    assert len(out) == 2  # the ads row is skipped
+    assert out[0].title == "Tokio" and out[0].url == "https://tokio.rs/"
+    assert out[0].source == "qwant" and out[0].snippet == "An async Rust runtime."
+    assert out[1].url == "https://github.com/tokio-rs/tokio"
+
+
+def test_parse_qwant_json_non_success_returns_empty():
+    # rate-limit (error_code 24) / captcha / 403 -> status != "success" -> empty;
+    # the caller treats an empty parse + a captcha/error body as blocked.
+    assert _parse_qwant_json('{"status":"error","data":{"error_code":24}}', 10) == []
+    assert _parse_qwant_json("not json at all", 10) == []
 
 
 # ─── Yahoo (Bing-feed; RU= redirect decoding) ────────────────────────────────
@@ -153,20 +165,20 @@ def test_parse_yahoo_extracts_algo_results():
 
 def test_merge_consensus_counts_distinct_index_families():
     # bing + yahoo both return the same URL = 1 family (Bing feed, correlated).
-    # mojeek + brave agreeing on a different URL = 2 independent families.
+    # wikipedia + qwant agreeing on a different URL = 2 independent families.
     per = [
         ([_rr("A", "https://same.com", "bing", 1, "s")], EngineReport("bing", ok=True)),
         ([_rr("A", "https://same.com", "yahoo", 1, "s")], EngineReport("yahoo", ok=True)),
-        ([_rr("B", "https://diff.com", "mojeek", 1, "s")], EngineReport("mojeek", ok=True)),
-        ([_rr("B", "https://diff.com", "brave", 1, "s")], EngineReport("brave", ok=True)),
+        ([_rr("B", "https://diff.com", "wikipedia", 1, "s")], EngineReport("wikipedia", ok=True)),
+        ([_rr("B", "https://diff.com", "qwant", 1, "s")], EngineReport("qwant", ok=True)),
     ]
     merged = {r.url: r for r in merge_dedupe(per, 10)}
     # bing+yahoo = 1 distinct family (both map to the 'bing' family).
     assert merged["https://same.com"].consensus == 1
     assert set(merged["https://same.com"].sources) == {"bing", "yahoo"}
-    # mojeek+brave = 2 distinct independent families.
+    # wikipedia+qwant = 2 distinct independent families.
     assert merged["https://diff.com"].consensus == 2
-    assert set(merged["https://diff.com"].sources) == {"mojeek", "brave"}
+    assert set(merged["https://diff.com"].sources) == {"wikipedia", "qwant"}
 
 
 def test_merge_consensus_surfaces_multi_engine_hits_first():
@@ -176,7 +188,7 @@ def test_merge_consensus_surfaces_multi_engine_hits_first():
         ([_rr("Solo", "https://solo.com", "duckduckgo", 1, "s")], EngineReport("duckduckgo", ok=True)),
         ([_rr("Big", "https://big.com", "duckduckgo", 1, "s")], EngineReport("duckduckgo", ok=True)),
         ([_rr("Big", "https://big.com", "bing", 1, "s")], EngineReport("bing", ok=True)),
-        ([_rr("Big", "https://big.com", "mojeek", 1, "s")], EngineReport("mojeek", ok=True)),
+        ([_rr("Big", "https://big.com", "qwant", 1, "s")], EngineReport("qwant", ok=True)),
     ]
     merged = merge_dedupe(per, 10)
     assert merged[0].url == "https://big.com"  # 3-family consensus surfaces first
@@ -340,7 +352,7 @@ def fresh_coord(monkeypatch):
     """Reset the coordinator state and stub session creation for each test."""
     se._ENGINES_COORD.states.clear()
     holder = {}
-    def make_session():
+    def make_session(name=""):
         return _FakeCM(holder["sess"])
     monkeypatch.setattr(se._ENGINES_COORD, "_make_session", make_session)
     return holder
@@ -538,11 +550,11 @@ def test_prewarm_search_engines_warms_each_default_engine(monkeypatch):
     monkeypatch.setattr(se._ENGINES_COORD, "warmup", fake_warmup)
     asyncio.run(se.prewarm_search_engines())
     names = {n for n, _ in warmed}
-    assert names == {"duckduckgo", "bing", "brave"}  # 3 independent HTTP defaults (mojeek is opt-in)
+    assert names == {"duckduckgo", "bing", "qwant"}  # 3 independent HTTP defaults
     # each warmup URL hits the engine's real search host
     assert all("duckduckgo" in u for n, u in warmed if n == "duckduckgo")
     assert all("bing.com" in u for n, u in warmed if n == "bing")
-    assert all("brave" in u for n, u in warmed if n == "brave")
+    assert all("qwant" in u for n, u in warmed if n == "qwant")
 
 
 def test_prewarm_search_engines_never_raises(monkeypatch):
