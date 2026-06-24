@@ -243,8 +243,8 @@ def test_smart_search_next_action_with_high_results(monkeypatch):
     srv = MasterFetchServer()
     resp = asyncio.run(_ss(srv, "python asyncio", max_results=5, cache_ttl=0))
     assert resp.results[0].fetch_relevance == "high"   # top of a ranked set is high
-    assert "high" in resp.next_action.lower()
     assert "smart_fetch" in resp.next_action.lower()
+    assert "judgment" in resp.next_action.lower()      # judgment-empowering, not a rigid 'fetch N'
 
 
 def test_smart_search_next_action_no_results_blocked(monkeypatch):

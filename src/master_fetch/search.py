@@ -46,7 +46,7 @@ class SearchResult(BaseModel):
     source: str = Field(default="", description="Engine that returned this result (duckduckgo/bing/google/wikipedia)")
     position: int = Field(default=0, description="1-indexed rank after merge + rerank")
     relevance_score: float = Field(default=0.0, description="0.0-1.0 relevance to the query (BM25 over title+snippet, or neural cross-encoder score in neural mode). 1.0 = most relevant in this set.")
-    fetch_relevance: str = Field(default="", description="high|med|low - fetch 'high' first (1-2), then 'med' if needed, skip 'low'.")
+    fetch_relevance: str = Field(default="", description="high|med|low - relative relevance hint. smart_fetch what matches your need; the tiers rank results but a lower tier can be the right one - use your judgment.")
 
 
 class SearchResponseModel(BaseModel):
@@ -83,8 +83,8 @@ def compute_fetch_hint(results: list[SearchResult]) -> str:
     high = sum(1 for r in results if r.fetch_relevance == "high")
     med = sum(1 for r in results if r.fetch_relevance == "med")
     low = sum(1 for r in results if r.fetch_relevance == "low")
-    return (f"{high} high, {med} med, {low} low - smart_fetch the 'high' results "
-            f"first (then 'med' if needed). Skip 'low' unless nothing else helps.")
+    return (f"{high} high, {med} med, {low} low. Ranked by relevance_score; "
+            f"smart_fetch what fits your need (high first, but a lower tier can be the right call).")
 
 
 def _search_summary(query: str, results: list[SearchResult], engines_used: list[str],
@@ -100,20 +100,22 @@ def _search_summary(query: str, results: list[SearchResult], engines_used: list[
 
 def _search_next_action(results: list[SearchResult], engine_blocked: list[str],
                          error: str) -> str:
-    """The obvious next call, like smart_fetch's next_action. Agent-actionable."""
+    """A judgment-empowering nudge, not a rigid directive. The ranking is a HINT:
+    the agent may legitimately need a lower-ranked result, so we point it at the
+    signals (relevance_score + fetch_relevance) and trust it to pick, instead of
+    prescribing 'fetch N'. This avoids the LLM stressing over whether to 'break'
+    the instruction when a lower-ranked result is the one it actually needs."""
     if not results:
         if error and ("rate-limited" in error.lower() or "timed out" in error.lower() or engine_blocked):
             return ("No results (engines rate-limited/timed out). Retry in a moment, "
                     "or set HOUND_SEARCH_PROXY for sustained heavy use.")
         return "No results. Rephrase (more specific / different terms) or try mode=neural for semantic matching."
     high = [r for r in results if r.fetch_relevance == "high"]
-    if high:
-        base = ("Fetch the top 1-2 high-relevance result(s) via smart_fetch first "
-                "(rank 1-2 have the highest relevance_score); fetch more only if you need them.")
-    elif any(r.fetch_relevance == "med" for r in results):
-        base = "No 'high' results; smart_fetch the top 'med' results, or rephrase for better matches."
-    else:
-        base = "Results are low-relevance; rephrase (more specific) or try mode=neural for semantic matching."
+    base = ("Results are ranked by relevance (relevance_score + fetch_relevance). "
+            "smart_fetch the ones that match what you actually need - the ranking is a hint, "
+            "not a directive; a lower-ranked result can be the right one, so trust your judgment.")
+    if not high:
+        base += " No 'high' matches - if none of these fit, rephrase (more specific) or try mode=neural."
     if engine_blocked:
         base += " Some engines didn't contribute; retry shortly for more recall."
     return base

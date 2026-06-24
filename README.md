@@ -93,7 +93,7 @@ Then point any MCP client at the `hound` command. No arguments, no keys, no env 
 <img src="https://raw.githubusercontent.com/dondai1234/master-fetch/master/docs/hound-scene.png" alt="Hound fetches the web and brings it back to your agent" width="820">
 </div>
 
-No API key, no account, no third-party service. `smart_search` scrapes **DuckDuckGo + Bing** in parallel (add `google` or `wikipedia`), merges, dedups, and ranks on your machine. It returns URLs + ranking, **not page content** — the agent `smart_fetch`es the 1–2 that matter instead of all 9. Every result carries `relevance_score` (0–1) and `fetch_relevance` (**high** / **med** / **low**).
+No API key, no account, no third-party service. `smart_search` scrapes **DuckDuckGo + Bing** in parallel (add `google` or `wikipedia`), merges, dedups, and ranks on your machine. It returns URLs + ranking, **not page content** — the agent `smart_fetch`es whichever results match what it needs (the ranking is a hint, not a directive). Every result carries `relevance_score` (0–1) and `fetch_relevance` (**high** / **med** / **low**).
 
 **Three rerank modes:**
 - **`keyword`** — BM25 over title + snippet. Baseline, always available, even on the lean install.
