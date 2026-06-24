@@ -1,6 +1,6 @@
 [project]
 name = "hound-mcp"
-version = "7.3.1"
+version = "7.4.0"
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]

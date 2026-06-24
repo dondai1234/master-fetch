@@ -1,5 +1,42 @@
 # Changelog
 
+## [7.4.0] - 2026-06-24
+
+### fix: the real rate-limit fix — shared-browser search backbone + parallel race
+
+Rate-limiting was terrible: 2 searches and all 3 engines could be dead for a
+while. Root cause: the previous patch (7.3.1) made the stealthy browser lazy
+AND the search→browser path had been removed, so search was bare HTTP — when the
+engines 429'd, the circuit breaker put them all in cooldown with no recovery
+path, returning 0 results.
+
+This release fixes it properly, using Dondai's insight: **one always-on browser
+shared by smart_fetch AND search**. No escalation (one transport per engine):
+
+- **DuckDuckGo renders its SERP in the shared warm Patchright browser.** A real
+  browser fingerprint never hits the 429/CAPTCHA wall that curl_cffi does, so DDG
+  is a never-blocked backbone. Bing + Qwant stay on HTTP (Bing's SERP is too
+  heavy for the browser; Qwant's JSON API is tolerant).
+- **Parallel race:** all three engines start concurrently and the search returns
+  the moment enough results have merged (cancelling laggards). ~1s when the HTTP
+  engines are healthy (the DDG browser render is cancelled early — it ran in
+  parallel, not as a fallback), and the DDG browser still delivers (~3-5s) when
+  every HTTP engine 429s — so search is **never dead**.
+- **Reverted the 7.3.1 lazy-browser mistake:** the stealthy browser is eager at
+  startup again + persistent for the whole session (as before). One browser
+  total, shared by smart_fetch, screenshot, and search — no extra Chrome.
+- Speed opts (no quality loss): parallel race with early return, wait_selector
+  on the SERP result container (return at domcontentloaded, not full load),
+  disable_resources on SERP renders, eager warm browser, result caching.
+- `engine_blocked` no longer false-alarms: an engine cancelled because enough
+  results arrived is `preempted`, not `blocked`.
+- `HOUND_SEARCH_PROXY` remains the power-user rotating-proxy escape hatch for
+  per-IP throttling (the one thing a real browser can't escape).
+
+Verified live: 10 rapid searches → 0 dead-ends, avg 1.3s, max 2.2s, 1 browser.
+With both HTTP engines force-blocked, the DDG browser backbone still delivered
+5 results. 616 tests pass.
+
 ## [7.3.1] - 2026-06-24
 
 ### fix: no more Chrome at startup (lazy stealthy browser)

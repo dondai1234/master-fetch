@@ -99,7 +99,7 @@ No API key, no account, no third-party service. `smart_search` scrapes **DuckDuc
 - **`neural`** (the only reranker) — a local ONNX cross-encoder (`ms-marco-MiniLM-L-6-v2`, Apache-2.0) running on the `onnxruntime` Hound already ships for OCR. Exa-style semantic ranking, $0, on your machine. The model downloads once (~80MB, cached, not bundled). Scores are min-max normalized per query so the `relevance_score` field carries meaningful spread (ms-marco sigmoid saturates ~1.0; normalization restores discrimination). BM25 was removed — neural matches its speed and ranks better. Lean installs (no model) fall back to cross-engine consensus + engine-position order.
 - **`find_similar`** — pass `url=`; Hound fetches a page you like, derives a query, and reranks candidates against that source page. Exa's find-similar, local.
 
-`smart_search` returns URLs + ranking only — the agent `smart_fetch`es the results it wants (one extra call beats guessing which URL is worth fetching). Default 6 results. **Google is not scraped** — it CAPTCHAs even via the stealthy browser, so it was removed rather than silently contributing nothing. `wikipedia` + `yahoo` are opt-in (`yahoo` serves Bing's index from a different server, handy when bing.com rate-limits). The three defaults are all HTTP (no browser needed), so search stays fast.
+`smart_search` returns URLs + ranking only — the agent `smart_fetch`es the results it wants (one extra call beats guessing which URL is worth fetching). Default 6 results. **Google is not scraped** — it CAPTCHAs even via the stealthy browser, so it was removed rather than silently contributing nothing. `wikipedia` + `yahoo` are opt-in (`yahoo` serves Bing's index from a different server, handy when bing.com rate-limits). DDG renders its SERP in the shared warm browser (a real browser fingerprint never hits the 429 wall); Bing + Qwant run over HTTP. All three race in parallel and the search returns the moment enough results land — ~1s when the HTTP engines are healthy, and the DDG browser backbone still delivers when every HTTP engine rate-limits, so search is never dead.
 
 ### 🛡️ Search Engine Resilience Layer
 
@@ -126,7 +126,7 @@ Scraping public engines from your IP can be rate-limited or CAPTCHA'd. No keyles
 </div>
 
 - `smart_fetch` checks cache + robots, tries HTTP, escalates to the stealthy Patchright browser on a block / JS-shell / 403 / 503, then extracts + enriches. PDFs branch to pdfplumber (with CID-garbage + scanned auto-OCR via pypdfium2 + rapidocr, `quality_score`, ToC). `smart_crawl` reuses the same pipeline across a same-domain best-first walk.
-- `smart_search` scrapes engines in parallel (browser-impersonated HTTP, escalating to the warm stealthy browser if blocked), merges + dedups, then reranks (neural / find_similar) + applies the cross-engine consensus boost.
+- `smart_search` races three engines in parallel: DuckDuckGo renders its SERP in the shared warm Patchright browser (a real browser fingerprint never gets the 429/CAPTCHA wall curl_cffi does, so DDG is the never-blocked backbone), while Bing + Qwant scrape over browser-impersonated HTTP. The search returns the MOMENT enough results have merged (cancelling laggards) — ~1s when the HTTP engines are healthy (the DDG browser render is cancelled early, it ran in parallel, not as a fallback), and the DDG browser still delivers (~3-5s) when every HTTP engine 429s, so the search is never dead. Then it merges + dedups, reranks (neural / find_similar), and applies the cross-engine consensus boost.
 - One stealthy Chrome is pre-warmed at startup and reused, so escalation skips the 3–5s cold start.
 - Content over 40KB is chunked; the response gives `next_offset` so the agent pages through with one more call (served instantly from cache).
 
@@ -142,7 +142,7 @@ Scraping public engines from your IP can be rate-limited or CAPTCHA'd. No keyles
 Walk same-domain links in **best-first** order: discovered URLs are scored by focus relevance + content-likelihood (docs/guide/api boosted, login/submit/cart penalized) + shallow depth, so content pages are crawled before junk when the budget is tight. Extraction is **content-adaptive**: article/docs → trafilatura main content; list/index pages (HN, aggregators, directories) → a structured `* [title](url)` link list; JS shells → detected + reported honestly. URLs normalized so `/docs` and `/docs/` are never crawled twice. `discover_only=true` → URL map; `crawl_urls=[...]` → second-phase selective crawl; `path_include`/`path_exclude` to scope. Caps on pages / depth / tokens / time. Same-domain only by default.
 
 #### 🛡️ Anti-bot + one warm browser
-`smart_fetch` tries plain HTTP first (~1s). If the site blocks HTTP or serves a JS shell, it auto-escalates to a **Patchright** anti-detect browser with Cloudflare challenge solving. Two tiers, nothing to configure. The same warm stealthy browser is the search engine scraper's anti-bot tier: when an engine rate-limits or CAPTCHAs the HTTP scraper, Hound renders the results page in the warm browser and parses that. A single Chrome warms at startup and stays alive for the whole session; pages are closed after each fetch and resource loading is dropped, so idle memory stays near baseline.
+`smart_fetch` tries plain HTTP first (~1s). If the site blocks HTTP or serves a JS shell, it auto-escalates to a **Patchright** anti-detect browser with Cloudflare challenge solving. Two tiers, nothing to configure. A single Chrome warms at startup and stays alive for the whole session — it is shared by `smart_fetch`, `screenshot`, AND `smart_search` (DuckDuckGo renders its SERP in this same browser, so a real fingerprint never hits the 429 wall). Pages are closed after each fetch and resource loading is dropped, so idle memory stays near baseline. One browser total, no extra Chrome.
 
 #### 🎯 Query-focused extraction (`focus`)
 `smart_fetch(url, focus="...")` returns only the BM25-relevant blocks (paragraphs, headings, tables). On a long page this cuts context 80%+ with no re-fetch (runs post-cache, so one cached page serves any focus query). Re-pass the same `focus` when paginating.
@@ -182,7 +182,7 @@ Hound is compared only to other **free** ways to give an agent web research. Onl
 | **Query-focused extraction** | yes (`focus`, BM25) | yes (BM25 filter) | no | no | build it |
 | **Web search** | yes (keyless local) | no | yes | no | no |
 | **Search rerank** | neural + find_similar | BM25 | none | none | n/a |
-| **Search anti-bot** | yes (warm stealthy browser) | n/a | n/a | n/a | n/a |
+| **Search anti-bot** | yes (DDG via the shared warm stealthy browser = no 429 wall; Bing/Qwant HTTP with warm sessions, pacer, circuit breaker; parallel race returns early when healthy, DDG browser backbone when all HTTP blocks) | n/a | n/a | n/a | n/a |
 | **Agent signals** | yes (`content_ok`/`next_action`/`summary`/`relevance_score`) | no | no | no | no |
 | **Connect-time `instructions`** | yes | no | no | no | no |
 | **MCP server** | yes (official) | community | yes (official) | yes (official) | build it |
@@ -290,7 +290,7 @@ No free tool can do everything. Hound is upfront about what it can't:
 | Limit | What happens instead |
 |-------|----------------------|
 | **DataDome / Akamai / Cloudflare Turnstile (interactive)** | Not bypassed. `next_action` tells the agent to switch sources instead of retrying. |
-| **Search rate-limits / CAPTCHAs** | Mitigated by the Resilience Layer (warm sessions, pacing, circuit breaker, multi-engine fallback, stealthy escalation); `engine_blocked` reports cooling engines. Same posture as SearXNG / ddgs. |
+| **Search rate-limits / CAPTCHAs** | Solved: DuckDuckGo renders in the shared warm Patchright browser (real fingerprint = no 429/CAPTCHA wall) so it is a never-blocked backbone; Bing + Qwant run over HTTP with the Resilience Layer (warm sessions, pacing, circuit breaker). A parallel race returns ~1s when HTTP is healthy and the DDG browser still delivers when every HTTP engine 429s — search is never dead. `engine_blocked` reports cooling HTTP engines; `HOUND_SEARCH_PROXY` is a power-user rotating-proxy escape hatch. |
 | **Neural / find_similar search** | Need `hound-mcp[all]` (the ONNX reranker runs on the same `onnxruntime` as OCR; model downloads once). Lean installs get keyword BM25. |
 | **Sites requiring login** | Out of scope (Hound does page interaction, not authenticated sessions). |
 | **Deep shadow-DOM / hard SPAs** | `actions` (scroll, click, `wait_selector`) reach most of it; deep shadow-DOM piercing not yet wired. |

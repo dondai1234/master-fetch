@@ -456,7 +456,7 @@ async def smart_search(
     # engines means an opt-in engine like google that CAPTCHAs is visible to the
     # agent (in engine_blocked), not silently absent from both lists.
     engines_used = list(dict.fromkeys(r.name for r in reports if r.ok))
-    engine_blocked = list(dict.fromkeys(r.name for r in reports if not r.ok))
+    engine_blocked = list(dict.fromkeys(r.name for r in reports if (not r.ok and not getattr(r, "preempted", False))))
 
     # Agent QoL: when some engines didn't contribute but results came back from
     # the rest, say so plainly so the agent knows the results are partial + a

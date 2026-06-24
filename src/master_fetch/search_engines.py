@@ -1,10 +1,14 @@
 """Hound-native keyless search engine scrapers (v7 local search flagship).
 
 No API key, no account, no third-party service. Scrapes public search engines
-(DuckDuckGo, Bing, Qwant, Wikipedia) over browser-impersonated HTTP
-(scrapling FetcherSession, a CORE dependency, so lean installs get working
-search), with escalation to hound's warm stealthy Patchright browser when an
-engine blocks. Google is NOT scraped: it CAPTCHAs even via the stealthy browser.
+(DuckDuckGo, Bing, Qwant, Wikipedia) with a split transport: DDG + Bing render
+their SERP in hound's single shared warm Patchright browser (the same one
+smart_fetch uses) so a real browser fingerprint never hits the 429 wall that
+kills curl_cffi under sustained use; Qwant (tolerant keyless JSON API) +
+Wikipedia use browser-impersonated HTTP (scrapling FetcherSession, a CORE dep,
+so lean installs get working search). ONE browser total, shared with smart_fetch
+(eager + persistent at startup). No escalation - one transport per engine.
+Google is NOT scraped: it CAPTCHAs even via the stealthy browser.
 
 Diversity + consensus (the rate-limit fix that costs zero speed): the default
 pool is three INDEPENDENT indexes (DuckDuckGo, Bing, Qwant) run in
@@ -77,9 +81,9 @@ _RECREATE_EVERY = 3     # recreate the persistent session every N consecutive bl
 # search latency so it stays under typical MCP client timeouts. Tunable via the
 # HOUND_SEARCH_DEADLINE env var (seconds).
 try:
-    SEARCH_ENGINE_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "5") or "5")
+    SEARCH_ENGINE_DEADLINE = float(os.environ.get("HOUND_SEARCH_DEADLINE", "8") or "8")
 except ValueError:
-    SEARCH_ENGINE_DEADLINE = 5.0
+    SEARCH_ENGINE_DEADLINE = 8.0
 
 # Power-user env knobs (all optional).
 _PROXY = os.environ.get("HOUND_SEARCH_PROXY") or None
@@ -119,7 +123,8 @@ class RawResult:
 class EngineReport:
     name: str
     ok: bool = False        # parsed >=1 result
-    blocked: bool = False   # rate-limited / CAPTCHA'd / refused / cooling down
+    blocked: bool = False   # rate-limited / CAPTCHA'd / refused / cooling down / timed out
+    preempted: bool = False # cancelled because enough results arrived from other engines (NOT blocked)
     error: str = ""
 
 
@@ -148,32 +153,6 @@ def _retry_after(resp) -> float:
     except Exception:
         pass
     return 0.0
-
-
-async def _stealthy_html(server, url: str, timeout: int = ENGINE_TIMEOUT) -> Optional[str]:
-    """Escalation: fetch a SERP via hound's warm stealthy browser, return raw HTML.
-
-    This is the flagship anti-bot move: when an engine blocks the HTTP scraper,
-    hound renders the SERP in the warm Patchright browser and parses that instead.
-    No keyless search lib does this. Returns None if the stealthy path is
-    unavailable or yields no HTML.
-    """
-    if server is None:
-        return None
-    try:
-        res = await server.stealthy_fetch(
-            url, extraction_type="html", main_content_only=False,
-            use_trafilatura=False, google_search=False,
-            disable_resources=True, timeout=int(timeout * 1000),
-        )
-        # content is a list of text chunks; for html extraction it is the page HTML.
-        if res and res.content and not res.error:
-            html = "".join(res.content)
-            if html and len(html) > 200:
-                return html
-    except Exception as e:
-        logger.debug(f"stealthy SERP escalation failed for {url[:80]}: {e}")
-    return None
 
 
 # ─── Search Engine Resilience Layer (SERL) ───────────────────────────────────
@@ -389,6 +368,37 @@ async def prewarm_search_engines(engines: Optional[list[str]] = None) -> None:
     )
 
 
+async def _browser_html(server, url: str, wait_sel: str, *, timeout: int = 7000) -> Optional[str]:
+    """Render a SERP URL in hound's single shared warm Patchright browser (the
+    same one smart_fetch uses) and return the page HTML.
+
+    This is the search anti-bot transport for rate-limit-prone engines: a real
+    browser fingerprint does not get rate-limited the way curl_cffi does, so
+    DDG/Bing scraped this way never hit the 429 wall that kills the HTTP path
+    under sustained use. wait_sel = the SERP result-container CSS selector; we
+    return the moment it attaches (server-rendered SERPs are ready at
+    domcontentloaded, no need to wait for full load / networkidle).
+    disable_resources drops images/fonts/css/media for a fast render. Returns
+    None if the browser is unavailable or yields no usable HTML.
+    """
+    if server is None:
+        return None
+    try:
+        res = await server.stealthy_fetch(
+            url, extraction_type="html", main_content_only=False,
+            use_trafilatura=False, google_search=False, disable_resources=True,
+            network_idle=False, wait_selector=wait_sel, wait_selector_state="attached",
+            timeout=timeout,
+        )
+        if res and res.content and not res.error:
+            html = "".join(res.content)
+            if html and len(html) > 200:
+                return html
+    except Exception as e:
+        logger.debug(f"browser SERP render failed for {url[:80]}: {e}")
+    return None
+
+
 # ─── DuckDuckGo (html endpoint) ─────────────────────────────────────────────
 
 def _ddg_real_url(href: str) -> str:
@@ -435,8 +445,27 @@ async def search_ddg(query: str, max_results: int, *, region: str = "us-en",
     if page > 0:
         params += f"&s={page * max_results}"
     url = f"https://html.duckduckgo.com/html/?{params}"
-    text, status, blocked, cooling = await _engine_get("duckduckgo", url)
     rep = EngineReport(name="duckduckgo")
+    # Production (server provided): render the SERP in the shared warm browser.
+    # A real browser fingerprint is not rate-limited like curl_cffi, so DDG
+    # scraped this way never hits the 429 wall that kills the HTTP path under
+    # sustained use. server=None (unit tests, no browser) uses the HTTP seam below.
+    if server is not None:
+        html = await _browser_html(server, url, ".result")
+        if html:
+            results = _parse_ddg(html)[:max_results]
+            if results:
+                rep.ok = True
+                return results, rep
+        rep.blocked = True
+        rep.error = "browser render failed"
+        return [], rep
+    # HTTP seam (tests / no browser available): SERL-coordinated curl_cffi.
+    if _ENGINES_COORD.cooldown_left("duckduckgo") > 0:
+        rep.blocked = True
+        rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('duckduckgo'))}s left)")
+        return [], rep
+    text, status, blocked, cooling = await _engine_get("duckduckgo", url)
     if not text:
         rep.blocked = blocked
         rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('duckduckgo'))}s left)"
@@ -505,8 +534,16 @@ async def search_bing(query: str, max_results: int, *, region: str = "us-en",
     if page > 0:
         params += f"&first={page * max_results + 1}"
     url = f"https://www.bing.com/search?{params}"
-    text, status, blocked, cooling = await _engine_get("bing", url)
     rep = EngineReport(name="bing")
+    # Bing's SERP is heavy (102KB + lots of JS) -> a browser render takes ~11s,
+    # too slow. Bing stays on HTTP (fast ~1s); when it rate-limits, the circuit
+    # breaker rests it and the DDG browser backbone + Qwant carry. server is
+    # accepted but unused (Bing is HTTP-primary, not browser).
+    if _ENGINES_COORD.cooldown_left("bing") > 0:
+        rep.blocked = True
+        rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('bing'))}s left)")
+        return [], rep
+    text, status, blocked, cooling = await _engine_get("bing", url)
     if not text:
         rep.blocked = blocked
         rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('bing'))}s left)"
@@ -566,7 +603,8 @@ async def search_qwant(query: str, max_results: int, *, region: str = "us-en",
     # the safari184 fingerprint, so the coordinator pins it via _ENGINE_IMPERSONATE.
     # Clean JSON parsing (no fragile HTML selectors). No native freshness param;
     # pagination via &offset=. No per-engine stealthy escalation (keeps search fast;
-    # the search-wide last-resort in multi_search covers the all-blocked case).
+    # the search-wide last-resort was removed: search is 100% HTTP, never touches
+    # the stealthy browser).
     locale = _qwant_locale(region)
     # Qwant's API REQUIRES count=10 exactly (any other value -> 400 "count must be
     # equal to 10"). Fetch 10, then _parse_qwant_json slices to max_results.
@@ -809,79 +847,78 @@ async def multi_search(
     page: int = 0,
     server=None,
 ) -> tuple[list[RawResult], list[EngineReport]]:
-    """Run the chosen engines in parallel, merge, dedup, BM25-rerank.
+    """Run the chosen engines in a parallel race, merge, dedup.
 
-    Returns (ranked_results, engine_reports). engines defaults to the four
-    independent indexes (duckduckgo, bing, qwant). Unknown engine names
-    are ignored. A URL returned by several engines carries a consensus boost
-    (see merge_dedupe) - a free authority signal from merging independent indexes.
+    Returns (ranked_results, engine_reports). engines defaults to the three
+    independent indexes (duckduckgo, bing, qwant). Unknown engine names are
+    ignored. DDG renders its SERP in the shared warm browser (never-429 backbone);
+    Bing/Qwant/Wikipedia/Yahoo run over HTTP. All start concurrently at t=0 and
+    the search returns the moment enough results have merged (cancelling
+    laggards) - fast when HTTP is healthy, reliable (via the DDG browser) when
+    every HTTP engine 429s. A URL returned by several engines carries a consensus
+    boost (see merge_dedupe) - a free authority signal from merging independent
+    indexes.
     """
     names = [e for e in (engines or list(DEFAULT_ENGINES)) if e in _ENGINES]
     if not names:
         names = list(DEFAULT_ENGINES)
 
-    async def _run_engine(name: str):
-        # Hard per-engine deadline: a slow / blocked / stealthy-escalating engine
-        # is cut off so it can never hang the whole search. The agent gets results
-        # from the engines that finished; the cut one is reported as timed out.
-        # Hard per-engine deadline: a slow / blocked engine is cut off so it can
-        # never hang the whole search. (No per-engine stealthy escalation - that
-        # used to add 2-5s on every block; the search-wide last-resort below
-        # covers the rare all-blocked case without taxing the common case.)
-        try:
-            return await asyncio.wait_for(
-                _ENGINES[name](query, max_results, region=region, freshness=freshness,
-                               page=page, server=server),
-                timeout=SEARCH_ENGINE_DEADLINE,
-            )
-        except asyncio.TimeoutError:
-            return ([], EngineReport(name=name, blocked=True,
-                                     error=f"timed out ({int(SEARCH_ENGINE_DEADLINE)}s)"))
-
-    per_engine = await asyncio.gather(*[_run_engine(n) for n in names], return_exceptions=True)
+    # Parallel race (NOT escalation - no fallback order): every engine starts
+    # concurrently at t=0. DDG renders its SERP in the shared warm browser (real
+    # browser = no 429 wall, the never-blocked backbone); Bing/Qwant/Wikipedia/
+    # Yahoo run over HTTP. We return the MOMENT enough results have merged from
+    # the engines that finished, cancelling the laggards - so when the HTTP
+    # engines are healthy the search returns in ~1s (the DDG browser render is
+    # cancelled early, it ran in parallel not as a fallback), and when every HTTP
+    # engine 429s the DDG browser still delivers (~3-5s) so the search is never
+    # dead. A hard overall deadline bounds a fully-throttled search.
+    tasks = {asyncio.ensure_future(
+        _ENGINES[n](query, max_results, region=region, freshness=freshness,
+                    page=page, server=server)): n for n in names}
     reports: list[EngineReport] = []
     cleaned: list[tuple[list[RawResult], EngineReport]] = []
-    for name, res in zip(names, per_engine):
-        if isinstance(res, BaseException):
-            rep = EngineReport(name=name, error=redact(str(res)[:120]))
-            reports.append(rep)
-            cleaned.append(([], rep))
-            logger.warning(f"engine {name} crashed: {res}")
-        else:
-            results, rep = res
+    pending = set(tasks)
+    deadline = time() + SEARCH_ENGINE_DEADLINE
+
+    async def _cancel_laggards(*, blocked: bool, error: str) -> None:
+        for t in pending:
+            t.cancel()
+        for t in list(pending):
+            try:
+                await t
+            except BaseException:
+                pass
+            reports.append(EngineReport(name=tasks[t], blocked=blocked,
+                                        preempted=(not blocked), error=error))
+
+    while pending and time() < deadline:
+        timeout = max(0.1, deadline - time())
+        try:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED,
+                                                timeout=timeout)
+        except Exception:
+            break
+        if not done:
+            break  # nothing finished this window; stop waiting
+        for t in done:
+            name = tasks[t]
+            try:
+                results, rep = t.result()
+            except BaseException as e:
+                rep = EngineReport(name=name, error=redact(str(e)[:120]))
+                results = []
+                logger.warning(f"engine {name} crashed: {e}")
             reports.append(rep)
             cleaned.append((results, rep))
-    merged = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
-
-    # Search-wide last resort: if EVERY engine came back empty (all blocked /
-    # no results) and a stealthy browser is available, make ONE stealthy DDG
-    # SERP fetch as a hail-mary. This preserves the anti-bot flagship move
-    # for the rare all-blocked case WITHOUT the per-engine stealthy escalation
-    # that used to add 2-5s on every single block (the common case: one engine
-    # blocks, the others carry, no stealthy needed -> no latency cut).
-    if not merged and server is not None and any(r.blocked for _, r in cleaned):
-        lr_params = f"q={quote(query)}&kl={quote(region)}"
-        if freshness in ("day", "week", "month", "year"):
-            lr_params += f"&df={freshness[0]}"
-        if page > 0:
-            lr_params += f"&s={page * max_results}"
-        try:
-            lr_html = await asyncio.wait_for(
-                _stealthy_html(server, f"https://html.duckduckgo.com/html/?{lr_params}"),
-                timeout=SEARCH_ENGINE_DEADLINE)
-            if lr_html:
-                lr_results = _parse_ddg(lr_html)[:max_results]
-                if lr_results:
-                    lr_rep = EngineReport(name="duckduckgo", ok=True)
-                    cleaned.append((lr_results, lr_rep))
-                    reports.append(lr_rep)
-                    merged = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
-        except asyncio.TimeoutError:
-            pass
-        except Exception as e:
-            logger.debug(f"last-resort stealthy ddg failed: {e}")
-
-    ranked = merged  # merge_dedupe already sorts by cross-engine consensus then engine position
+        merged = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
+        if len(merged) >= max_results:
+            # Enough good results - cancel the laggards (e.g. the still-rendering
+            # DDG browser page) and return now. Awaiting the cancels lets scrapling
+            # close the cancelled page promptly (no browser leak under load).
+            await _cancel_laggards(blocked=False, error="preempted (enough results from other engines)")
+            return merged, reports
+    await _cancel_laggards(blocked=True, error=f"timed out ({int(SEARCH_ENGINE_DEADLINE)}s)")
+    ranked = merge_dedupe(cleaned, max_results, site=site, exclude_sites=exclude_sites)
     return ranked, reports
 
 
