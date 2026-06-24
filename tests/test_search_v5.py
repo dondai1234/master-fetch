@@ -9,7 +9,7 @@ import pytest
 
 import master_fetch.search as search_mod
 from master_fetch.search import (
-    SearchResult, SearchResponseModel, ResearchResponseModel,
+    SearchResult, SearchResponseModel,
     _validate_filters, _validate_engines, _validate_freshness,
     smart_search as _ss,
 )
@@ -136,66 +136,6 @@ def test_smart_search_surfaces_engine_blocked_and_error_when_all_empty(monkeypat
 
 
 # ─── research mode ───────────────────────────────────────────────────────────
-
-def test_research_mode_fetches_top_by_tier(monkeypatch):
-    # Two high-relevance + one low; fetch_top=2 -> the two highs are fetched.
-    results = [
-        _raw("High A", "https://a.com", "duckduckgo", 1, "python asyncio"),
-        _raw("High B", "https://b.com", "bing", 1, "python asyncio"),
-        _raw("Low C", "https://c.com", "wikipedia", 1, "unrelated cooking"),
-    ]
-    reports = [EngineReport("duckduckgo", ok=True), EngineReport("bing", ok=True),
-               EngineReport("wikipedia", ok=True)]
-    _stub_multi(monkeypatch, results, reports)
-    from master_fetch.server import MasterFetchServer, ResponseModel
-    srv = MasterFetchServer()
-    fetched = []
-
-    async def fake_smart_fetch(url, cache_ttl=3600, max_content_chars=8000, **kw):
-        fetched.append(url)
-        return ResponseModel(status=200, content=[f"content for {url}"],
-                             url=url, content_ok=True, summary="200 OK")
-
-    srv.smart_fetch = fake_smart_fetch  # type: ignore
-    resp = asyncio.run(_ss(srv, "python asyncio", cache_ttl=0,
-                           fetch_content=True, fetch_top=2))
-    assert isinstance(resp, ResearchResponseModel)
-    assert resp.fetched_count == 2
-    assert set(r.url for r in resp.results) == {"https://a.com", "https://b.com"}
-    assert all(r.content_ok for r in resp.results)
-    assert resp.summary
-
-
-def test_research_mode_caps_fetch_top_at_5(monkeypatch):
-    results = [_raw(f"t{i}", f"https://x{i}.com", "duckduckgo", 1, "python asyncio") for i in range(8)]
-    reports = [EngineReport("duckduckgo", ok=True)]
-    _stub_multi(monkeypatch, results, reports)
-    from master_fetch.server import MasterFetchServer, ResponseModel
-    srv = MasterFetchServer()
-
-    async def fake_smart_fetch(url, cache_ttl=3600, max_content_chars=8000, **kw):
-        return ResponseModel(status=200, content=["c"], url=url, content_ok=True, summary="ok")
-
-    srv.smart_fetch = fake_smart_fetch  # type: ignore
-    resp = asyncio.run(_ss(srv, "python asyncio", cache_ttl=0, fetch_content=True, fetch_top=99))
-    assert resp.fetched_count == 5
-
-
-def test_research_mode_fetch_failure_sets_content_ok_false(monkeypatch):
-    results = [_raw("t", "https://x.com", "duckduckgo", 1, "python asyncio")]
-    reports = [EngineReport("duckduckgo", ok=True)]
-    _stub_multi(monkeypatch, results, reports)
-    from master_fetch.server import MasterFetchServer, ResponseModel
-    srv = MasterFetchServer()
-
-    async def fake_smart_fetch(url, cache_ttl=3600, max_content_chars=8000, **kw):
-        return ResponseModel(status=0, content=["[blocked]"], url=url, content_ok=False, error="blocked")
-
-    srv.smart_fetch = fake_smart_fetch  # type: ignore
-    resp = asyncio.run(_ss(srv, "python asyncio", cache_ttl=0, fetch_content=True, fetch_top=1))
-    assert resp.results[0].content_ok is False
-    assert resp.results[0].fetch_error == "blocked"
-
 
 # ─── filter + engine + freshness aware cache key ─────────────────────────────
 

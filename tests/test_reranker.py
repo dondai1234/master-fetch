@@ -14,7 +14,7 @@ import pytest
 
 import master_fetch.search as search_mod
 from master_fetch.search import (
-    SearchResponseModel, ResearchResponseModel,
+    SearchResponseModel,
     _validate_mode, smart_search as _ss,
 )
 from master_fetch.search_engines import RawResult, EngineReport
@@ -164,61 +164,6 @@ def test_rerank_returns_none_when_get_reranker_none(monkeypatch):
 
 # ─── Phase 4: find_similar + autoretrieval (expand) ───────────────────────────
 
-def test_validate_expand_accepts_and_rejects():
-    from master_fetch.search import _validate_expand
-    assert _validate_expand(None) == 1
-    assert _validate_expand(3) == 3
-    for bad in (0, 6, -1, True, "2"):
-        with pytest.raises(SecurityError):
-            _validate_expand(bad)
-
-
-def test_expand_query_generates_distinct_variants():
-    from master_fetch.search import _expand_query
-    out = _expand_query("transformer attention", 3)
-    assert len(out) == 3
-    assert out[0] == "transformer attention"
-    assert len(set(out)) == 3
-    assert _expand_query("x", 1) == ["x"]
-
-
-def _stub_for_expand(monkeypatch, fake_multi):
-    monkeypatch.setattr(search_mod, "multi_search", fake_multi)
-    monkeypatch.setattr(search_mod, "neural_rerank", lambda q, r: None)
-
-
-def test_expand_runs_subqueries_and_merges(monkeypatch):
-    seen = []
-
-    async def fake_multi(query, max_results, *, engines, site, exclude_sites,
-                         region, freshness, page=0, server=None):
-        seen.append(query)
-        return [_raw(query, f"https://{abs(hash(query)) % 9999}.com", snip=query)
-                ], [EngineReport("duckduckgo", ok=True)]
-    _stub_for_expand(monkeypatch, fake_multi)
-    from master_fetch.server import MasterFetchServer
-    srv = MasterFetchServer()
-    resp = asyncio.run(_ss(srv, "transformer attention", expand=3, mode="keyword", cache_ttl=0))
-    assert len(seen) == 3
-    assert seen[0] == "transformer attention"
-    assert len(set(seen)) == 3  # 3 distinct sub-query variants
-    # Results from all 3 subqueries merged (distinct URLs -> not deduped away).
-    assert resp.total_results >= 2
-
-
-def test_expand_one_is_no_expansion(monkeypatch):
-    seen = []
-
-    async def fake_multi(query, max_results, **kw):
-        seen.append(query)
-        return [_raw("a", "https://a.com")], [EngineReport("duckduckgo", ok=True)]
-    _stub_for_expand(monkeypatch, fake_multi)
-    from master_fetch.server import MasterFetchServer
-    srv = MasterFetchServer()
-    asyncio.run(_ss(srv, "python", expand=1, mode="keyword", cache_ttl=0))
-    assert len(seen) == 1  # no expansion
-
-
 def test_find_similar_fetches_source_and_reranks_vs_source(monkeypatch):
     candidates = [
         _raw("A", "https://a.com", snip="asyncio event loop"),
@@ -230,10 +175,10 @@ def test_find_similar_fetches_source_and_reranks_vs_source(monkeypatch):
         return ("Asyncio Guide", "this page is about asyncio event loops in python")
     monkeypatch.setattr(search_mod, "fetch_source_for_similar", fake_source)
 
-    async def fake_gather(query, expand, max_results, engines, site, exclude_sites,
+    async def fake_multi(query, max_results, *, engines, site, exclude_sites,
                           region, freshness, page=0, server=None):
         return candidates, [EngineReport("duckduckgo", ok=True)]
-    monkeypatch.setattr(search_mod, "_gather", fake_gather)
+    monkeypatch.setattr(search_mod, "multi_search", fake_multi)
 
     class FakeRer:
         def score(self, q, docs):
@@ -279,10 +224,10 @@ def test_find_similar_falls_back_to_keyword_when_no_reranker(monkeypatch):
         return ("Python Asyncio", "python asyncio event loop content")
     monkeypatch.setattr(search_mod, "fetch_source_for_similar", fake_source)
 
-    async def fake_gather(query, expand, max_results, engines, site, exclude_sites,
+    async def fake_multi(query, max_results, *, engines, site, exclude_sites,
                           region, freshness, page=0, server=None):
         return candidates, [EngineReport("duckduckgo", ok=True)]
-    monkeypatch.setattr(search_mod, "_gather", fake_gather)
+    monkeypatch.setattr(search_mod, "multi_search", fake_multi)
     monkeypatch.setattr(search_mod, "get_reranker", lambda: None)
     monkeypatch.setattr(search_mod, "unavailable_reason", lambda: "needs hound-mcp[all]")
     from master_fetch.server import MasterFetchServer

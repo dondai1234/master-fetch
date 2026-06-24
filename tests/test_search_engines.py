@@ -246,7 +246,7 @@ def test_multi_search_runs_engines_in_parallel_and_reports(monkeypatch):
     monkeypatch.setitem(se._ENGINES, "bing", fake_bing)
     monkeypatch.setitem(se._ENGINES, "wikipedia", fake_wiki)
 
-    ranked, reports = asyncio.run(multi_search("x", 5, server=None))
+    ranked, reports = asyncio.run(multi_search("x", 5, engines=["duckduckgo", "bing", "wikipedia"], server=None))
     names_ok = {r.name: r.ok for r in reports}
     assert names_ok == {"duckduckgo": True, "bing": False, "wikipedia": True}
     # Bing is blocked; the other two still contribute.
@@ -541,7 +541,7 @@ def test_multi_search_hard_deadline_cuts_slow_engine_returns_partial(monkeypatch
     async def fast(q, n, *, region, freshness, page=0, server=None):
         return ([_rr("F", "https://fast.com", "wikipedia", 1)], EngineReport("wikipedia", ok=True))
     monkeypatch.setattr(se, "_ENGINES", {"duckduckgo": slow, "wikipedia": fast})
-    ranked, reports = asyncio.run(multi_search("x", 5, server=None))
+    ranked, reports = asyncio.run(multi_search("x", 5, engines=["duckduckgo", "wikipedia"], server=None))
     by_name = {r.name: r for r in reports}
     assert by_name["duckduckgo"].blocked is True and "timed out" in by_name["duckduckgo"].error
     assert by_name["wikipedia"].ok is True
@@ -574,11 +574,10 @@ def test_prewarm_search_engines_warms_each_default_engine(monkeypatch):
     monkeypatch.setattr(se._ENGINES_COORD, "warmup", fake_warmup)
     asyncio.run(se.prewarm_search_engines())
     names = {n for n, _ in warmed}
-    assert names == {"duckduckgo", "bing", "wikipedia"}
+    assert names == {"duckduckgo", "bing"}
     # each warmup URL hits the engine's real search host
     assert all("duckduckgo" in u for n, u in warmed if n == "duckduckgo")
     assert all("bing.com" in u for n, u in warmed if n == "bing")
-    assert all("wikipedia.org" in u for n, u in warmed if n == "wikipedia")
 
 
 def test_prewarm_search_engines_never_raises(monkeypatch):
@@ -636,5 +635,5 @@ def test_multi_search_threads_page_to_engines(monkeypatch):
         seen["wiki_page"] = page
         return ([_rr("W", "https://en.wikipedia.org/wiki/W", "wikipedia", 1)], EngineReport("wikipedia", ok=True))
     monkeypatch.setattr(se, "_ENGINES", {"duckduckgo": fake_ddg, "wikipedia": fake_wiki})
-    asyncio.run(multi_search("x", 10, page=4, server=None))
+    asyncio.run(multi_search("x", 10, engines=["duckduckgo", "wikipedia"], page=4, server=None))
     assert seen["ddg_page"] == 4 and seen["wiki_page"] == 4

@@ -50,9 +50,9 @@ from master_fetch.crawl import normalize_url
 
 logger = logging.getLogger("master-fetch.search_engines")
 
-DEFAULT_ENGINES = ("duckduckgo", "bing", "wikipedia")
+DEFAULT_ENGINES = ("duckduckgo", "bing")
 ENGINE_TIMEOUT = 12  # seconds per engine request
-CAPTCHA_MARKERS = ("captcha", "unusual traffic", "are you a robot", "sorry/image", "ddg-captcha", "blocked", "access denied")
+CAPTCHA_MARKERS = ("captcha", "unusual traffic", "are you a robot", "sorry/image", "ddg-captcha", "blocked", "access denied", "before you continue to google", "to continue, please agree")
 
 # Per-engine pacing: min seconds between successive requests to the SAME engine.
 # Within a single search all engines fire in parallel (each engine sees 1 req),
@@ -514,10 +514,13 @@ def _parse_google(html: str) -> list[RawResult]:
     soup = BeautifulSoup(html, "lxml")
     out: list[RawResult] = []
     seen: set[str] = set()
-    # Modern Google: div.g / div.MjjYud > div[data-ved] with h3 + a + snippet span.
-    for block in soup.select("div.g, div._kno, div[data-ved]"):
+    # Modern Google wraps each result in div.g (often nested in div.MjjYud) with an
+    # <a> containing an <h3> + a snippet span. Be liberal: try several containers
+    # + a fallback that scans every <a> with an <h3> child, since Google's markup
+    # shifts often.
+    blocks = soup.select("div.g, div._kno, div[data-ved], div.MjjYud")
+    for block in blocks:
         a = block.select_one("a:has(h3)") or block.select_one("h3 a, a h3")
-        # fallback: any <a> with an <h3> inside
         if not a:
             h3 = block.select_one("h3")
             if h3:
@@ -537,11 +540,29 @@ def _parse_google(html: str) -> list[RawResult]:
         if href in seen:
             continue
         seen.add(href)
-        snip = block.select_one(".VwiC3b, [data-sncf], span.aCOpRe, div.IsZvec span")
+        snip = block.select_one(".VwiC3b, [data-sncf], span.aCOpRe, div.IsZvec span, .IsZvec, [style='-webkit-line-clamp']")
         snippet = snip.get_text(" ", strip=True) if snip else ""
         out.append(RawResult(title=title, url=href, snippet=snippet, source="google", position=len(out) + 1))
         if len(out) >= 30:
             break
+    # Fallback: scan every <a> with an <h3> child (catches layouts the block
+    # selectors miss).
+    if not out:
+        for a in soup.select("a:has(h3)"):
+            href = a.get("href", "") or ""
+            if href.startswith("/url?"):
+                qs = parse_qs(urlparse(href).query)
+                href = qs.get("q", [""])[0] or href
+            if not href.startswith("http") or href in seen:
+                continue
+            h3 = a.select_one("h3")
+            title = h3.get_text(" ", strip=True) if h3 else ""
+            if not title:
+                continue
+            seen.add(href)
+            out.append(RawResult(title=title, url=href, snippet="", source="google", position=len(out) + 1))
+            if len(out) >= 30:
+                break
     return out
 
 
@@ -568,11 +589,19 @@ async def search_google(query: str, max_results: int, *, region: str = "us-en",
         rep.error = (f"cooling down (rate-limited, ~{int(_ENGINES_COORD.cooldown_left('google'))}s left)"
                      if cooling else f"no response (status {status})")
         return [], rep
+    # Google often serves a CONSENT / interstitial page (consent.google.com or
+    # "Before you continue to Google") instead of results in many regions. Detect
+    # it so the failure is honest (blocked), not a silent 0-result 200-OK.
+    low = text.lower()
+    if "consent.google.com" in low or "before you continue to google" in low:
+        rep.blocked = True
+        rep.error = "google consent/interstitial page (no results)"
+        return [], rep
     results = _parse_google(text)[:max_results]
     rep.ok = bool(results)
     rep.blocked = (not results) and blocked
     if not results:
-        rep.error = "no results parsed (likely CAPTCHA)"
+        rep.error = "no results parsed (likely CAPTCHA or layout shift)"
     return results, rep
 
 
