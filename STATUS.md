@@ -645,6 +645,11 @@ dramatically more robust for single-user real agent work. tools/list ~2.6K token
 
 ### v7.2 batch (UNRELEASED, built 2026-06-24) — diverse independent pool + cross-engine consensus
 
+SHIPPED as v7.2.0 on 2026-06-24 (PyPI + GitHub release, CI green, fresh-venv
+verify passed: 7.2.0 installs clean, 6 results from ddg+bing+brave, neural
+rerank, top result is a consensus hit (consensus=2 of 3, src=brave,duckduckgo),
+keyword rejected, reranker ready).
+
 Dondai's ask: Google is hopeless (remove it); DDG+Bing are ~99% the same quality
 but still rate-limit; default 9 -> 6 (5 usually enough); solve rate-limiting once
 and for all WITHOUT trading away speed (no just-add-delays cheating); find other
