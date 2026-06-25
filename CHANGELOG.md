@@ -1,5 +1,49 @@
 # Changelog
 
+## [7.5.0] - 2026-06-25
+
+### feat: search rebuilt on a vendored ddgs metasearch (the robust rewrite)
+
+The hand-rolled 3-engine scraper (v7.0-7.4) kept failing: rate-limits, garbage
+results, engines not contributing, and a 2nd Chrome instance spawning for
+search. v7.5 replaces the whole engine layer with a **vendored, stripped
+ddgs metasearch** (ddgs is MIT by deedy5; attributed in NOTICE.ddgs.txt).
+
+- **9 keyless backends in parallel**: duckduckgo, brave, mojeek, yahoo, yandex,
+  startpage, google + opt-in wikipedia, grokipedia. INDEPENDENT indexes (not the
+  same feed twice). A backend that CAPTCHAs / rate-limits / has no topic-match
+  simply yields nothing and the others carry — the diversity IS the robustness
+  my 3-engine hand-rolled never had.
+- **Vendored + stripped**, not a dependency: ddgs's base engine class + the 9 text
+  backends + the aggregation logic live in `search_metasearch.py`. Removed the
+  CLI / API server / MCP server / images / videos / news / books / extract /
+  cache / async-loop-in-thread — text search only.
+- **Async-native parallel aggregator**: backends run concurrently (asyncio +
+  to_thread for the sync primp/httpx fetches); a **diversity quorum** waits for
+  at least 3 backends to contribute before returning (so no single backend's
+  bias/rate-limit dominates), with a 2s soft fallback so dead backends don't
+  stall the search. Cross-backend consensus is tracked per URL (a URL returned
+  by N independent index-families gets the consensus boost).
+- **Transport**: primp (Rust HTTP client, random browser TLS/header
+  impersonation) for most backends; httpx (HTTP/2 + randomized cipher/SETTINGS
+  frame) for DuckDuckGo. `primp`/`httpx[http2]`/`fake-useragent`/`lxml` added as
+  core deps.
+- **No browser for search** — kills the 2nd-Chrome bug dead. Search is 100%
+  HTTP; the single Patchright browser stays for smart_fetch only (eager +
+  persistent at startup, as perfected).
+- **Neural rerank kept** (the part that was already great); `find_similar` kept.
+- `engine_blocked` now reports only genuinely-blocked backends (rate-limit /
+  CAPTCHA / timeout); empty (no results) + preempted (cancelled because enough
+  backends delivered) backends are not falsely flagged.
+- `HOUND_SEARCH_PROXY` (http/https/socks5) is the power-user rotating-proxy
+  escape hatch for per-IP throttling — the one thing no scraper can escape from
+  a single IP.
+
+Verified live: 10 rapid searches -> 0 dead-ends, avg 3.7s, 3 backends
+contributing per search, high-quality authoritative top results (tokio.rs,
+climate.ec.europa.eu, wikipedia, github, doc.rust-lang.org). 1 browser session
+throughout (smart_fetch only, no 2nd Chrome). 585 tests pass.
+
 ## [7.4.0] - 2026-06-24
 
 ### fix: the real rate-limit fix — shared-browser search backbone + parallel race

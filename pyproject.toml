@@ -1,6 +1,6 @@
 [project]
 name = "hound-mcp"
-version = "7.4.0"
+version = "7.5.0"
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
@@ -9,6 +9,11 @@ dependencies = [
     "scrapling[ai]>=0.4.7",
     "trafilatura>=2.0.0",
     "aiosqlite>=0.20.0",
+    # metasearch backends (vendored ddgs engine layer, MIT) - keyless search:
+    "primp>=1.0",
+    "httpx[http2]>=0.27",
+    "fake-useragent>=2.0",
+    "lxml>=5.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

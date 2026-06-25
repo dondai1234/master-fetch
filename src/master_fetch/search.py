@@ -46,9 +46,9 @@ class SearchResult(BaseModel):
     title: str = Field(description="Result title")
     url: str = Field(description="Result URL")
     snippet: str = Field(default="", description="Result snippet from the engine")
-    source: str = Field(default="", description="Engine(s) that returned this result (duckduckgo/bing/qwant/wikipedia/yahoo). Multiple = cross-engine consensus.")
+    source: str = Field(default="", description="Backend(s) that returned this result (duckduckgo/brave/mojeek/yahoo/yandex/startpage/google/wikipedia/grokipedia). Multiple = cross-backend consensus.")
     position: int = Field(default=0, description="1-indexed rank after merge + rerank")
-    relevance_score: float = Field(default=0.0, description="0.0-1.0 relevance to the query (BM25 over title+snippet, or neural cross-encoder score in neural mode), boosted by cross-engine consensus. 1.0 = most relevant in this set.")
+    relevance_score: float = Field(default=0.0, description="0.0-1.0 relevance to the query (neural cross-encoder score in neural mode, min-max normalized), boosted by cross-backend consensus. 1.0 = most relevant in this set.")
     fetch_relevance: str = Field(default="", description="high|med|low - relative relevance hint. smart_fetch what matches your need; the tiers rank results but a lower tier can be the right one - use your judgment.")
     engines_consensus: str = Field(default="", description="How many independent indexes returned this URL (e.g. '3 of 4'). A free authority signal: a URL returned by several independent engines is more likely authoritative.")
 
@@ -155,9 +155,9 @@ def _validate_engines(engines):
         return None
     if not isinstance(engines, list) or not engines:
         raise SecurityError("engines must be a non-empty list")
-    if len(engines) > 6:
-        raise SecurityError("engines list too long (max 6)")
-    valid = set(DEFAULT_ENGINES) | {"wikipedia", "yahoo"}
+    if len(engines) > 9:
+        raise SecurityError("engines list too long (max 9)")
+    valid = set(DEFAULT_ENGINES) | {"wikipedia", "grokipedia", "yahoo", "bing", "qwant"}
     for e in engines:
         if not isinstance(e, str) or e.lower() not in valid:
             raise SecurityError(f"Invalid engine: {e!r} (one of {sorted(valid)})")
@@ -343,7 +343,7 @@ async def smart_search(
         region = f"{loc}-{lang}" if len(loc) == 2 else "us-en"
 
     cache_query = find_sim_url or query
-    cache_type = (f"search:v4:{max_results}:{site or ''}:{','.join(exclude_sites or [])}:"f"{location or ''}:{language or ''}:{page or 0}:{','.join(engines or [])}:"f"{freshness or ''}:{mode}:{cache_query}")
+    cache_type = (f"search:v5:{max_results}:{site or ''}:{','.join(exclude_sites or [])}:"f"{location or ''}:{language or ''}:{page or 0}:{','.join(engines or [])}:"f"{freshness or ''}:{mode}:{cache_query}")
     if cache_ttl > 0:
         cached = await get_cached(cache_query, cache_type, None, ttl=cache_ttl)
         if cached and cached.get("content"):
@@ -456,7 +456,7 @@ async def smart_search(
     # engines means an opt-in engine like google that CAPTCHAs is visible to the
     # agent (in engine_blocked), not silently absent from both lists.
     engines_used = list(dict.fromkeys(r.name for r in reports if r.ok))
-    engine_blocked = list(dict.fromkeys(r.name for r in reports if (not r.ok and not getattr(r, "preempted", False))))
+    engine_blocked = list(dict.fromkeys(r.name for r in reports if r.blocked))
 
     # Agent QoL: when some engines didn't contribute but results came back from
     # the rest, say so plainly so the agent knows the results are partial + a

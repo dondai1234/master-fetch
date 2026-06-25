@@ -736,7 +736,58 @@ accuracy; test the rate-limiting hard.
   'jaguar' (ambiguous) 0.7-1.0, 'rust tokio runtime' (clear) 0.833-1.0 (narrow is
   honest - all results relevant); consensus surfaces tokio.rs + github to #1-2.
 
-### v7.4.0 (SHIPPED 2026-06-24) — shared-browser search backbone + parallel race (the real rate-limit fix)
+### v7.5.0 (SHIPPED 2026-06-25) — search rebuilt on a vendored ddgs metasearch (the robust rewrite)
+
+Dondai: v7.4 was terrible — sometimes only Bing (garbage), sometimes DDG+Qwant
+not contributing, constant rate-limits, AND search opened a 2nd Chrome instead
+of reusing the fetch tool's chrome-for-testing. All my hand-rolled attempts
+(7.0-7.4) made it worse. His call: completely replace the engine method with a
+robust one (fast, high quality, no rate-limits, not just 1 weak engine); keep
+the neural rerank. His idea: ddgs is MIT, so vendor + strip + optimize it for
+hound rather than take it as a dep.
+
+- **Vendored ddgs metasearch** (MIT, deedy5, attributed in NOTICE.ddgs.txt) into
+  `src/master_fetch/search_metasearch.py`: the base engine class (fetch + XPath
+  parse) + 9 text backends + the aggregation logic. Stripped CLI/API/MCP/
+  images/videos/news/books/extract/cache/async-loop — text search only.
+- **9 keyless backends in parallel**: duckduckgo, brave, mojeek, yahoo, yandex,
+  startpage, google + opt-in wikipedia, grokipedia. INDEPENDENT indexes. A
+  backend that CAPTCHAs/rate-limits/no-topic-match yields nothing + others
+carry — diversity IS the robustness (9 backends vs my old 3).
+- **Async-native aggregator** (search_metasearch.metasearch): backends run
+  concurrently (asyncio.ensure_future + to_thread for sync primp/httpx fetches);
+  **diversity quorum** waits for >=3 backends to contribute (min_engines) OR a
+  2s soft_deadline once enough results land, then cancels laggards. Cancelled-
+  because-enough backends get status='preempted' (NOT 'blocked'). Tracks ALL
+  backends per URL -> cross-backend consensus (distinct index families).
+- **Transport**: primp (Rust HTTP, impersonate='random' TLS/header) for most;
+  httpx (HTTP/2 + _H2Patch randomizes SETTINGS frame + _random_ssl_context
+  cipher shuffle) for DuckDuckGo (primp had DDG issues upstream). Core deps +=
+  primp, httpx[http2], fake-useragent, lxml.
+- **`search_engines.py` rewritten** as a thin adapter: multi_search maps hound
+  params (freshness->timelimit, page 0->1-indexed, site/exclude via query prefix
+  + final-URL filter, engines via _HOUND_TO_BACKEND) onto metasearch, maps
+  results to RawResult (consensus = distinct _INDEX_FAMILY of backends, sources
+  = all backends), builds EngineReports from status (ok/blocked/preempted/
+  timeout/empty). prewarm_search_engines + close_search_engines are no-ops now
+  (no warm session pool; primp/httpx clients are cheap one-shots).
+- **NO browser for search** — kills the 2nd-Chrome bug. Search is 100% HTTP; the
+  single Patchright browser stays for smart_fetch only (eager at startup,
+  persistent). `server=None` accepted by multi_search for call-site compat,
+  unused.
+- **`search.py`**: cache key bumped search:v4 -> search:v5; engine_blocked =
+  `r.blocked` only (genuinely blocked, NOT empty/preempted); engines valid set
+  expanded to all 9 backends + legacy bing/qwant; source/relevance_score field
+  descriptions updated. Neural rerank + find_similar + quality filter unchanged.
+- **Bing disabled** in ddgs (DDG + Yahoo serve its index); _HOUND_TO_BACKEND maps
+  bing->yahoo, qwant->duckduckgo (no ddgs qwant backend).
+- LIVE-PROVEN: 10 rapid searches -> 0 dead, avg 3.7s, 3 backends/search,
+  authoritative top results (tokio.rs, climate.ec.europa.eu, wikipedia/CRDT,
+  github/kubernetes, doc.rust-lang.org). 1 browser session throughout. 585 tests.
+- `HOUND_SEARCH_PROXY` (http/https/socks5) = power-user rotating-proxy escape
+  hatch for per-IP throttling (the one thing no scraper escapes from one IP).
+
+### v7.4.0 (SUPERSEDED by v7.5.0) — shared-browser search backbone + parallel race
 
 Dondai: rate-limiting was terrible — 2 searches and all 3 engines dead for a
 while. Root cause: v7.3.1 made the stealthy browser LAZY (my unauthorized
@@ -828,6 +879,33 @@ Ecosia (own index now - future option).
 
 ## Dev notes / API quirks
 
+- **v7.5 search transport quirks (search_metasearch.py — vendored ddgs, MIT):**
+  - 9 text backends: duckduckgo (httpx transport, POST, html.duckduckgo.com/html,
+    XPath //div[contains(@class,'body')]; filters y.js ad links), brave (primp,
+    search.brave.com, //div[@data-type='web'], cookies for region/safesearch),
+    google (primp, Android UA + CONSENT cookie, //div[@data-hveid][.//h3]; often
+    CAPTCHAs under load but carried by others), startpage (primp, POST, needs an
+    `sc` token fetched from the homepage first; Google-index privacy frontend),
+    grokipedia (primp, JSON api/typeahead, priority 1.9, encyclopedic), wikipedia
+    (primp, opensearch API + extracts, priority 2.0, topic-match only), yahoo
+    (primp, Bing-index from diff server, //div[contains(@class,'relsrch')],
+    /RU= redirect decode), mojeek (primp, own index, //ul[results]/li), yandex
+    (primp, yandex.com/search/site). **Bing disabled** (DDG+Yahoo serve it).
+  - **Transport**: primp.Client(impersonate='random', impersonate_os='random')
+    for most; httpx.Client(http2=True, _random_ssl_context cipher shuffle +
+    _H2Patch randomizes HTTP/2 SETTINGS frame) for DDG. Both sync -> metasearch
+    wraps engine.search in asyncio.to_thread.
+  - **metasearch() async aggregator**: asyncio.wait(FIRST_COMPLETED) loop;
+    min_engines=min(3,len(instances)) + soft_deadline=2.0 + quorum_results=
+    max_results+4; early-return cancels laggards (await with `except BaseException`
+    — CancelledError is BaseException py3.11+). Dedup by _normalize_url, tracks
+    ALL backends per URL (seen[key]['backends'] set) for consensus. status per
+    backend: ok/empty/error:X/timeout/preempted.
+  - **_HOUND_TO_BACKEND**: bing->yahoo, qwant->duckduckgo (no ddgs qwant).
+    _INDEX_FAMILY by ddgs provider: duckduckgo+yahoo='bing', google+startpage=
+    'google', brave/grokipedia/wikipedia/mojeek/yandex each own. consensus =
+    distinct families.
+  - `HOUND_SEARCH_PROXY` env -> primp/httpx proxy param (per-IP throttle escape).
 - **v7.4 engine transport quirks (search_engines.py) — the rate-limit fix:**
   - **DuckDuckGo renders its SERP in the shared warm Patchright browser**
     (`_browser_html(server, url, '.result')` → `server.stealthy_fetch` with
