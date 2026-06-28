@@ -275,15 +275,46 @@ def _metadata_dict(meta: dict) -> dict[str, Any]:
     }
 
 
+def _add_end_pages(toc: list[dict], total_pages: int) -> list[dict]:
+    """Add `end_page` to each ToC entry from the outline structure.
+
+    For entry i at level L, end_page = (page of the next entry j>i with
+    level[j] <= L) - 1, or total_pages if no such entry. This gives the agent a
+    page RANGE per section (e.g. 'Methodology: 23-31') so it can call
+    pages='23-31' to grab exactly that section. Entries with no start page are
+    left as-is (end_page not set)."""
+    n = len(toc)
+    for i, entry in enumerate(toc):
+        lvl = entry.get("level", 1)
+        start = entry.get("page")
+        if start is None:
+            continue
+        end = total_pages
+        for j in range(i + 1, n):
+            if toc[j].get("level", 1) <= lvl and toc[j].get("page") is not None:
+                end = max(int(start), int(toc[j]["page"]) - 1)
+                break
+        entry["end_page"] = int(end)
+    return toc
+
+
 def _extract_toc(body: bytes) -> list[dict]:
     """Extract the PDF outline tree (bookmarks) via pypdfium2 -> list of
-    {level, title, page}. Empty for PDFs without an outline (most arxiv papers)."""
+    {level, title, page, end_page}. Empty for PDFs without an outline (most
+    arxiv papers) - the caller falls back to a heading-based section-map built
+    during extraction in that case."""
     try:
         import pypdfium2 as pdfium  # type: ignore
     except ImportError:
         return []
     try:
         pdf = pdfium.PdfDocument(body)
+        try:
+            total_pages = len(pdf)
+        except Exception:
+            # Fallback: derive from the outline's max page (real pypdfium2 supports
+            # len; this guards exotic wrappers / test fakes without __len__).
+            total_pages = 0
         toc = []
         for bookmark in pdf.get_toc():
             level = (getattr(bookmark, "level", 0) or 0) + 1  # 0-based -> 1-based
@@ -302,7 +333,7 @@ def _extract_toc(body: bytes) -> list[dict]:
                 page = None
             toc.append({"level": int(level), "title": str(title).strip(), "page": page})
         pdf.close()
-        return toc
+        return _add_end_pages(toc, total_pages)
     except Exception as e:
         logger.debug("ToC extraction failed: %s", e)
         return []
@@ -446,10 +477,12 @@ def extract_pdf(
         cid_pages: list[int] = []
         scan_pages: list[int] = []  # image-only pages in a MIXED PDF (per-page OCR)
         total_chars = 0
+        heading_outline: list[dict] = []  # v8: heading-based section-map fallback
         for n in page_nums:
             p = pdf.pages[n - 1]
             try:
-                page_md = _render_page(p, body_size, text_mode)
+                page_md = _render_page(p, body_size, text_mode,
+                                       page_num=n, headings=heading_outline)
             except Exception as e:
                 logger.debug("PDF page %d render failed: %s", n, e)
                 page_md = f"[Failed to render this page: {str(e)[:120]}]"
@@ -467,6 +500,14 @@ def extract_pdf(
                     has_images = False
                 if has_images:
                     scan_pages.append(n)
+
+        # v8: section-map fallback. PDFs without a bookmark outline (most arxiv
+        # papers, many reports) get a heading-based ToC built from the font-size
+        # heading detection already run during render. The agent then navigates
+        # with pages='X-Y' just like a bookmarked PDF. Clamped to the extracted
+        # page range so the map matches what was actually returned.
+        if not toc and heading_outline:
+            toc = _heading_outline(heading_outline, page_nums, total_pages)
 
         # --- All-scanned doc -> honest dead-end (caller runs the scanned-OCR) ---
         scanned = total_chars < _SCANNED_CHARS_PER_PAGE * len(page_nums)
@@ -565,7 +606,46 @@ def extract_pdf(
             pass
 
 
-def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
+def _heading_outline(headings: list[dict], page_nums: list[int], total_pages: int
+                     ) -> list[dict]:
+    """Build a synthetic section-map from font-size-detected headings.
+
+    Used when the PDF has no bookmark outline. Dedupes consecutive same-title
+    headings, caps at 60 entries, keeps only headings on extracted pages, and
+    computes end_page clamped to the extracted range so the map matches what was
+    actually returned. Returns [{level, title, page, end_page}]."""
+    if not headings:
+        return []
+    extracted = set(page_nums)
+    max_extracted = max(page_nums) if page_nums else total_pages
+    seen: set[tuple[int, str]] = set()
+    toc: list[dict] = []
+    for h in headings:
+        page = h.get("page")
+        if page is None or page not in extracted:
+            continue
+        title = (h.get("title") or "").strip()
+        if not title or len(title) > 120:
+            continue
+        key = (page, title.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        toc.append({"level": int(h.get("level", 1)), "title": title, "page": int(page)})
+        if len(toc) >= 60:
+            break
+    if not toc:
+        return []
+    toc = _add_end_pages(toc, total_pages)
+    # Clamp end_page to the extracted range (we never return pages past max_extracted).
+    for entry in toc:
+        if "end_page" in entry:
+            entry["end_page"] = min(int(entry["end_page"]), max_extracted)
+    return toc
+
+
+def _render_page(page: Any, body_size: float, text_mode: bool,
+                 page_num: int | None = None, headings: list[dict] | None = None) -> str:
     """Render one page to markdown: layout-aware text + tables merged by y-position."""
     try:
         tables = page.find_tables(table_settings={"text_x_tolerance": _X_TOL, "text_y_tolerance": 3})
@@ -639,6 +719,8 @@ def _render_page(page: Any, body_size: float, text_mode: bool) -> str:
         if level and not text_mode:
             flush_paragraph()
             out.append(f"{'#' * level} {txt}")
+            if headings is not None and page_num is not None:
+                headings.append({"level": level, "title": txt.strip(), "page": page_num})
             prev_bottom = line_bottom
             continue
         if prev_bottom is not None and (line_top - prev_bottom) > gap_threshold:

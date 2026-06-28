@@ -99,6 +99,7 @@ class CrawlPage(BaseModel):
     is_truncated: bool = Field(default=False, description="True = this page has more content; smart_fetch it with offset=next_offset.")
     next_offset: int = Field(default=0, description="Next offset if is_truncated; 0 = no more.")
     fetched_at: str = Field(default="", description="ISO-8601 UTC when this page was fetched (may show cache age).")
+    lastmod: str = Field(default="", description="<lastmod> from the site's sitemap.xml for this URL (sitemap mode only). Empty otherwise.")
     summary: str = Field(default="", description="One-line status for this page.")
     error: str = Field(default="", description="Error for this page, if content_ok is False.")
 
@@ -112,6 +113,8 @@ class CrawlResponseModel(BaseModel):
     truncated_by_budget: bool = Field(default=False, description="True = stopped early because the total-char budget was reached.")
     truncated_by_max_pages: bool = Field(default=False, description="True = stopped early because max_pages was reached.")
     truncated_by_time: bool = Field(default=False, description="True = stopped early because the overall deadline (ms) was reached.")
+    sitemap_used: bool = Field(default=False, description="True = the URL map came from the site's sitemap.xml (one fetch), not best-first BFS discovery.")
+    sitemaps: list[str] = Field(default=[], description="Sitemap.xml URLs that were fetched + parsed (sitemap mode only).")
     duration_ms: float = Field(default=0, description="Duration ms.")
     error: str = Field(default="", description="Error message (crawl-level).")
     summary: str = Field(default="", description="One-line crawl status.")
@@ -361,6 +364,111 @@ def _error_status(resp) -> int:
     return status
 
 
+def _sitemap_passes_filters(path: str, path_include: Optional[list[str]],
+                            path_exclude: Optional[list[str]]) -> bool:
+    if path_include and not any(path.startswith(p) for p in path_include):
+        return False
+    if path_exclude and any(path.startswith(p) for p in path_exclude):
+        return False
+    return True
+
+
+async def _sitemap_map(url: str, path_include: Optional[list[str]],
+                       path_exclude: Optional[list[str]], *,
+                       max_pages: int, deadline_t: float) -> Optional[CrawlResponseModel]:
+    """Try to map the site via sitemap.xml. Returns a CrawlResponseModel on
+    success (sitemap found + parsed), or None if no sitemap was reachable so the
+    caller can fall back to BFS ('auto'). Same-domain + path filters applied.
+    Caps the returned URL map at max(1000, max_pages*10)."""
+    from master_fetch.sitemap import discover_sitemap, SitemapURL
+
+    def _make_http_get():
+        try:
+            import primp  # type: ignore
+            client = primp.Client(proxy=None, timeout=15, impersonate="random",
+                                  impersonate_os="random", verify=True)
+        except Exception:
+            client = None
+        import urllib.request as _urllib_req
+
+        def _get(u: str):
+            if client is not None:
+                try:
+                    r = client.get(u)
+                    if r.status_code == 200 and r.content:
+                        return (int(r.status_code), bytes(r.content))
+                    return None
+                except Exception:
+                    pass  # fall back to urllib
+            # stdlib fallback (some hosts reject primp fingerprints, accept urllib)
+            try:
+                req = _urllib_req.Request(u, headers={"User-Agent": "Hound-Sitemap/8.0"})
+                with _urllib_req.urlopen(req, timeout=15) as resp:  # noqa: S310
+                    body = resp.read()
+                    if body:
+                        return (int(resp.status), body)
+            except Exception:
+                return None
+            return None
+        return _get
+
+    t0 = time()
+    root_netloc = urlparse(url).netloc
+    cap = min(5000, max(1000, max_pages * 10))
+    try:
+        result = await asyncio.to_thread(
+            discover_sitemap, url, http_get=_make_http_get(), max_urls=cap,
+        )
+    except Exception:
+        return None
+    if not result.urls or not result.sitemaps_used:
+        return None
+
+    pages: list[CrawlPage] = []
+    seen: set[str] = set()
+    for su in result.urls:
+        if time() > deadline_t:
+            break
+        try:
+            parsed = urlparse(su.url)
+        except Exception:
+            continue
+        if parsed.scheme not in ("http", "https") or parsed.netloc != root_netloc:
+            continue  # sitemaps can list other hosts; keep same-domain only
+        path = parsed.path or "/"
+        if not _sitemap_passes_filters(path, path_include, path_exclude):
+            continue
+        norm = normalize_url(su.url)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        pages.append(CrawlPage(
+            url=norm, depth=0, status=0, content_ok=True, fetcher_used="sitemap",
+            page_type="sitemap", content=[], content_chars=0, lastmod=su.lastmod,
+            summary="sitemap entry",
+        ))
+        if len(pages) >= cap:
+            break
+
+    if not pages:
+        return None
+
+    ok = len(pages)
+    summary = (f"mapped {ok} URL(s) at {url} from sitemap.xml "
+               f"(via {result.via}; {len(result.sitemaps_used)} sitemap file(s)) - one fetch, no BFS")
+    next_action = (
+        f"{ok} URLs mapped from the sitemap. smart_fetch the ones you need, or re-run "
+        f"smart_crawl with crawl_urls=[...] (or discover_only=false) to fetch content "
+        f"for a chosen subset. Use path_include/path_exclude to scope."
+    )
+    return CrawlResponseModel(
+        start_url=normalize_url(url), pages=pages, pages_crawled=0,
+        pages_discovered=ok, discover_only=True, sitemap_used=True,
+        sitemaps=list(result.sitemaps_used),
+        duration_ms=(time() - t0) * 1000, summary=summary, next_action=next_action,
+    )
+
+
 async def smart_crawl(
     server,
     url: str,
@@ -379,8 +487,15 @@ async def smart_crawl(
     force_fetcher: Optional[str] = None,
     timeout: int = 30000,
     deadline_ms: int = 120000,
+    sitemap: str | bool = False,
 ) -> CrawlResponseModel:
-    """Best-first same-domain crawl. See module docstring."""
+    """Best-first same-domain crawl. See module docstring.
+
+    sitemap: True = map the site from its sitemap.xml only (one fetch; returns
+    the full URL list + lastmod, no BFS, no content). 'auto' = use the sitemap if
+    the site has one, else fall back to BFS. False (default) = BFS only. The
+    sitemap path collapses big-site discovery (hundreds of pages) into one call.
+    """
     from master_fetch.security import validate_url, SecurityError
     from master_fetch.trafilatura_extractor import extract_html_title
     from master_fetch.robots import is_allowed
@@ -407,6 +522,36 @@ async def smart_crawl(
         max_total_chars = max_pages * max_content_chars_per
     max_total_chars = max(max_content_chars_per, min(int(max_total_chars), 500000))
     focus = focus.strip() if isinstance(focus, str) and focus.strip() else None
+    selective = bool(crawl_urls)
+
+    # Normalize the sitemap flag: True/'auto'/False. 'auto' = use sitemap if
+    # present, else BFS. True = sitemap only (return empty if none). Strings are
+    # case-insensitive.
+    sm_mode = "off"
+    if isinstance(sitemap, str):
+        s = sitemap.strip().lower()
+        sm_mode = "auto" if s == "auto" else ("on" if s in ("true", "1", "on", "yes") else "off")
+    elif sitemap is True:
+        sm_mode = "on"
+
+    # ── Sitemap mode: map the site from sitemap.xml in one fetch ───────────
+    # Runs before BFS. 'auto' uses the sitemap if found, else falls through to
+    # BFS. 'on' returns the sitemap map (or an honest empty if none found).
+    if sm_mode in ("on", "auto") and not selective:
+        sm_result = await _sitemap_map(url, path_include, path_exclude,
+                                       max_pages=max_pages, deadline_t=deadline_t)
+        if sm_result is not None:
+            return sm_result  # sitemap found + mapped (auto/on success)
+        # auto: no sitemap -> fall through to BFS. on: no sitemap -> honest empty.
+        if sm_mode == "on":
+            return CrawlResponseModel(
+                start_url=start_norm, pages=[], pages_crawled=0,
+                pages_discovered=0, discover_only=True, sitemap_used=False,
+                duration_ms=(time() - t0) * 1000,
+                summary=f"no sitemap.xml found at {root} (robots.txt had no Sitemap directive and /sitemap.xml returned nothing)",
+                next_action=("No sitemap found. Re-run smart_crawl with sitemap=false (or omit it) "
+                             "to use best-first BFS discovery instead."),
+            )
 
     # Two-phase selective crawl: a caller-supplied URL subset is fetched with no
     # further discovery (max_depth=0). URLs are normalized + same-domain-checked.

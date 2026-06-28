@@ -753,6 +753,7 @@ async def metasearch(
                 status[name] = f"error:{type(ex).__name__}"
                 continue
             added = 0
+            touched = False  # returned a valid result that matched an existing key (dupe)
             for r in res:
                 if not getattr(r, "href", None) or not getattr(r, "title", None):
                     continue
@@ -763,6 +764,7 @@ async def metasearch(
                     # another backend already returned this URL -> record the
                     # agreement (cross-backend consensus authority signal).
                     seen[key]["backends"].add(name)
+                    touched = True
                     continue
                 entry = {"title": r.title, "href": r.href, "body": getattr(r, "body", "") or "",
                          "backend": name, "backends": {name}}
@@ -771,7 +773,10 @@ async def metasearch(
                 added += 1
             if added:
                 engines_ok += 1
-            status[name] = "ok" if added else ("empty" if res else "empty")
+            # 'ok' = contributed a valid result (new OR a dupe that confirms
+            # consensus). 'empty' = returned nothing usable. (A backend whose
+            # only result was a dupe still contributed - it confirmed the URL.)
+            status[name] = "ok" if (added or touched) else "empty"
         # early-return: enough engines contributed enough results, OR enough
         # results after the soft deadline (don't hold for dead backends).
         elapsed = time() - start

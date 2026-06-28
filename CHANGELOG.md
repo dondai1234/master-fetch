@@ -1,5 +1,78 @@
 # Changelog
 
+## [8.0.0] - 2026-06-28
+
+### feat: sitemap-mode crawl, outgoing-links field, related-queries, PDF section-map + tool-def overhaul
+
+A major upgrade focused on agent efficiency: collapse real multi-step agent
+loops into fewer calls, and surface what a page/site actually contains so the
+agent fetches less and navigates better. Four new capabilities (all NEW - none
+are re-labels of existing behavior), plus a tool-def overhaul and a robustness
+fix to the metasearch status logic.
+
+- **Sitemap mode for smart_crawl** (`sitemap=true|'auto'|false`): map a whole
+  site from its sitemap.xml in ONE fetch (full URL list + `<lastmod>`) instead
+  of blind best-first BFS. Collapses a hundreds-of-pages discovery crawl into a
+  single call. `auto` uses the sitemap if the site has one, else BFS; `true`
+  maps sitemap-only (honest empty if none). Discovery: robots.txt `Sitemap:`
+  directives first, then `/sitemap.xml` + `/sitemap_index.xml`; recurses into
+  `<sitemapindex>` children (depth + count capped); gzip-tolerant;
+  namespace-agnostic; same-domain + path filters applied. New module
+  `sitemap.py`. CrawlResponseModel gains `sitemap_used` + `sitemaps`; CrawlPage
+  gains `lastmod`.
+
+- **Outgoing-links field on smart_fetch** (`include_links=true`): populates
+  `response.links = {citations, navigation, external, primary_source}`.
+  `citations` = links inside the main-content area (the page's referenced
+  sources - the highest-value links to follow); `navigation` = site chrome;
+  `external` = off-domain links; `primary_source` = best-effort hint at the
+  actual primary source (canonical/JSON-LD on a different host, else an
+  in-content off-domain reference on a known primary host like arxiv/doi/github).
+  Lets an agent follow a page's source chain in one step instead of eyeballing
+  markdown links. New module `links.py`.
+
+- **Related-queries on smart_search**: `related_queries` mined EXTRACTIVELY
+  from the result titles + snippets hound already collected (no LLM, no
+  per-engine "related searches" SERP markup dependency). Ranks bigrams by
+  document frequency across the result set, drops ones that overlap the
+  original query, falls back to high-frequency unigrams. Engine-agnostic and
+  robust to SERP markup changes. Helps an agent refine a broad query.
+
+- **PDF section-map with page ranges**: `table_of_contents` entries now carry
+  `end_page` (computed from the outline structure) so an agent can pass
+  `pages='23-31'` to grab exactly one section by range. For PDFs WITHOUT a
+  bookmark outline (most arxiv papers), a heading-based section-map is built
+  from the font-size heading detection already run during render - so every
+  navigable PDF gets a section-map. Clamped to the extracted page range so the
+  map matches what was actually returned.
+
+- **Tool-def overhaul**: all 6 `_TOOL_DEFS` rewritten tight + structured (the
+  agent-facing surface - the MCP client sees these, not the method docstrings).
+  `HOUND_INSTRUCTIONS` rewritten: killed the stale `open_session` pro tip
+  (removed in v4), tightened prose, documented the new features. The existing
+  `actions` capability (infinite scroll / load-more / forms) is now obvious in
+  the def with examples instead of buried. Stripped the redundant `:param:`
+  block from the `smart_fetch` method docstring (internal bloat never sent to
+  the client).
+
+- **Robustness fix (metasearch status)**: a backend that returned valid results
+  which happened to all be deduped by an earlier-finishing backend was marked
+  `empty` - misleading (it DID contribute, it confirmed consensus). Now `ok`
+  if it returned any valid result (new OR a dupe), `empty` only if it returned
+  nothing usable. Also makes the dedup test deterministic (was racy on backend
+  completion order).
+
+- **Chunking fix**: `_apply_chunking` rebuilt the ResponseModel on truncation
+  and dropped the `links` field (and would have dropped any new
+  contextvar-driven field). Now copies `links` through (same as media/metadata).
+
+6 tools unchanged in count (smart_fetch, smart_crawl, smart_search, screenshot,
+cache_clear, version) - all sharpened, none cut. 603 tests (585 + 18 new v8
+feature tests). Live-proven: sitemap mapped docs.python.org in one fetch;
+search mines related_queries; include_links classified 30 citations / 20 nav /
+20 external on Wikipedia with a correct github primary_source; PDF section-map
+built 27 entries with page ranges on a bookmarkless arxiv PDF.
+
 ## [7.5.0] - 2026-06-25
 
 ### feat: search rebuilt on a vendored ddgs metasearch (the robust rewrite)

@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+from collections import Counter
 from time import time
 from typing import Optional
 
@@ -38,6 +40,105 @@ from master_fetch.reranker import (
 logger = logging.getLogger("master-fetch.search")
 
 SEARCH_CACHE_TTL = 300  # 5 minutes
+
+
+# ─── related-query mining (extractive, no LLM) ──────────────────────────────
+# Mine follow-up queries from the result titles + snippets hound already has.
+# Engine-agnostic and robust: no dependence on fragile per-engine "related
+# searches" SERP markup (which changes often). Ranks bigrams by document
+# frequency across the result set, drops ones that overlap the original query,
+# and returns the top N as suggested refinements.
+
+_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were",
+    "has", "have", "had", "you", "your", "its", "our", "not", "but", "can",
+    "will", "into", "via", "using", "use", "how", "what", "when", "why", "who",
+    "which", "about", "also", "more", "most", "than", "then", "them", "they",
+    "their", "there", "here", "such", "each", "other", "some", "any", "all",
+    "one", "two", "new", "get", "got", "may", "might", "could", "should",
+    "would", "does", "did", "done", "been", "being", "very", "just", "like",
+}
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9'+-]{2,}")
+
+
+def _query_tokens(query: str) -> set[str]:
+    return {w.lower() for w in _WORD_RE.findall(query or "") if w.lower() not in _STOPWORDS}
+
+
+def _related_queries(query: str, results: list["SearchResult"], *, n: int = 6) -> list[str]:
+    """Mine follow-up queries from result titles + snippets.
+
+    Ranks bigrams by document frequency (in how many results they appear),
+    drops bigrams that overlap the original query or duplicate each other, and
+    falls back to high-frequency unigrams if too few bigrams. Returns up to n
+    phrases. Robust + cheap; never raises.
+    """
+    if not results:
+        return []
+    q_tokens = _query_tokens(query)
+    docs: list[list[str]] = []
+    for r in results:
+        text = (f"{r.title} {r.snippet}").lower()
+        words = [w for w in _WORD_RE.findall(text) if w not in _STOPWORDS]
+        docs.append(words)
+    if not docs:
+        return []
+
+    bigram_docfreq: Counter[str] = Counter()
+    unigram_docfreq: Counter[str] = Counter()
+    for words in docs:
+        uniq_bi = set()
+        for i in range(len(words) - 1):
+            a, b = words[i], words[i + 1]
+            if len(a) < 3 or len(b) < 3:
+                continue
+            uniq_bi.add(f"{a} {b}")
+        for bi in uniq_bi:
+            bigram_docfreq[bi] += 1
+        for w in set(words):
+            if len(w) >= 3:
+                unigram_docfreq[w] += 1
+
+    def _overlaps_query(phrase: str) -> bool:
+        toks = phrase.split()
+        if not toks:
+            return True
+        if not [t for t in toks if t not in q_tokens]:  # every token already in query
+            return True
+        pq, pphrase = query.lower(), phrase
+        if pphrase in pq or pq in pphrase:
+            return True
+        return False
+
+    scored = []
+    for bi, df in bigram_docfreq.items():
+        if df < 2:  # appears in only one result -> not a pattern
+            continue
+        if _overlaps_query(bi):
+            continue
+        scored.append((df, bi))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+
+    out: list[str] = []
+    seen_words: set[str] = set()
+    for _df, bi in scored:
+        toks = bi.split()
+        if len(set(toks) & seen_words) >= 2:  # near-dup of a kept suggestion
+            continue
+        out.append(bi)
+        seen_words.update(toks)
+        if len(out) >= n:
+            break
+
+    if len(out) < n:  # fall back to unigrams
+        for w, df in unigram_docfreq.most_common():
+            if df < 2 or w in q_tokens or w in seen_words:
+                continue
+            out.append(w)
+            seen_words.add(w)
+            if len(out) >= n:
+                break
+    return out[:n]
 
 
 # ─── response model ──────────────────────────────────────────────────────────
@@ -64,6 +165,7 @@ class SearchResponseModel(BaseModel):
     duration_ms: float = Field(default=0, description="Duration ms")
     error: str = Field(default="", description="Error message (empty = ok)")
     fetch_hint: str = Field(default="", description="How many high/med/low results + which to smart_fetch first")
+    related_queries: list[str] = Field(default=[], description="Follow-up queries worth searching next, mined extractively from the result titles+snippets (no LLM). Empty if none derived. Use to refine a broad query.")
     summary: str = Field(default="", description="One-line status of the search (counts + engines + rerank).")
     next_action: str = Field(default="", description="The obvious next call: fetch the high results, rephrase, retry, etc. Empty = nothing more to do.")
 
@@ -353,12 +455,14 @@ async def smart_search(
                 _eu = data.get("engines_used", [])
                 _eb = data.get("engine_blocked", [])
                 _rm = data.get("rerank_mode", "keyword")
+                _rq = data.get("related_queries", [])
                 return SearchResponseModel(
                     query=cache_query, results=results_list,
                     total_results=len(results_list), cached=True,
                     engines_used=_eu,
                     engine_blocked=_eb,
                     rerank_mode=_rm,
+                    related_queries=_rq,
                     duration_ms=(time() - t0) * 1000,
                     fetch_hint=compute_fetch_hint(results_list),
                     summary=_search_summary(cache_query, results_list, _eu, _rm),
@@ -422,6 +526,7 @@ async def smart_search(
         fetch_hint = (fetch_hint + " | " + sim_note) if fetch_hint else sim_note
         if rerank_note:
             fetch_hint = (fetch_hint + " | " + rerank_note) if fetch_hint else rerank_note
+        sim_related = _related_queries(derived_query, results_list)
     else:
         try:
             ranked, reports = await multi_search(
@@ -450,6 +555,7 @@ async def smart_search(
         fetch_hint = compute_fetch_hint(results_list)
         if rerank_note:
             fetch_hint = (fetch_hint + " | " + rerank_note) if fetch_hint else rerank_note
+        main_related = _related_queries(query, results_list)
 
     # engines_used = contributed; engine_blocked = did NOT contribute (blocked /
     # timed out / parsed no results / consent page). Surfacing non-contributing
@@ -466,13 +572,15 @@ async def smart_search(
                      f"results are from the rest - retry shortly for more recall.")
         fetch_hint = (fetch_hint + " | " + _blk_note) if fetch_hint else _blk_note
 
-    # Cache successful results (+ engine metadata for cache hits)
+    # Cache successful results (+ engine metadata + related queries for cache hits)
     if cache_ttl > 0 and results_list:
+        _rq_cache = sim_related if mode == "find_similar" else main_related
         cache_data = json.dumps({
             "results": [r.model_dump() for r in results_list],
             "engines_used": engines_used,
             "engine_blocked": engine_blocked,
             "rerank_mode": rerank_used,
+            "related_queries": _rq_cache,
         })
         await set_cached(cache_query, cache_type, [cache_data], 200, None, cache_ttl)
 
@@ -480,6 +588,7 @@ async def smart_search(
         query=cache_query, results=results_list, total_results=len(results_list),
         engines_used=engines_used, engine_blocked=engine_blocked,
         rerank_mode=rerank_used,
+        related_queries=(sim_related if mode == "find_similar" else main_related),
         duration_ms=(time() - t0) * 1000, error=error,
         fetch_hint=fetch_hint,
         summary=_search_summary(cache_query, results_list, engines_used, rerank_used),

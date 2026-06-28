@@ -62,6 +62,7 @@ def test_extract_toc_via_pypdfium2(monkeypatch):
         def __init__(self, marks): self._m = marks
         def get_toc(self):
             for m in self._m: yield FakeBM(m[0], m[1], m[2])
+        def __len__(self): return 5
         def close(self): pass
     class FakePdfium:
         PdfDocument = staticmethod(lambda body: FakePdf([
@@ -75,9 +76,10 @@ def test_extract_toc_via_pypdfium2(monkeypatch):
     monkeypatch.setitem(sys.modules, "pypdfium2", FakePdfium)
     toc = _extract_toc(b"%PDF- fake")
     assert len(toc) == 3
-    assert toc[0] == {"level": 1, "title": "1 Introduction", "page": 1}
-    assert toc[1] == {"level": 2, "title": "1.1 Background", "page": 2}
+    assert toc[0] == {"level": 1, "title": "1 Introduction", "page": 1, "end_page": 3}
+    assert toc[1] == {"level": 2, "title": "1.1 Background", "page": 2, "end_page": 3}
     assert toc[2]["page"] == 4
+    assert toc[2]["end_page"] == 5  # last entry -> total pages
 
 
 # ─── CID-garbage auto-OCR fallback (the flagship P1 fix) ──────────────────
@@ -88,7 +90,7 @@ FIXTURE = "tests/background_checks.pdf"
 def _patch_renderer_to_cid(monkeypatch):
     """Make _render_page return CID garbage for page 1 so the OCR fallback path
     triggers, without needing a real CID-corrupted PDF."""
-    def fake_render(page, body_size, text_mode):
+    def fake_render(page, body_size, text_mode, page_num=None, headings=None):
         return "(cid:71)(cid:302)(cid:340) (cid:71)(cid:302) more cid garbage here."
     monkeypatch.setattr(pe, "_render_page", fake_render)
 
@@ -305,7 +307,7 @@ def test_mixed_pdf_per_page_scanned_ocr(monkeypatch):
 
     monkeypatch.setattr(pe, "_get_pdfplumber", lambda: _FakePdfModule())
     # _render_page: text for page 1, empty for the scanned page 2 (key off .chars).
-    def fake_render(page, body_size, text_mode):
+    def fake_render(page, body_size, text_mode, page_num=None, headings=None):
         return ("Real article body text. " * 30) if page.chars else ""
     monkeypatch.setattr(pe, "_render_page", fake_render)
     monkeypatch.setattr(pe, "_ocr_pages", lambda body, nums, pw: {2: "OCR recovered the scanned page text."})

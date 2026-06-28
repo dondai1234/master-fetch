@@ -114,29 +114,22 @@ IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 # the #1 workflow, the gotchas, and when to use each tool. Kept tight (~300
 # tokens) since it is paid once, not per-turn-per-tool.
 HOUND_INSTRUCTIONS = (
-    "Hound = web access for this agent. 4 main tools (+ cache_clear, version) cover 95% of web work.\n"
+    "Hound = web access for this agent. 4 tools (+ cache_clear, version) cover 95% of web work.\n"
     "\n"
-    "• smart_fetch(url) - get any page. Auto-handles anti-bot (HTTP → stealthy Patchright browser). Returns extracted text + metadata.\n"
-    "  - One section only? pass css_selector (e.g. 'article', '.main').\n"
-    "  - Long page? response has is_truncated + next_offset → call again with offset=next_offset to page through.\n"
-    "  - Seems wrong/empty? check response.content_ok and response.next_action - they tell you what to do.\n"
-    "  - Many URLs? pass urls=['a','b'] (parallel bulk).\n"
-    "  - Raw HTML? extraction_type='html'.\n"
-    "  - PDFs: auto-extracted to structured markdown (tables/headings/ToC/metadata; scanned + CID-corrupted fonts auto-OCR with [all]; response carries quality_score + table_of_contents). Pass pages='1-5' to extract a subset and save tokens on big PDFs.\n"
-    "  - Cache: cache_ttl=0 forces a fresh fetch (default 1hr).\n"
-    "  - Long page, one topic? pass focus='...' to get only the BM25-relevant blocks (post-cache, no re-fetch; re-pass it when paginating with offset).\n"
-    "  - Behind a click/form/load-more/infinite-scroll? pass actions=[{click:'button.load-more'},{scroll:3},...] (forces the stealthy browser; runs after load, before extraction; bypasses cache).\n"
-    "• smart_search(query) - find pages. Local + keyless (no API key, no account). Runs 9 keyless backends in parallel (duckduckgo, brave, mojeek, yahoo, yandex, startpage, google + opt-in wikipedia, grokipedia) and ranks by neural relevance + cross-backend consensus. NEVER answer from snippets alone. Each result has fetch_relevance (high/med/low) + relevance_score + engines_consensus (how many independent indexes returned it); smart_fetch the ones that match what you need - the ranking is a hint, not a directive; a lower-ranked result can be the right one, so use your judgment.\n"
-    "  - Rerank: options={mode:'neural'} uses a local neural cross-encoder (needs hound-mcp[all]; auto-detects). mode='find_similar' + url=<a page> finds pages similar to it (fetches the source, reranks candidates vs its content). Default 'auto' uses neural if available, else cross-engine consensus + engine-position order (no lexical rerank; BM25 removed as redundant).\n"
-    "  - Response: summary (one-line status) + next_action (the obvious next call: fetch the high results / rephrase / retry / paginate) + engine_blocked (backends that rate-limited/CAPTCHA'd/timed out; results still came from the others, retry shortly for more recall).  Filters: options={site:'docs.python.org', exclude_sites:['pinterest.com'], location:'US', language:'en', region:'us-en', page:0, freshness:'day|week|month|year', engines:['duckduckgo','brave','mojeek','yahoo','yandex','startpage','google','wikipedia','grokipedia']}.\n"
-    "• smart_crawl(url) - read a whole site/section. Best-first same-domain crawl; returns each page as markdown with content_ok + page_type (article/list/js_shell). List pages (HN/aggregators) come back as a structured link list. options: max_pages (default 10), max_depth (default 2), path_include (scope to ['/docs']), discover_only=true (URL map only), focus query (crawl relevant pages first + focus-filter), crawl_urls list (fetch a chosen subset after discover_only). Check next_action if it stopped early.\n"
-    "• screenshot(url) - image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead. Session is auto-managed.\n"
+    "• smart_fetch(url) - get any page. Auto anti-bot (HTTP -> stealthy Patchright browser). Returns extracted text + metadata + honest signals (content_ok, next_action, summary).\n"
+    "  - Narrow to one section: css_selector (e.g. 'article', '.main').\n"
+    "  - Long page: is_truncated + next_offset -> call again with offset=next_offset. Or focus='query' to get only the BM25-relevant blocks (post-cache, no re-fetch; re-pass when paginating).\n"
+    "  - Behind a click/form/load-more/infinite-scroll: actions=[{click:'button.load-more'},{scroll:3},{fill:{selector:'#q',text:'x'}},{press:'Enter'}] (forces stealthy; runs after load, before extraction; bypasses cache).\n"
+    "  - PDFs: auto-extracted to structured markdown (tables/headings/metadata). table_of_contents carries a section-map [{level,title,page,end_page}] - pass pages='23-31' to grab one section by range. Scanned + CID-corrupted fonts auto-OCR with [all] (quality_score tells you how clean). pages='1-5' extracts a subset.\n"
+    "  - Want the page's sources? include_links=true -> response.links = {citations, navigation, external, primary_source}. citations are the main-content references (papers/primary docs/related reads) - follow them in one step.\n"
+    "  - Many URLs: urls=['a','b'] (parallel bulk). Raw HTML: extraction_type='html'. cache_ttl=0 forces fresh.\n"
+    "• smart_search(query) - find pages. Local + keyless (no API key, no account). 9 keyless backends in parallel (duckduckgo, brave, mojeek, yahoo, yandex, startpage, google + opt-in wikipedia, grokipedia); ranks by neural relevance + cross-backend consensus. Returns URLs + ranking, NOT content - smart_fetch the ones that match. Each result: relevance_score + fetch_relevance (high/med/low) + engines_consensus (how many independent indexes agree). related_queries = follow-up queries mined from the results (search one to refine a broad query). NEVER answer from snippets alone. Filters in options: site/exclude_sites, location/language/region, page (0-10), freshness (day|week|month|year).\n"
+    "• smart_crawl(url) - read a whole site/section. Best-first same-domain crawl; each page: markdown + content_ok + page_type (article/list/js_shell). List pages (HN/aggregators) come back as a structured link list. BIG SITES: options sitemap=true maps the whole site from sitemap.xml in ONE fetch (full URL list + lastmod, no BFS); sitemap='auto' uses it if the site has one, else BFS. discover_only=true = URL map only. focus='query' crawls relevant pages first + focus-filters each. crawl_urls=[...] fetches a chosen subset. Caps: max_pages (default 10), max_depth (default 2), max_total_chars (token budget), deadline_ms.\n"
+    "• screenshot(url) - image capture. Multimodal agents only (content rendered as images/canvas/visual layout). Text agents: use smart_fetch instead.\n"
     "\n"
-    "#1 workflow (answer a factual question): smart_search → smart_fetch the results that match what you need (use the relevance ranking as a hint, trust your judgment) → synthesize, citing URLs.\n"
+    "#1 workflow (answer a factual question): smart_search -> smart_fetch the results that match (relevance ranking is a hint, trust your judgment) -> synthesize, citing URLs.\n"
     "\n"
     "Known unbypassable (no free tool beats these): DataDome, Akamai, Cloudflare Turnstile (interactive). If smart_fetch fails on one, switch sources - do not retry the same URL.\n"
-    "\n"
-    "Pro tip: open_session once and reuse it for many fetches to skip browser cold-starts (power users only; smart_fetch auto-manages sessions otherwise)."
 )
 
 
@@ -165,8 +158,9 @@ class ResponseModel(BaseModel):
     fetched_at: str = Field(default="", description="ISO-8601 UTC timestamp this response was generated. For cached responses, content age is bounded by cache_ttl.")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Page metadata for citation/relevance: title, description, site_name, type, image, canonical, lang, published_time, author (OpenGraph + JSON-LD + canonical). For PDFs: title, author, subject, keywords, creator, producer, creation_date, mod_date. Empty for non-HTML/non-PDF.")
     media: List[str] = Field(default_factory=list, description="Image URLs on the page (only populated when include_media=true). Multimodal agents can fetch/screenshot these. For PDFs: per-page embedded-image metadata (count + dimensions).")
+    links: Dict[str, Any] = Field(default_factory=dict, description="Outgoing links classified by context (only populated when include_links=true): {citations:[{url,text}], navigation:[{url,text}], external:[{url,text}], primary_source:url}. citations = links inside the main-content area (the page's referenced sources - the highest-value links to follow); navigation = site chrome; external = off-domain links; primary_source = best-effort hint at the actual primary source (canonical/JSON-LD or a citation on arxiv/doi/github/etc). Use to follow a page's source chain in one step.")
     quality_score: float = Field(default=0.0, description="PDF extraction quality 0.0-1.0 (readable-char ratio; 1.0 = clean, low = garbled/CID corruption). 0.0 for non-PDF. Trust PDF content more the closer this is to 1.0.")
-    table_of_contents: list = Field(default_factory=list, description="PDF outline/bookmarks as [{level, title, page}] when the PDF has a ToC. Empty for non-PDF or PDFs without an outline.")
+    table_of_contents: list = Field(default_factory=list, description="PDF section-map: outline/bookmarks as [{level, title, page, end_page}] when the PDF has a ToC; for PDFs without bookmarks, a heading-based map is built from font-size detection. page+end_page give a range per section so you can pass pages='X-Y' to grab one section. Empty for non-PDF or PDFs with no detectable headings.")
 
 
 class BulkResponseModel(BaseModel):
@@ -473,6 +467,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
             escalation_path=result.escalation_path, retry_count=result.retry_count,
             metadata=result.metadata,
             media=result.media,
+            links=result.links,
             quality_score=result.quality_score,
             table_of_contents=result.table_of_contents,
             content_ok=result.content_ok,
@@ -510,6 +505,7 @@ def _apply_chunking(result: ResponseModel, max_chars: int = MAX_CONTENT_CHARS, o
         escalation_path=result.escalation_path, retry_count=result.retry_count,
         metadata=result.metadata,
         media=result.media,
+        links=result.links,
         quality_score=result.quality_score,
         table_of_contents=result.table_of_contents,
         content_ok=result.content_ok,
@@ -529,6 +525,7 @@ _PDF_PASSWORD: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_
 _FOCUS: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_focus", default=None)
 # Opt-in: populate ResponseModel.media with the page's image URLs (multimodal).
 _INCLUDE_MEDIA: contextvars.ContextVar[bool] = contextvars.ContextVar("_include_media", default=False)
+_INCLUDE_LINKS: contextvars.ContextVar[bool] = contextvars.ContextVar("_include_links", default=False)
 
 
 def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
@@ -771,6 +768,7 @@ def _translate_response(
     # regex pass over the raw body; never blocks the response.
     page_metadata: Dict[str, Any] = {}
     page_media: List[str] = []
+    page_links: Dict[str, Any] = {}
     if raw_body and isinstance(raw_body, (bytes, bytearray)):
         try:
             _html = raw_body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace')
@@ -778,6 +776,15 @@ def _translate_response(
             page_metadata = extract_metadata(_html, page_url)
             if _INCLUDE_MEDIA.get():
                 page_media = extract_image_urls(_html, page_url)
+            if _INCLUDE_LINKS.get():
+                try:
+                    from master_fetch.links import extract_links
+                    page_links = extract_links(_html, page_url, page_metadata)
+                except Exception as e:
+                    logger.debug("links extraction failed for %s: %s", page_url, e)
+                    page_links = {}
+            else:
+                page_links = {}
         except Exception as e:
             logger.debug("metadata/media extraction failed for %s: %s", page_url, e)
 
@@ -785,7 +792,7 @@ def _translate_response(
         status=page.status, content=content, url=page.url,
         fetcher_used=fetcher_used, duration_ms=duration_ms,
         content_type=raw_ct, total_size_bytes=total_size, metadata=page_metadata,
-        media=page_media,
+        media=page_media, links=page_links,
     )
 
 
@@ -1947,6 +1954,7 @@ class MasterFetchServer:
         focus: Annotated[Optional[str], Field(description="Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, saving context on long pages. Works post-cache, so it never triggers a re-fetch. Re-pass the same focus when paginating with offset. Empty = full page.")] = None,
         actions: Annotated[Optional[List[Dict[str, Any]]], Field(description="Page interactions run on the stealthy browser AFTER load, BEFORE extraction: [{click:'button.load-more'}, {fill:{selector:'#q', text:'x'}}, {press:'Enter'}, {wait:500}, {scroll:3}, {wait_selector:'.item'}]. Forces the stealthy tier; bypasses cache. Reaches content behind a click/form/infinite scroll.")] = None,
         include_media: Annotated[bool, Field(description="If true, populate the response .media field with up to 20 image URLs found on the page (for multimodal agents). Default false (keeps responses lean).")] = False,
+        include_links: Annotated[bool, Field(description="If true, populate the response .links field with the page's outgoing links classified as citations/navigation/external + a primary_source hint. Default false. Use when you want to follow a page's referenced sources in one step.")] = False,
     ) -> ResponseModel:
         """Fetch a URL (or multiple URLs) with automatic anti-bot escalation.
 
@@ -1967,30 +1975,6 @@ class MasterFetchServer:
         Response contains: url, status, content (extracted text), content_type (e.g. 'text/html',
         'application/json'), total_size_bytes, is_truncated (if content was too long),
         escalation_path (e.g. 'http→dynamic'), duration_ms, error (with recovery hints).
-
-        :param url: Single URL to fetch.
-        :param urls: Multiple URLs to fetch in parallel. Returns BulkResponseModel instead.
-            Use this instead of calling smart_fetch multiple times sequentially.
-        :param extraction_type: Content format: 'markdown' (default), 'html', 'text', 'article', 'structured'.
-        :param css_selector: CSS selector to narrow extracted content (e.g. 'article', '.main-content').
-        :param main_content_only: Strip nav, ads, and footers (default True).
-        :param use_trafilatura: Use Trafilatura for cleaner article extraction (default True).
-        :param cache_ttl: Cache duration in seconds. Default 3600 (1 hour). Set 0 to skip cache.
-        :param force_fetcher: Lock to one fetcher: 'http', 'dynamic', or 'stealthy'. Skips auto-escalation.
-        :param respect_robots: Check robots.txt before fetching (default False).
-        :param headless: Run browser without a visible window (default True).
-        :param real_chrome: Use installed Chrome/Chromium instead of bundled browser.
-        :param wait: Extra milliseconds to wait after page load for JS to render.
-        :param proxy: Proxy URL (e.g. 'http://user:pass@host:8080') or dict with 'server', 'username', 'password'.
-        :param timeout: Maximum request time in milliseconds (default 30000 = 30s). Browser fetcher uses ms; HTTP fetcher capped at 30s.
-        :param network_idle: Wait until network is idle for 500ms before capturing (good for SPAs).
-        :param solve_cloudflare: Attempt Cloudflare bypass in stealthy mode (default True).
-        :param block_webrtc: Prevent WebRTC IP leak in stealthy mode (default True).
-        :param hide_canvas: Randomize canvas fingerprint in stealthy mode (default True).
-        :param extra_headers: Additional HTTP headers as {name: value} dict.
-        :param useragent: Override browser user agent string.
-        :param cookies: Cookies as list of {name, value, domain} dicts.
-        :param offset: Resume from a specific character offset for truncated content.
         """
         # Bulk mode: fetch multiple URLs in parallel
         if urls is not None:
@@ -2001,7 +1985,7 @@ class MasterFetchServer:
                 use_trafilatura, cache_ttl, force_fetcher, respect_robots,
                 headless, real_chrome, wait, proxy, timeout, network_idle,
                 solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
-                useragent, cookies, max_content_chars,
+                useragent, cookies, max_content_chars, include_media, include_links,
             )
 
         # Validate all inputs
@@ -2029,6 +2013,7 @@ class MasterFetchServer:
         if isinstance(focus, str) and focus.strip():
             _FOCUS.set(focus)
         _INCLUDE_MEDIA.set(bool(include_media))
+        _INCLUDE_LINKS.set(bool(include_links))
         # actions produce post-interaction content unique to the action sequence;
         # bypass the cache so a plain (pre-action) cached copy is never served.
         if actions:
@@ -2125,6 +2110,7 @@ class MasterFetchServer:
         headless, real_chrome, wait, proxy, timeout, network_idle,
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
         useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
+        include_media: bool = False, include_links: bool = False,
     ) -> BulkResponseModel:
         """Fetch multiple URLs in parallel through the smart fetch pipeline."""
         if len(urls) > MAX_BULK_URLS:
@@ -2145,6 +2131,7 @@ class MasterFetchServer:
                     hide_canvas=hide_canvas, extra_headers=extra_headers,
                     useragent=useragent, cookies=cookies,
                     max_content_chars=max_chars,
+                    include_media=include_media, include_links=include_links,
                 )
             except Exception as e:
                 return _with_agent_hints(ResponseModel(
@@ -2415,6 +2402,7 @@ class MasterFetchServer:
         force_fetcher: Optional[str] = None,
         timeout: int = 30000,
         deadline_ms: int = 120000,
+        sitemap: str | bool = False,
     ) -> "CrawlResponseModel":
         """Deep-crawl a site: best-first same-domain from `url`, returning each
         page as markdown with content_ok/summary/page_type. discover_only=true
@@ -2436,7 +2424,7 @@ class MasterFetchServer:
                 max_total_chars=max_total_chars, concurrency=concurrency,
                 cache_ttl=cache_ttl, respect_robots=respect_robots,
                 force_fetcher=force_fetcher, timeout=timeout,
-                deadline_ms=deadline_ms,
+                deadline_ms=deadline_ms, sitemap=sitemap,
             )
         except Exception as e:
             from master_fetch.crawl import CrawlResponseModel as _CRM
@@ -2449,7 +2437,7 @@ class MasterFetchServer:
     _TOOL_DEFS: list[dict] = [
         {
             "name": "mcp_smart_fetch",
-            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web: this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); pass pages='1-5' to extract a subset and save tokens; scanned PDFs AND CID-corrupted fonts auto-OCR with [all]. Response carries quality_score (0-1; trust PDF content more the closer to 1.0), table_of_contents (when bookmarks present), metadata (title/author/dates). Low quality_score -> content_ok false (use vision / install [all]). Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
+            "description": "Fetch any URL with full content extraction. USE THIS whenever you need information from the web: this is your web access. Auto http -> stealthy escalation (plain HTTP first, then Patchright anti-detect browser if blocked). Bulk: pass urls. Narrow to one section with css_selector. PDFs: auto-extracted to structured markdown (tables, headings, metadata); table_of_contents is a section-map [{level,title,page,end_page}] so you can pass pages='23-31' to grab one section by range and save tokens; scanned PDFs AND CID-corrupted fonts auto-OCR with [all]; response carries quality_score (0-1, trust PDF content more the closer to 1.0). Long pages: paginate with offset (pages through EXTRACTED text; use extraction_type=html for raw HTML). focus='query' returns only the BM25-relevant blocks (token saver on long pages; re-pass it when paginating). actions=[{click:..},{scroll:N},{fill:{selector,text}},{press:Enter},{wait:ms},{wait_selector:..}] for load-more / search forms / pagination / infinite scroll (forces stealthy, bypasses cache). include_links=true populates response.links with the page's outgoing links classified as citations (main-content references, the ones worth following) / navigation / external + a primary_source hint - use to follow a page's source chain in one step. Response signals: content_ok (trust content only if true), next_action (do this next if non-empty), summary (one-line status), is_truncated+next_offset (more content available). cache_ttl=0 bypasses cache.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2462,37 +2450,38 @@ class MasterFetchServer:
                     "cache_ttl": {"type": "integer", "description": "Cache seconds (default 3600). 0 = force fresh."},
                     "force_fetcher": {"type": "string", "enum": ["http", "stealthy"], "description": "Pin to one tier and skip auto-escalation. 'http' = fast HTTP-only (fails on JS/bot walls). 'stealthy' = anti-detect browser. Default = auto http->stealthy."},
                     "offset": {"type": "integer", "description": "Char offset into EXTRACTED text to resume a truncated page. Use next_offset from the previous response."},
-                    "pages": {"type": "string", "description": "PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset (saves tokens/time on big PDFs). None = all pages."},
+                    "pages": {"type": "string", "description": "PDF only: page spec like '1-5' or '1,3,5-7' to extract a subset (saves tokens/time on big PDFs). Use the table_of_contents section-map page/end_page ranges to pick. None = all pages."},
                     "password": {"type": "string", "description": "PDF only: password for an encrypted PDF."},
                     "focus": {"type": "string", "description": "Query-focused extraction: pass a query and only the BM25-relevant blocks (paragraphs/headings/tables) are returned, a big context saver on long pages. Runs post-cache (no re-fetch). Re-pass the same focus when paginating with offset."},
                     "actions": {"type": "array", "description": "Page interactions run on the stealthy browser AFTER load, BEFORE extraction. Forces stealthy tier + bypasses cache. Each item is one action: {click:'css'}, {fill:{selector:'css',text:'x'}}, {press:'Enter'} (or {press:{selector:'css',key:'Enter'}}), {wait:500} (ms), {scroll:3} (viewport steps, triggers lazy/infinite scroll), {wait_selector:'css'}. Use for 'load more', search forms, pagination, infinite scroll."},
-                    "options": {"type": "object", "description": "proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true), include_media (bool, default false: populate response.media with up to 20 page image URLs for multimodal agents)", "additionalProperties": True},
+                    "options": {"type": "object", "description": "include_links (bool, default false: populate response.links with citations/navigation/external + primary_source), include_media (bool, default false: populate response.media with up to 20 page image URLs for multimodal agents), proxy (str|dict), cookies (list), extra_headers (dict), useragent (str), wait (ms, default 0), network_idle (bool, for SPAs), headless (bool, default true), real_chrome (bool), respect_robots (bool, default false), main_content_only (bool, default true), use_trafilatura (bool, default true), solve_cloudflare (bool, default true), block_webrtc (bool, default true), hide_canvas (bool, default true)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
             "name": "mcp_smart_crawl",
-            "description": "Deep-crawl a site from a start URL: best-first walk of same-domain links, returning each page as clean markdown with content_ok + page_type. Content-adaptive: article/docs pages -> main content; list/index pages (HN, aggregators, directories) -> a structured link list; JS shells -> detected and reported honestly. discover_only=true returns just the URL map (no content). focus='query' prioritizes relevant pages within the budget AND focus-filters each page. crawl_urls=[...] fetches a chosen subset of discovered URLs (second-phase selective crawl, no re-discovery). Same-domain only by default; URLs normalized so /docs and /docs/ are not crawled twice. Caps: max_pages (default 10), max_depth (default 2), max_total_chars (token budget), deadline_ms (overall time, default 120000). Each page carries content_ok + status (network error = -1) + fetched_at; check them. next_action tells you if the crawl stopped early. cache_ttl=0 forces fresh. Reuses smart_fetch anti-bot + cache.",
+            "description": "Deep-crawl a site from a start URL: best-first walk of same-domain links, returning each page as clean markdown with content_ok + page_type. Content-adaptive: article/docs pages -> main content; list/index pages (HN, aggregators, directories) -> a structured link list; JS shells -> detected and reported honestly. BIG SITES: options sitemap=true maps the whole site from its sitemap.xml in ONE fetch (returns the full URL list + lastmod, no BFS, no content) - collapses a hundreds-of-pages discovery crawl into one call; sitemap='auto' uses the sitemap if the site has one, else falls back to BFS. discover_only=true returns the URL map only (BFS-based). focus='query' prioritizes relevant pages within the budget AND focus-filters each page. crawl_urls=[...] fetches a chosen subset of discovered URLs (second-phase selective crawl, no re-discovery). Same-domain only by default; URLs normalized so /docs and /docs/ are not crawled twice. Caps: max_pages (default 10), max_depth (default 2), max_total_chars (token budget), deadline_ms (overall time, default 120000). Each page carries content_ok + status + fetched_at; check them. next_action tells you if the crawl stopped early. cache_ttl=0 forces fresh. Reuses smart_fetch anti-bot + cache.",
             "inputSchema": {
                 "type": "object", "required": ["url"],
                 "properties": {
                     "url": {"type": "string", "description": "Start URL (crawl stays on this domain)"},
-                    "discover_only": {"type": "boolean", "description": "true = return the URL map only, no page content (map mode). Default false."},
+                    "discover_only": {"type": "boolean", "description": "true = return the URL map only, no page content (BFS map mode). Default false. For big sites prefer options sitemap=true instead (one-fetch map)."},
                     "focus": {"type": "string", "description": "Query: prioritize crawling links relevant to this, and focus-filter each page's content. Big token saver on doc sites."},
-                    "options": {"type": "object", "description": "max_pages (1-100, default 10), max_depth (0-5, default 2), path_include (list of path prefixes to crawl, e.g. ['/docs']), path_exclude (list to skip), max_content_chars_per (default 8000), max_total_chars (token budget, default max_pages*per), concurrency (1-5, default 3), cache_ttl (seconds, default 3600; 0 = force fresh), respect_robots (bool, default false), force_fetcher ('http'|'stealthy'), timeout (ms per page, default 30000), deadline_ms (overall crawl time cap, default 120000)", "additionalProperties": True},
+                    "crawl_urls": {"type": "array", "items": {"type": "string"}, "description": "A chosen subset of URLs to fetch (second-phase selective crawl, no re-discovery). Use after a sitemap=true or discover_only=true map."},
+                    "options": {"type": "object", "description": "sitemap (true|'auto'|false, default false: true = map the site from sitemap.xml in one fetch; 'auto' = use sitemap if present else BFS; false = BFS only), max_pages (1-100, default 10), max_depth (0-5, default 2), path_include (list of path prefixes to crawl, e.g. ['/docs']), path_exclude (list to skip), max_content_chars_per (default 8000), max_total_chars (token budget, default max_pages*per), concurrency (1-5, default 3), cache_ttl (seconds, default 3600; 0 = force fresh), respect_robots (bool, default false), force_fetcher ('http'|'stealthy'), timeout (ms per page, default 30000), deadline_ms (overall crawl time cap, default 120000)", "additionalProperties": True},
                 },
             },
             "annotations": {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True},
         },
         {
             "name": "mcp_screenshot",
-            "description": "Capture a screenshot of a URL as an image. For MULTIMODAL agents only: use when content is rendered as images/canvas/image-of-text that text extraction can't read, or you need visual layout. Text-only agents: prefer smart_fetch. A stealthy browser session is auto-managed (pass session_id only to reuse a specific open_session).",
+            "description": "Capture a screenshot of a URL as an image. For MULTIMODAL agents only: use when content is rendered as images/canvas/image-of-text that text extraction can't read, or you need visual layout. Text-only agents: prefer smart_fetch. A stealthy browser session is auto-managed.",
             "inputSchema": {
                 "type": "object", "required": ["url"],
                 "properties": {
                     "url": {"type": "string", "description": "URL to screenshot"},
-                    "session_id": {"type": "string", "description": "Optional: a session from open_session to reuse. Omit to auto-manage."},
+                    "session_id": {"type": "string", "description": "Optional: reuse a specific open browser session. Omit to auto-manage."},
                     "options": {"type": "object", "description": "full_page (bool, default false), image_type (png|jpeg, default png), quality (0-100, jpeg only), wait (ms), wait_selector (css), network_idle (bool), timeout (ms, default 30000)", "additionalProperties": True},
                 },
             },
@@ -2500,7 +2489,7 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_search",
-            "description": "Local keyless web search. No API key, no account. Runs 9 keyless backends in parallel (duckduckgo, brave, mojeek, yahoo, yandex, startpage, google + opt-in wikipedia, grokipedia - INDEPENDENT indexes), merges + ranks by neural relevance + cross-backend consensus. Returns URLs + ranking, NOT page content - smart_fetch the results you want. Each result has relevance_score + fetch_relevance (high/med/low) + engines_consensus (how many independent indexes returned it - a free authority signal); the response carries summary + next_action (the obvious next call: fetch what you need / rephrase / retry) + engine_blocked (backends that rate-limited/CAPTCHA'd/timed out). NEVER answer from snippets alone: smart_fetch the results that match what you need (ranked by relevance + consensus; the ranking is a hint, use your judgment - a lower-ranked result can be the right one). Filters in options: site/exclude_sites (domain include/exclude), location/language/region (geo), page (0-10), freshness (day|week|month|year).",
+            "description": "Local keyless web search. No API key, no account. Runs 9 keyless backends in parallel (duckduckgo, brave, mojeek, yahoo, yandex, startpage, google + opt-in wikipedia, grokipedia - INDEPENDENT indexes), merges + ranks by neural relevance + cross-backend consensus. Returns URLs + ranking, NOT page content - smart_fetch the results you want. Each result has relevance_score + fetch_relevance (high/med/low) + engines_consensus (how many independent indexes returned it - a free authority signal). related_queries = follow-up queries mined from the result titles+snippets (no LLM); search one to refine a broad query. The response carries summary + next_action (the obvious next call) + engine_blocked (backends that rate-limited/CAPTCHA'd/timed out). NEVER answer from snippets alone: smart_fetch the results that match what you need (ranked by relevance + consensus; the ranking is a hint, use your judgment - a lower-ranked result can be the right one). Filters in options: site/exclude_sites (domain include/exclude), location/language/region (geo), page (0-10), freshness (day|week|month|year).",
             "inputSchema": {
                 "type": "object", "required": ["query"],
                 "properties": {
@@ -2642,7 +2631,7 @@ class MasterFetchServer:
                 "proxy", "cookies", "extra_headers", "useragent",
                 "wait", "network_idle", "headless", "real_chrome", "respect_robots",
                 "main_content_only", "use_trafilatura", "solve_cloudflare", "block_webrtc", "hide_canvas",
-                "include_media",
+                "include_media", "include_links",
             )}
             result = await self.smart_fetch(
                 url=url, urls=urls,
@@ -2663,7 +2652,7 @@ class MasterFetchServer:
                 "max_pages", "max_depth", "path_include", "path_exclude",
                 "max_content_chars_per", "max_total_chars", "concurrency",
                 "cache_ttl", "respect_robots", "force_fetcher", "timeout",
-                "deadline_ms",
+                "deadline_ms", "sitemap",
             )}
             result = await self.smart_crawl(
                 url=args["url"], discover_only=args.get("discover_only", False),
