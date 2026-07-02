@@ -62,10 +62,11 @@ def test_resolve_backends_default_is_full_pool():
 
 
 def test_resolve_backends_maps_legacy_hound_names():
-    # bing -> yahoo (same index, diff server); qwant -> duckduckgo (no ddgs qwant)
+    # bing -> yahoo (same index, diff server); qwant is its own real backend (v8.1)
     out = ms._resolve_backends(["bing", "qwant", "brave"])
-    assert "yahoo" in out and "duckduckgo" in out and "brave" in out
+    assert "yahoo" in out and "qwant" in out and "brave" in out
     assert "bing" not in out  # bing is disabled -> mapped to yahoo, never returned as 'bing'
+    assert "duckduckgo" not in out  # qwant no longer aliases to duckduckgo
 
 
 def test_resolve_backends_dedups():
@@ -235,10 +236,11 @@ def test_metasearch_resolves_hound_engine_names(monkeypatch):
     _patch_engines(monkeypatch, {
         "duckduckgo": _fake_engine_class("duckduckgo", [_TR("d", "https://d.com")]),
         "yahoo": _fake_engine_class("yahoo", [_TR("y", "https://y.com")]),
+        "qwant": _fake_engine_class("qwant", [_TR("qw", "https://qw.com")]),
     })
-    # 'bing' maps to 'yahoo'; 'qwant' maps to 'duckduckgo'
+    # 'bing' maps to 'yahoo'; 'qwant' is now its own real backend (v8.1)
     res, status = asyncio.run(ms.metasearch("q", 6, engines=["bing", "qwant"]))
-    assert "yahoo" in status and "duckduckgo" in status
+    assert "yahoo" in status and "qwant" in status
     assert len(res) == 2
 
 

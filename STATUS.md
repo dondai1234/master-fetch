@@ -13,60 +13,36 @@ Testing", real_chrome=False) for smart_fetch/screenshot only, eager at startup.
 
 ---
 
-## Current shipped version: 8.0.0 (2026-06-28)
+## Current shipped version: 8.1.0 (2026-06-28)
 
-Major upgrade focused on agent efficiency: collapse real multi-step agent loops
-into fewer calls, and surface what a page/site actually contains so the agent
-fetches less + navigates better. Four NEW capabilities (none are re-labels of
-existing behavior), a tool-def overhaul, and a robustness fix.
+Search reliability + power upgrade. Three functional changes (no re-labels).
 
-- **Sitemap mode for smart_crawl** (`options sitemap=true|'auto'|false`): map a
-  whole site from sitemap.xml in ONE fetch (full URL list + lastmod) instead of
-  blind BFS. `auto` uses sitemap if present else BFS; `true` = sitemap-only.
-  Discovery: robots.txt `Sitemap:` first, then /sitemap.xml +
-  /sitemap_index.xml; recurses <sitemapindex> (capped); gzip-tolerant;
-  namespace-agnostic; same-domain + path filters. New module `sitemap.py`.
-  CrawlResponseModel += `sitemap_used` + `sitemaps`; CrawlPage += `lastmod`.
-  Live-proven: docs.python.org mapped in one fetch.
-- **Outgoing-links field on smart_fetch** (`options include_links=true`):
-  `response.links = {citations, navigation, external, primary_source}`.
-  citations = main-content-area links (the page's referenced sources);
-  navigation = site chrome; external = off-domain; primary_source = best-effort
-  hint (canonical/JSON-LD on a different host, else an in-content off-domain
-  reference on a known primary host: arxiv/doi/github/wikimedia/etc). New module
-  `links.py`. Live-proven on Wikipedia (30 cit / 20 nav / 20 ext, github
-  primary_source).
-- **Related-queries on smart_search**: `related_queries` mined EXTRACTIVELY
-  from result titles+snippets (no LLM, no per-engine SERP-markup dependency).
-  Bigram doc-frequency ranking, query-overlap filtered, unigram fallback.
-  Engine-agnostic + robust to SERP markup changes.
-- **PDF section-map with page ranges**: `table_of_contents` entries now carry
-  `end_page` (from the outline structure) so the agent passes `pages='23-31'`
-  for one section. For PDFs WITHOUT bookmarks (most arxiv papers), a heading-
-  based section-map is built from the font-size heading detection already run
-  during render (`_render_page` collects headings with page_num; `_heading_
-  outline` builds the fallback ToC clamped to the extracted page range). Every
-  navigable PDF now gets a section-map. Live-proven on a bookmarkless arxiv PDF
-  (27 entries with page ranges).
-- **Tool-def overhaul**: all 6 `_TOOL_DEFS` rewritten tight + structured (the
-  agent-facing surface; the MCP client sees these, NOT the method docstrings).
-  `HOUND_INSTRUCTIONS` rewritten: killed the stale `open_session` pro tip
-  (removed in v4), tightened, documented new features. `actions` (infinite
-  scroll / load-more / forms) now obvious in the def with examples. Stripped
-  the redundant `:param:` block from the `smart_fetch` method docstring.
-- **Robustness fix (metasearch status)**: a backend returning valid results
-  that all got deduped by an earlier-finishing backend was marked `empty`
-  (misleading; it DID contribute = confirmed consensus). Now `ok` if it
-  returned any valid result (new OR dupe), `empty` only if nothing usable. Also
-  makes the dedup test deterministic (was racy on completion order).
-- **Chunking fix**: `_apply_chunking` rebuilt the ResponseModel on truncation
-  and dropped `links` (would drop any new contextvar-driven field). Now copies
-  `links` through (same as media/metadata/toc).
-- 6 tools unchanged in count, all sharpened, none cut. 603 tests (585 + 18 new
-  v8 feature tests in test_v8_features.py).
+- **Real Qwant backend** (10th independent index): Qwant was aliased to
+  duckduckgo since v7.5 (vendored ddgs has no qwant backend). v8.1 adds a real
+  `Qwant` class hitting the keyless JSON API `api.qwant.com/v3/search/web` with
+  SearXNG's proven param set (count=10 exactly, locale en_US, tgp random 1-3,
+  device=desktop, shuffled param order). primp-pinned to a safari TLS
+  fingerprint (chrome/edge get 403-captcha). Own independent index -> 10th
+  `qwant` index family for consensus. Live-proven: 10 authoritative results.
+- **Circuit breaker**: a backend that CAPTCHAs/403s/rate-limits is skipped for
+  a 60s cooldown (`_record_block`/`_is_circuit_open`/`_record_success`), so we
+  stop hammering a host that is blocking our IP (avoids escalating to a longer
+  IP ban) and free quorum slots so healthy backends aren't held back. Empty/
+  timeout do NOT trip the breaker (only `MetaBlockedException` does, raised on
+  HTTP 403/503 or Qwant's captcha/rate-limit JSON signal). New statuses
+  `blocked` + `circuit_open` -> `engine_blocked`.
+- **Tracking-aware dedup**: `_normalize_url` now strips only tracking params
+  (utm_*, fbclid, gclid, ref, si, ...) and KEEPS real query, instead of dropping
+  the whole query string (which used to collapse distinct pages like ?page=2 vs
+  ?page=3).
+- Tool defs + HOUND_INSTRUCTIONS: 10 backends (added qwant), circuit-breaker
+  noted. search.py stale "duckduckgo+bing+qwant" docstring fixed.
+- 613 tests (603 + 10 new v8.1 search tests). Live-proven: full default search
+  1.1-1.4s, 3+ backends contribute, no false circuit-opens.
 
 ---
 
+## Version history (summarized; full detail in CHANGELOG.md + git history)
 ## Version history (summarized; full detail in CHANGELOG.md + git history)
 
 - **4.0.0 / 4.0.1 / 4.0.2 / 4.0.3 (2026-06-20)** — PDF extraction flagship
@@ -145,9 +121,11 @@ existing behavior), a tool-def overhaul, and a robustness fix.
   Bing (the parallel race returned whatever finished first = garbage), engines
   not contributing, constant rate-limits. Replaced by 7.5.
 - **7.5.0 (2026-06-25)** — vendored ddgs metasearch, 9 backends in parallel, diversity quorum, 100% HTTP search (no browser). 585 tests.
-- **8.0.0 (2026-06-28)** — CURRENT. Sitemap-mode crawl, outgoing-links field,
+- **8.0.0 (2026-06-28)** — sitemap-mode crawl, outgoing-links field,
   related-queries mining, PDF section-map with page ranges, tool-def overhaul,
   metasearch status robustness fix. 603 tests.
+- **8.1.0 (2026-06-28)** — CURRENT. Real Qwant backend (10 keyless engines),
+  circuit breaker for blocked backends, tracking-aware dedup. 613 tests.
 
 ### Key decisions / cut scope (still valid, do not re-propose)
 - Residential proxy rotation: cut (can't test without proxies, risky blind).
@@ -229,6 +207,40 @@ the code no longer exists.
   searches' markup dependency — that markup is fragile and changes often).
   Filter: drop bigrams where every token is in the query; drop df<2 bigrams;
   fall back to unigrams. Engine-agnostic = robust to backend SERP changes.
+
+- **v8.1 real Qwant backend** (`search_metasearch.Qwant`): keyless JSON API
+  `api.qwant.com/v3/search/web`. Params (SearXNG's set): count=10 EXACTLY (other
+  values -> 400), locale en_US (hound region us-en -> lang_COUNTRY upper),
+  offset=(page-1)*10, tgp=random 1-3, device=desktop, safesearch 0/1/2,
+  display=true, llm=true. Param ORDER is shuffled (fingerprint resistance).
+  primp impersonate='safari' PINNED (chrome/edge TLS -> 403-captcha). primp
+  requires ALL param values as str (unlike urlencode) -> build_payload
+  stringifies (bools -> 'true'/'false'). Response: data.result.items.mainline is
+  a list of {type,items} rows; keep type=='web' (skip ads/images/videos/news).
+  CAPTCHA/rate-limit detected via status!='success' + error_data.captchaUrl OR
+  error_code==24 -> raise MetaBlockedException (circuit-open). HTTP 403 handled
+  by BaseSearchEngine.request -> MetaBlockedException.
+
+- **v8.1 circuit breaker**: module-level `_BACKEND_HEALTH: {name: block-until ts}`.
+  `_record_block` (cooldown 60s), `_is_circuit_open`, `_record_success` (clears).
+  In metasearch, circuit-open backends are skipped at instance-building (status
+  'circuit_open'); MetaBlockedException from a backend -> status 'blocked' +
+  `_record_block`; a backend that contributes (added or touched) ->
+  `_record_success`. Empty/timeout do NOT trip the breaker (transient). The
+  quorum `min_engines` is based on HEALTHY instances (circuit-open ones already
+  excluded). `_reset_circuit_breaker()` is the test hook. Statuses 'blocked' +
+  'circuit_open' -> EngineReport(blocked=True) -> engine_blocked in the response.
+
+- **v8.1 dedup `_normalize_url`**: strips ONLY tracking params
+  (_SEARCH_TRACKING_PARAMS: utm_*, fbclid, gclid, ref, ref_src, source, _ga,
+  mc_cid, mc_eid, igshid, si) and KEEPS real query. Previously dropped the whole
+  query string (collapsed distinct pages like ?page=2 vs ?page=3). Same URL
+  with different tracking tags now dedups across backends; distinct pages stay
+  distinct.
+
+- **v8.1 primp impersonate values**: primp accepts string impersonate names
+  ('random', 'safari', 'safari_18.5', 'chrome', etc.). _PrimpClient now takes an
+  `impersonate` arg (default 'random'); Qwant pins 'safari'.
 
 - **v7.5 search transport quirks (search_metasearch.py — vendored ddgs, MIT):**
   - 9 text backends: duckduckgo (httpx transport, POST, html.duckduckgo.com/html,

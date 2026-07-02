@@ -65,6 +65,12 @@ class MetaTimeoutException(MetaSearchException):
     """A backend or the whole search timed out."""
 
 
+class MetaBlockedException(MetaSearchException):
+    """A backend refused us (CAPTCHA / 403 / rate-limit). The caller should
+    circuit-open that backend for a cooldown so we don't keep hammering a host
+    that is actively blocking our IP (which risks escalating to a longer IP ban)."""
+
+
 # ─── transport: primp (browser-impersonated TLS) ─────────────────────────────
 class _PrimpResponse:
     """Thin wrapper over a primp response (status, text, content)."""
@@ -81,11 +87,12 @@ class _PrimpResponse:
 class _PrimpClient:
     """primp-based HTTP client with random browser impersonation (anti-bot)."""
 
-    def __init__(self, proxy: str | None = None, timeout: int | None = 10, *, verify: bool = True) -> None:
+    def __init__(self, proxy: str | None = None, timeout: int | None = 10, *,
+                 verify: bool = True, impersonate: str = "random") -> None:
         self.client = primp.Client(
             proxy=proxy,
             timeout=timeout,
-            impersonate="random",
+            impersonate=impersonate,
             impersonate_os="random",
             verify=verify,
         )
@@ -235,6 +242,11 @@ class BaseSearchEngine:
 
     def request(self, *args: Any, **kwargs: Any) -> str | None:
         resp = self.http_client.request(*args, **kwargs)
+        if resp.status_code in (403, 503):
+            # Bot challenge / access denied -> circuit-open this backend rather
+            # than treat it as a normal empty result (which would retry every call
+            # and risk escalating the block). Empty/timeout stay non-fatal.
+            raise MetaBlockedException(f"HTTP {resp.status_code}")
         return resp.text if resp.status_code == 200 else None
 
     @cached_property
@@ -308,6 +320,8 @@ class Duckduckgo(BaseSearchEngine):
         method = args[0] if args else kwargs.pop("method", "GET")
         url = args[1] if len(args) > 1 else kwargs.pop("url", "")
         resp = self.http_client.request(method=method, url=url, **kwargs)  # type: ignore[attr-defined]
+        if resp.status_code in (403, 503):
+            raise MetaBlockedException(f"HTTP {resp.status_code}")
         return resp.text if resp.status_code == 200 else None
 
     def post_extract_results(self, results: list[Any]) -> list[Any]:
@@ -629,9 +643,82 @@ class Yandex(BaseSearchEngine):
         return payload
 
 
+# ─── Qwant (keyless JSON API; safari-pinned — chrome/edge get 403-captcha) ─────
+class Qwant(BaseSearchEngine):
+    name = "qwant"
+    provider = "qwant"  # own independent index (European)
+    search_url = "https://api.qwant.com/v3/search/web"
+    search_method = "GET"
+    # JSON API -> no XPath; overrides extract_results. SearXNG's proven param set.
+
+    def __init__(self, proxy: str | None = None, timeout: int | None = None, *, verify: bool = True) -> None:
+        # Qwant 403-captchas chrome/edge TLS fingerprints; pin to safari.
+        self.http_client = _PrimpClient(proxy=proxy, timeout=timeout, verify=verify, impersonate="safari")
+        self.http_client.client.headers_update({"Accept": "application/json"})
+        self.results: list[Any] = []
+
+    def build_payload(self, query: str, region: str, safesearch: str,
+                      timelimit: str | None,  # noqa: ARG002
+                      page: int = 1, **kwargs: str) -> dict[str, Any]:
+        # hound region is "us-en" (country-lang) -> Qwant locale "en_US".
+        country, lang = region.lower().split("-")
+        locale = f"{lang}_{country.upper()}"
+        ss_map = {"on": 2, "moderate": 1, "off": 0}
+        args = {
+            "q": query,
+            "count": 10,            # count must be exactly 10 (other values -> 400)
+            "locale": locale,
+            "offset": (page - 1) * 10,
+            "tgp": random.randint(1, 3),        # "test group" — value is ignored, must be present
+            "device": "desktop",
+            "safesearch": ss_map.get(safesearch, 1),
+            "display": True,
+            "llm": True,
+        }
+        # Shuffle param order to resist fingerprinting (SearXNG's trick).
+        items = list(args.items())
+        random.shuffle(items)
+        # primp requires every param value to be a str (unlike urlencode which
+        # coerces). Bools -> lowercase 'true'/'false' (standard JSON-API style).
+        def _str(v):
+            if isinstance(v, bool):
+                return "true" if v else "false"
+            return str(v)
+        return {k: _str(v) for k, v in items}
+
+    def extract_results(self, html_text: str) -> list[Any]:
+        try:
+            data = json.loads(html_text)
+        except Exception:
+            return []
+        if data.get("status") != "success":
+            err = data.get("data", {}) or {}
+            # captcha / rate-limit (error_code 24) -> block signal (circuit-open).
+            if err.get("error_data", {}).get("captchaUrl") or err.get("error_code") == 24:
+                raise MetaBlockedException("qwant captcha/rate-limit")
+            return []  # other API error -> no results, not a block
+        mainline = data.get("data", {}).get("result", {}).get("items", {}).get("mainline", []) or []
+        out: list[Any] = []
+        for row in mainline:
+            if row.get("type") != "web":
+                continue  # skip ads / images / videos / news rows
+            for item in row.get("items", []) or []:
+                href = item.get("url", "")
+                title = item.get("title", "")
+                if not href or not title:
+                    continue
+                r = TextResult()
+                r.title = title
+                r.href = href
+                r.body = item.get("desc", "") or ""
+                out.append(r)
+        return out
+
+
 # ─── registry ────────────────────────────────────────────────────────────────
 # All enabled text backends. Bing is disabled (DDG + Yahoo already serve its
-# index). Order = rough preference; the aggregator runs them all in parallel.
+# index). Qwant is a real independent JSON-API backend (v8.1). Order = rough
+# preference; the aggregator runs them all in parallel.
 _TEXT_ENGINES: dict[str, type[BaseSearchEngine]] = {
     "duckduckgo": Duckduckgo,
     "brave": Brave,
@@ -642,15 +729,43 @@ _TEXT_ENGINES: dict[str, type[BaseSearchEngine]] = {
     "yahoo": Yahoo,
     "mojeek": Mojeek,
     "yandex": Yandex,
+    "qwant": Qwant,
 }
-# Map hound's public engine names -> ddgs backends (qwant has no ddgs backend).
+# Map hound's public engine names -> metasearch backends.
 _HOUND_TO_BACKEND = {
     "duckduckgo": "duckduckgo", "bing": "yahoo",  # bing -> yahoo (same index, diff server)
-    "qwant": "duckduckgo", "yahoo": "yahoo", "wikipedia": "wikipedia",
+    "qwant": "qwant", "yahoo": "yahoo", "wikipedia": "wikipedia",
     "brave": "brave", "google": "google", "mojeek": "mojeek", "yandex": "yandex",
     "startpage": "startpage", "grokipedia": "grokipedia",
 }
-_DEFAULT_BACKENDS = ["duckduckgo", "brave", "mojeek", "yahoo", "yandex", "startpage", "google"]
+_DEFAULT_BACKENDS = ["duckduckgo", "brave", "mojeek", "yahoo", "yandex", "startpage", "google", "qwant"]
+
+
+# ─── circuit breaker (per-backend block cooldown) ───────────────────────────
+# A backend that CAPTCHAs / 403s / rate-limits us is skipped for a cooldown so
+# we don't keep firing requests at a host that is actively blocking our IP
+# (which risks escalating to a longer IP-level ban, and wastes quorum slots
+# waiting on a backend that will not contribute). Empty results and timeouts
+# are transient and do NOT trip the breaker. Cleared on the next success.
+_CIRCUIT_COOLDOWN = 60.0  # seconds
+_BACKEND_HEALTH: dict[str, float] = {}  # name -> block-until timestamp
+
+
+def _is_circuit_open(name: str) -> bool:
+    return _BACKEND_HEALTH.get(name, 0.0) > time()
+
+
+def _record_block(name: str) -> None:
+    _BACKEND_HEALTH[name] = time() + _CIRCUIT_COOLDOWN
+
+
+def _record_success(name: str) -> None:
+    _BACKEND_HEALTH.pop(name, None)
+
+
+def _reset_circuit_breaker() -> None:
+    """Test hook: clear all circuit-breaker state."""
+    _BACKEND_HEALTH.clear()
 
 
 def _resolve_backends(engines: Optional[list[str]]) -> list[str]:
@@ -665,8 +780,21 @@ def _resolve_backends(engines: Optional[list[str]]) -> list[str]:
     return out or list(_DEFAULT_BACKENDS)
 
 
+_SEARCH_TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "ref", "ref_src", "source", "_ga", "mc_cid", "mc_eid",
+    "igshid", "si",  # YouTube/social share trackers
+}
+
+
 def _normalize_url(url: str) -> str:
-    """Light URL normalization for dedup (strip trailing slash on non-root, scheme lowercase)."""
+    """Normalize a URL for cross-backend dedup.
+
+    Strips tracking/analytics query params (utm_*, fbclid, gclid, ref, ...) but
+    KEEPS real query params, so two results that differ only in a tracking tag
+    collapse to one, while genuinely distinct pages (e.g. ?page=2 vs ?page=3)
+    stay distinct. Also lowercases scheme+host and strips non-root trailing slash.
+    """
     if not url:
         return ""
     u = url.strip()
@@ -676,7 +804,13 @@ def _normalize_url(url: str) -> str:
     scheme = (p.scheme or "https").lower()
     host = p.netloc.lower()
     path = p.path.rstrip("/") if len(p.path) > 1 else p.path
-    return f"{scheme}://{host}{path}"
+    if p.query:
+        kept = [kv for kv in p.query.split("&")
+                if kv and kv.split("=", 1)[0].lower() not in _SEARCH_TRACKING_PARAMS]
+        query = "&".join(kept)
+    else:
+        query = ""
+    return f"{scheme}://{host}{path}{('?' + query) if query else ''}"
 
 
 # ─── async metasearch aggregator ─────────────────────────────────────────────
@@ -701,18 +835,24 @@ async def metasearch(
     finishes within the deadline from whichever backends got through.
     """
     backends = _resolve_backends(engines)
+    status: dict[str, str] = {}
     # One engine instance per backend (cheap; primp/httpx clients are light).
+    # Circuit breaker: skip backends that recently blocked us (CAPTCHA/403/rate-
+    # limit) for a cooldown, so we don't keep firing at a host that is actively
+    # blocking our IP. They show up in status as 'circuit_open' (-> engine_blocked).
     instances: dict[str, BaseSearchEngine] = {}
     for b in backends:
         cls = _TEXT_ENGINES.get(b)
         if not cls or cls.disabled:
+            continue
+        if _is_circuit_open(b):
+            status[b] = "circuit_open"
             continue
         try:
             instances[b] = cls(proxy=_PROXY, timeout=int(_SEARCH_DEADLINE), verify=True)
         except Exception as ex:  # construction failure (e.g. primp missing) -> skip
             logger.debug("engine %s init failed: %r", b, ex)
 
-    status: dict[str, str] = {}
     seen: dict[str, dict[str, Any]] = {}
     order: list[dict[str, str]] = []
     # Diversity quorum: wait for at least MIN_ENGINES backends to contribute
@@ -749,6 +889,12 @@ async def metasearch(
             name = tasks[t]
             try:
                 _, res = t.result()
+            except MetaBlockedException:
+                # Backend refused us (CAPTCHA/403/rate-limit) -> circuit-open it
+                # for the cooldown so we stop hammering it.
+                _record_block(name)
+                status[name] = "blocked"
+                continue
             except BaseException as ex:  # CancelledError is BaseException in py3.11+
                 status[name] = f"error:{type(ex).__name__}"
                 continue
@@ -776,7 +922,11 @@ async def metasearch(
             # 'ok' = contributed a valid result (new OR a dupe that confirms
             # consensus). 'empty' = returned nothing usable. (A backend whose
             # only result was a dupe still contributed - it confirmed the URL.)
-            status[name] = "ok" if (added or touched) else "empty"
+            if added or touched:
+                status[name] = "ok"
+                _record_success(name)  # backend is healthy -> clear any prior block
+            else:
+                status[name] = "empty"
         # early-return: enough engines contributed enough results, OR enough
         # results after the soft deadline (don't hold for dead backends).
         elapsed = time() - start

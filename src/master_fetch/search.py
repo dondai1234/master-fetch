@@ -394,9 +394,10 @@ async def smart_search(
     page: int = 0,
     freshness: Optional[str] = None,
 ) -> SearchResponseModel:
-    """Local keyless web search (no API key, no account). Engines (default
-    duckduckgo+bing+qwant - three independent indexes (all HTTP, no browser);
-    add 'wikipedia' or 'yahoo') are scraped in parallel, merged, deduped, and ranked. A URL returned
+    """Local keyless web search (no API key, no account). The default pool
+    (duckduckgo, brave, mojeek, yahoo, yandex, startpage, google, qwant - eight
+    independent indexes, all HTTP, no browser; add 'wikipedia' or 'grokipedia')
+    is scraped in parallel, merged, deduped, and ranked. A URL returned
     by several independent engines is a consensus hit (engines_consensus field) and
     gets a ranking boost - a free authority signal. Returns URLs + ranking (NOT
     page content) so the agent smart_fetches the ones it wants itself.

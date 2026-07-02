@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Public default engine pool (the full keyless backend set; order = rough
 # preference). `engines=None` in smart_search uses this via the metasearch.
 DEFAULT_ENGINES = ("duckduckgo", "brave", "mojeek", "yahoo", "yandex",
-                   "startpage", "google")
+                   "startpage", "google", "qwant")
 
 # Index family per backend (by the underlying index/provider, for consensus).
 # A URL returned by duckduckgo AND yahoo is ONE family (both Bing's index);
@@ -204,6 +204,12 @@ async def multi_search(
         elif st == "preempted":
             reports.append(EngineReport(name=name, preempted=True,
                                         error="preempted (enough backends delivered)"))
+        elif st == "blocked":
+            reports.append(EngineReport(name=name, blocked=True,
+                                        error="blocked/captcha (circuit opened)"))
+        elif st == "circuit_open":
+            reports.append(EngineReport(name=name, blocked=True,
+                                        error="circuit open (recently blocked; skipped)"))
         elif st == "timeout":
             reports.append(EngineReport(name=name, blocked=True, error="timed out"))
         elif st.startswith("error"):

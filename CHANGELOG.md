@@ -1,5 +1,44 @@
 # Changelog
 
+## [8.1.0] - 2026-06-28
+
+### feat: search reliability + power upgrade (real Qwant backend, circuit breaker, tracking-aware dedup)
+
+Make the keyless metasearch more reliable, more powerful, and faster. Three
+changes, all functional (no re-labels).
+
+- **Real Qwant backend** (10th independent index): Qwant was aliased to
+  duckduckgo since v7.5 (the vendored ddgs has no qwant backend). v8.1 adds a
+  real `Qwant` class hitting the keyless JSON API `api.qwant.com/v3/search/web`
+  with SearXNG's proven param set (count=10 exactly, locale en_US, tgp random
+  1-3, device=desktop, shuffled param order to resist fingerprinting).\  primp-pinned to a safari TLS fingerprint (chrome/edge get 403-captcha). Qwant
+  has its own independent index (European) -> a 10th `qwant` index family for
+  cross-backend consensus. Live-proven: 10 authoritative results, contributes
+  to the default pool.
+
+- **Circuit breaker for blocked backends**: a backend that CAPTCHAs / 403s /
+  rate-limits us is now skipped for a 60s cooldown (`_record_block`/
+  `_is_circuit_open`/`_record_success`), instead of being re-fired every search.
+  This (a) stops hammering a host that is actively blocking our IP (which risks
+  escalating to a longer IP-level ban) and (b) frees quorum slots so healthy
+  backends aren't held back waiting on a sick one. Empty results and timeouts
+  are transient and do NOT trip the breaker (only `MetaBlockedException` does,
+  raised on HTTP 403/503 or Qwant's captcha/rate-limit JSON signal). New status
+  values `blocked` + `circuit_open` map to `engine_blocked` in the response.
+
+- **Tracking-aware dedup**: `_normalize_url` previously dropped the ENTIRE query
+  string, which collapsed genuinely distinct pages (`?page=2` vs `?page=3`). Now
+  it strips only tracking/analytics params (utm_*, fbclid, gclid, ref, si, ...) and
+  keeps real query, so tracking-variant dupes across backends collapse while
+  distinct pages stay distinct.
+
+- Tool defs + `HOUND_INSTRUCTIONS` updated: 10 backends (added qwant), circuit-
+  breaker noted. `search.py` stale "duckduckgo+bing+qwant" docstring fixed.
+
+- 613 tests (603 + 10 new v8.1 search tests in test_v8_1_search.py). Live-proven:
+  full default search 1.1-1.4s with 3+ backends contributing; Qwant returns 10
+  authoritative results; no false circuit-opens across repeated searches.
+
 ## [8.0.0] - 2026-06-28
 
 ### feat: sitemap-mode crawl, outgoing-links field, related-queries, PDF section-map + tool-def overhaul
