@@ -32,6 +32,14 @@ pip install hound-mcp[all] && playwright install chromium
 
 ---
 
+## 🎬 Demo
+
+Same prompt, three tools. Hound does the whole thing on its own, search + fetch + crawl, locally. The others get stuck on the parts they don't do.
+
+👉 [Watch the demo (mp4, ~60s)](https://github.com/dondai1234/master-fetch/releases/download/v9.0.0/Hound.demo.mp4)
+
+---
+
 ## ✨ New in 9.0.0
 
 **Production-hardening release.** The MCP server now starts in under 1 second and exits cleanly on Windows with an empty stderr: no more asyncio `__del__` tracebacks that a client can mistake for a crash (the old "failed to load"). The reranker prewarm is race-safe, and a CI lifecycle test proves the full connect → list → call → disconnect cycle stays clean. No new tools, no API breaks. [Release notes →](https://github.com/dondai1234/master-fetch/releases/tag/v9.0.0)
@@ -168,28 +176,26 @@ Same gray-area posture as SearXNG / ddgs; no search-engine ToS compliance is cla
 
 ## 📊 Comparison: free tools
 
-Hound is compared only to other **free** ways to give an agent web research. Only paid services (Bright Data, ZenRows, Firecrawl paid, Exa) can compete on hard anti-bot or hosted neural search at scale: and they cost money, require accounts, and route your data through their servers.
+Most free web tools for agents do one thing and miss the rest. Hound is the only one that bolts all of it onto a single local MCP server for $0, no keys.
 
-| | **Hound** | Crawl4AI | Jina Reader | Firecrawl (OSS / free) | DIY Playwright |
+| | **Hound** | Crawl4AI | Parallel Search | Jina Reader | Firecrawl (OSS/free) |
 |---|---|---|---|---|---|
-| **Price** | $0 forever | $0 (self-host) | free, rate-limited | $0 self-host / 1K free | $0 (your time) |
-| **License** | MIT (no attribution) | Apache-2.0 (attribution) | proprietary | AGPL / cloud | n/a |
-| **Account / API key** | none | none | optional free key | cloud needs account + key | none |
-| **Runs locally** | yes | yes | no (their API) | self-host: yes (Redis + Docker) | yes |
-| **Anti-bot / Cloudflare** | built-in (Patchright) | limited | none | not by default | none |
-| **Web search** | yes (keyless local, 10 backends) | **no** | yes | **no** | no |
-| **Search rerank** | neural + find_similar | n/a | none | n/a | n/a |
-| **Deep crawl** | yes (best-first, sitemap, budget) | yes | no | yes (cloud) | build it |
-| **PDF → structured markdown** | yes (tables, ToC, subset) | partial | yes (native) | yes (cloud + OCR) | build it |
-| **Scanned-PDF / image OCR** | yes (rapidocr, pure-pip) | **no** | no | yes (cloud paid) | build it |
-| **Page interaction** | yes (`actions`) | hooks (code) | no | yes (cloud) | build it |
-| **Query-focused extraction** | yes (`focus`, BM25) | yes (BM25 filter) | no | no | build it |
+| **Price** | $0 forever | $0 (self-host) | free, rate-limited | free, rate-limited | $0 self-host / 1K free |
+| **Runs locally** | yes | yes | no (their servers) | no (their API) | self-host: yes (Redis + Docker) |
+| **Web search** | yes (keyless local, 10 backends) | **no** | yes (remote) | yes | **no** |
+| **Deep crawl** | yes (best-first, sitemap, budget) | yes | **no** | no | yes (cloud) |
+| **Anti-bot / Cloudflare** | built-in (Patchright) | limited | yes (their infra) | none | not by default |
+| **PDF → structured markdown** | yes (tables, ToC, subset) | partial | no | yes (native) | yes (cloud + OCR) |
+| **Scanned-PDF / image OCR** | yes (rapidocr, pure-pip) | **no** | no | no | yes (cloud paid) |
+| **Page interaction** | yes (`actions`) | hooks (code) | no | no | yes (cloud) |
+| **Query-focused extraction** | yes (`focus`, BM25) | yes (BM25 filter) | no | no | no |
 | **Agent signals** | yes (`content_ok`/`next_action`/`summary`/`relevance_score`) | no | no | no | no |
 | **Connect-time `instructions`** | yes | no | no | no | no |
 | **MCP server** | yes (official) | community | yes (official) | yes (official) | build it |
-| **Token cost (tools/list)** | ~2.7K (6 tools) | varies | n/a | varies (12 tools) | n/a |
+| **Token cost (tools/list)** | ~2.7K (6 tools) | varies | n/a | n/a | varies (12 tools) |
 
-**Takeaway:** Crawl4AI is the closest free competitor (self-host, local, no key, has crawl + BM25), but **no web search, no scanned-PDF OCR, no agent-optimized signals**, Apache-2.0 (attribution) vs Hound's MIT. Jina Reader routes through Jina's servers and is rate-limited. Firecrawl's OSS has no anti-bot by default; the generous features live in the paid cloud. **Hound is the only free tool that combines keyless local search, built-in Cloudflare bypass, best-first crawl, scanned-PDF OCR, page interaction, and query-focused extraction: all local, MIT, $0, no accounts, no keys.**
+**The short version:** Crawl4AI crawls well but has no search and trips on Cloudflare. Parallel Search is remote search-only, no crawl, and runs on their servers. Jina fetches but rate-limits and routes through Jina. Firecrawl keeps the good stuff behind the paid cloud. Hound is the only free tool that combines keyless local search, built-in Cloudflare bypass, best-first crawl, scanned-PDF OCR, page interaction, and query-focused extraction in one local MIT server: $0, no accounts, no keys.
+
 
 <details>
 <summary><b>When a paid service makes sense</b></summary>
