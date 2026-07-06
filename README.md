@@ -36,7 +36,7 @@ pip install hound-mcp[all] && playwright install chromium
 
 Same prompt, three tools. Hound does the whole thing on its own, search + fetch + crawl, locally. The others get stuck on the parts they don't do.
 
-<video src="https://github.com/user-attachments/assets/172212ac-0e50-4030-8d23-878ee1db30ed" controls muted width="860"></video>
+<video src="https://github.com/user-attachments/assets/4e69e476-9c46-40cd-9bdf-f1b45882ac3e" controls muted width="860"></video>
 
 
 ---
