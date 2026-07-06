@@ -15,7 +15,7 @@ hound -u
 If you find a security issue in Hound, please report it privately rather than
 opening a public issue.
 
-- **Email**: bishesh@master-fetch.dev
+- **Email**: bhandaribishesh999@gmail.com
 - Or use GitHub's private vulnerability reporting: the *Report a vulnerability*
   button on the **Security** tab of this repository.
 
