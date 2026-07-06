@@ -47,7 +47,7 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
-## Why developers pick Hound
+## Why you should pick Hound
 
 Hound is one [MCP](https://modelcontextprotocol.io) server that gives any agent (Claude Code, Cursor, OpenCode, Hermes, Pi, anything that speaks MCP) full web research from a single local process.
 
