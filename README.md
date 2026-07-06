@@ -310,7 +310,6 @@ When a fetch or search fails, the response says exactly why and what to try next
 ## 🪙 Token cost
 
 <div align="center">
-<img src="https://raw.githubusercontent.com/dondai1234/master-fetch/master/docs/tokens.svg" alt="MCP tool count comparison: Hound 6 tools vs Firecrawl 12, Jina 19, Bright Data 60+" width="760">
 </div>
 
 Most MCP servers cost 3–5K tokens just to exist. Hound's 6 tools cost **~2.7K tokens** at `tools/list` (measured with `cl100k_base`); the connect-time `instructions` (~0.8K, the orientation doc) are injected ONCE at handshake, not repeated every turn. Your context window is expensive; Hound respects it.
