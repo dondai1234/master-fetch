@@ -2645,7 +2645,14 @@ class MasterFetchServer:
     ]
 
     def serve(self, http: bool = False, host: str = "127.0.0.1", port: int = 8765):
-        """Start the MCP server using low-level Server for minimal token overhead."""
+        """Start the MCP server using low-level Server for minimal token overhead.
+
+        When ``http`` is False (default) the server runs over stdio, which is what
+        Claude Code, Cursor, OpenCode, and other local MCP clients expect. When
+        True it exposes the **streamable HTTP** transport (MCP 2025-03-26 spec)
+        at ``http://host:port/mcp``, which is what Open WebUI (v0.6.31+) and
+        other HTTP MCP clients connect to directly, no proxy needed. The legacy
+        SSE transport was removed (deprecated in the spec)."""
         from mcp.server import Server
         from mcp.types import Tool, TextContent
 
@@ -2722,32 +2729,51 @@ class MasterFetchServer:
 
             anyio.run(_run)
         else:
-            from mcp.server.sse import SseServerTransport
+            # Streamable HTTP transport (MCP 2025-03-26 spec). This is the
+            # transport Open WebUI (v0.6.31+) and other modern HTTP MCP clients
+            # connect to directly, no mcpo proxy needed. Endpoint: http://host:port/mcp
+            from contextlib import asynccontextmanager
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
             from starlette.applications import Starlette
             from starlette.routing import Route
+            import uvicorn
 
-            sse = SseServerTransport("/messages/")
+            manager = StreamableHTTPSessionManager(app=server)
 
-            async def handle_sse(request):
-                async with sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
-                    await server.run(read, write, server.create_initialization_options())
+            class _StreamableHTTPASGIApp:
+                async def __call__(self, scope, receive, send):
+                    await manager.handle_request(scope, receive, send)
 
-            async def _startup():
-                asyncio.create_task(self._prewarm_stealthy())
+            @asynccontextmanager
+            async def lifespan(app):
+                warm = asyncio.create_task(self._prewarm_stealthy())
                 try:
                     from master_fetch.search_engines import prewarm_search_engines
                     from master_fetch.reranker import prewarm_reranker
                 except Exception:
                     prewarm_search_engines = prewarm_reranker = lambda *a, **k: None  # type: ignore[assignment]
-                asyncio.create_task(_safe_prewarm(prewarm_search_engines))
-                asyncio.create_task(_safe_prewarm(prewarm_reranker))
+                warm_search = asyncio.create_task(_safe_prewarm(prewarm_search_engines))
+                warm_reranker = asyncio.create_task(_safe_prewarm(prewarm_reranker))
+                try:
+                    async with manager.run():
+                        yield
+                finally:
+                    for _t in (warm, warm_search, warm_reranker):
+                        try:
+                            _t.cancel()
+                        except BaseException:
+                            pass
+                    for _t in (warm, warm_search, warm_reranker):
+                        try:
+                            await _t
+                        except BaseException:
+                            pass
+                    try:
+                        await self._shutdown_close_sessions()
+                    except BaseException:
+                        pass
 
-            app = Starlette(
-                routes=[Route("/sse", endpoint=handle_sse), Route("/messages/", endpoint=sse.handle_post_message)],
-                on_startup=[_startup],
-                on_shutdown=[self._shutdown_close_sessions],
-            )
-            import uvicorn
+            app = Starlette(routes=[Route("/mcp", endpoint=_StreamableHTTPASGIApp())], lifespan=lifespan)
             uvicorn.run(app, host=host, port=port)
 
     async def _dispatch(self, name: str, args: dict) -> list | tuple:
@@ -3261,7 +3287,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Hound MCP Server")
     parser.add_argument("--http", action="store_true",
-                        help="Use HTTP transport instead of stdio")
+                        help="Serve over streamable HTTP (MCP 2025-03-26) at http://host:port/mcp for Open WebUI and other HTTP MCP clients")
     parser.add_argument("--host", default="127.0.0.1",
                         help="Host for HTTP transport")
     parser.add_argument("--port", type=int, default=8765,

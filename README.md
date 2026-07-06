@@ -275,6 +275,19 @@ Install the Hound MCP server. Follow every step. Do not skip any.
 ```
 </details>
 
+<details>
+<summary><b>For Open WebUI (HTTP) users</b></summary>
+
+Open WebUI v0.6.31+ speaks the streamable HTTP transport natively. Run Hound in HTTP mode and point Open WebUI at it, no `mcpo` proxy needed:
+
+```bash
+hound --http --host 127.0.0.1 --port 8765
+```
+
+Then in Open WebUI add an MCP server with URL `http://127.0.0.1:8765/mcp`. Stdio clients (Claude Code, Cursor, OpenCode, Pi, etc.) just use `hound` with no flag.
+
+</details>
+
 ---
 
 ## ⚠️ Honest limits

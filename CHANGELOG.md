@@ -1,5 +1,41 @@
 # Changelog
 
+## [9.1.0] - 2026-07-06
+
+### Native streamable HTTP transport (Open WebUI direct connect)
+
+Hound now speaks the streamable HTTP transport (MCP 2025-03-26 spec), so HTTP
+MCP clients like Open WebUI (v0.6.31+) connect to it directly, no `mcpo` proxy
+required.
+
+    hound --http --host 127.0.0.1 --port 8765
+
+serves Hound at `http://127.0.0.1:8765/mcp`. Point Open WebUI's native MCP
+support at that URL and it connects. Stdio (the default, used by Claude Code,
+Cursor, OpenCode, etc.) is unchanged.
+
+The previous `--http` mode used the legacy SSE transport, which is deprecated in
+the MCP spec and unsupported by Open WebUI's native MCP client. SSE was replaced
+(not added alongside) by streamable HTTP, so there is one HTTP mode and it is the
+spec-current one. No new dependencies: `starlette` and `uvicorn` already ship
+transitively with `mcp`.
+
+### Tests
+
+- `tests/test_v91_http.py`: a full streamable HTTP lifecycle (initialize ->
+  notifications/initialized -> tools/list -> tools/call -> clean shutdown)
+  against a `python -m master_fetch.server --http` subprocess, plus a clean-
+  teardown assertion. CI-safe (network-free, calls `cache_clear`). 626 tests
+  total (was 624).
+
+### Compatibility
+
+No API breaks. The 6 tools, their schemas, and response shapes are unchanged.
+Stdio behavior is identical. Only `--http` changed: if you were using the old
+SSE `--http` mode (undocumented), switch to the new streamable HTTP mode; the
+endpoint moved from `/sse` + `/messages/` to `/mcp`.
+
+
 ## [9.0.0] - 2026-07-05
 
 ### Production-hardening + repo-professionalism release
