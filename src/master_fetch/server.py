@@ -1030,7 +1030,14 @@ class MasterFetchServer:
         smart_search renders DDG/Bing SERPs in this same browser.
         """
         async def _warm():
-            _get_scrapling()  # Lazy-import scrapling (playwright) if not done yet
+            # Run the (synchronous, ~5s) scrapling/playwright import in a WORKER
+            # THREAD, not on the event loop. A bare `_get_scrapling()` call here
+            # freezes the single-threaded asyncio loop for the whole import, which
+            # starves `server.run` so the `initialize` handshake never gets its
+            # reply out — the MCP client sees a silent dead hang and reports
+            # "failed to start". asyncio.wait_for cannot interrupt a synchronous
+            # blocking call, so this matters even with the 30s cap below.
+            await asyncio.to_thread(_get_scrapling)
             await self._ensure_auto_session("stealthy")
         try:
             await asyncio.wait_for(_warm(), timeout=30.0)
