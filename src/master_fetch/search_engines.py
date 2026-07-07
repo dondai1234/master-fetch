@@ -24,11 +24,24 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote, urlparse
 
-from bs4 import BeautifulSoup
-
-from master_fetch.search_metasearch import metasearch as _metasearch, _PROXY  # noqa: F401
-
 logger = logging.getLogger(__name__)
+
+_metasearch = None
+
+
+def _get_metasearch():
+    """Load the heavy scraper backend only for live searches.
+
+    Importing search_metasearch pulls in primp/httpx/lxml/fake_useragent. Keep
+    that cost off cached searches, validation failures, and server startup.
+    Tests may monkeypatch _metasearch directly; this helper respects that.
+    """
+    global _metasearch
+    if _metasearch is None:
+        from master_fetch.search_metasearch import metasearch as loaded
+        _metasearch = loaded
+    return _metasearch
+
 
 # Public default engine pool (the full keyless backend set; order = rough
 # preference). `engines=None` in smart_search uses this via the metasearch.
@@ -85,6 +98,7 @@ def normalize_url(url: str) -> str:
 def _strip_tags(s: str) -> str:
     if not s:
         return ""
+    from bs4 import BeautifulSoup
     return BeautifulSoup(s, "lxml").get_text(" ", strip=True)
 
 
@@ -107,6 +121,7 @@ async def fetch_source_for_similar(url: str, *, timeout: int = 10, max_chars: in
         from scrapling.engines.static import FetcherSession
         from master_fetch.search_metasearch import _PROXY as _p
         from urllib.parse import urlparse as _up
+        from bs4 import BeautifulSoup
         # rotation pool kept here (not imported from the removed SERL module)
         _pool = ["chrome131", "chrome136", "chrome142", "edge", "safari184", "firefox147"]
         async with FetcherSession(impersonate=_pool, proxy=_p,
@@ -173,7 +188,8 @@ async def multi_search(
     # Map hound engine names -> metasearch backends (it handles 'auto'/None/legacy).
     mapped = list(engines) if engines else None
 
-    results_dicts, status = await _metasearch(
+    metasearch = _get_metasearch()
+    results_dicts, status = await metasearch(
         q, max_results, region=region, timelimit=timelimit,
         page=backend_page, engines=mapped,
     )

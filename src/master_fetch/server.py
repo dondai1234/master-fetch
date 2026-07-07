@@ -39,7 +39,6 @@ import traceback as _traceback
 # _shutdown_close_sessions); these two guards suppress any residual noise so
 # stderr stays clean. (Real __del__ exceptions still surface.)
 _warnings.filterwarnings("ignore", message="unclosed .*transport", category=ResourceWarning)
-_warnings.filterwarnings("ignore", message="coroutine .* was never awaited", category=RuntimeWarning)
 
 # CPython prints 'Exception ignored in __del__' via sys.unraisablehook. The
 # asyncio transport teardown on a closed ProactorEventLoop raises RuntimeError
@@ -153,7 +152,7 @@ MAX_CONTENT_CHARS = 40000
 MIN_CHUNK_CHARS = 500  # if remaining < this, merge into current chunk (avoids wasteful round-trips)
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50MB hard cap for response bodies
 MAX_BULK_URLS = 100  # hard cap to prevent DoS via unbounded parallel requests
-AUTO_SESSION_IDLE_TIMEOUT = 0  # 0 = keep browser alive forever. Pre-warmed at server startup (eager), shared by smart_fetch + smart_search (DDG/Bing render SERPs in it).
+AUTO_SESSION_IDLE_TIMEOUT = 0  # 0 = keep browser alive forever. Pre-warmed at server startup (eager), shared by smart_fetch + screenshot.
 IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 
 # MCP initialize `instructions` — injected into the agent's context ONCE on
@@ -864,15 +863,36 @@ async def _timed(coro):
 async def _safe_prewarm(coro_fn, timeout: float = 20.0) -> None:
     """Run a prewarm callable in the background, fully isolated.
 
-    `coro_fn` is a zero-arg callable returning a coroutine (e.g.
-    prewarm_search_engines). Catches BaseException (a hung/crashing prewarm
-    NEVER takes down the server — not even CancelledError) and caps it at
-    `timeout` so a stuck launch can't linger. Prewarm is best-effort by design.
+    `coro_fn` is a zero-arg callable returning a coroutine. Catches
+    BaseException (a hung/crashing prewarm NEVER takes down the server, not even
+    CancelledError) and caps it at `timeout` so a stuck launch can't linger.
+    Prewarm is best-effort by design.
     """
     try:
         await asyncio.wait_for(coro_fn(), timeout=timeout)
     except BaseException:
         pass
+
+
+async def _safe_imported_prewarm(module_name: str, attr: str, timeout: float = 20.0) -> None:
+    """Import and run an optional async prewarm without touching the event loop.
+
+    Startup prewarms are best-effort. Their imports can be surprisingly heavy
+    (Scrapling/Playwright/ONNX chains), so resolve the callable in a worker
+    thread first; then run the coroutine with the same isolation as
+    _safe_prewarm. Import failure, timeout, cancellation, and bad callables are
+    all non-fatal.
+    """
+    def _resolve():
+        import importlib
+        module = importlib.import_module(module_name)
+        return getattr(module, attr)
+
+    try:
+        coro_fn = await asyncio.to_thread(_resolve)
+    except BaseException:
+        return
+    await _safe_prewarm(coro_fn, timeout=timeout)
 
 
 def _normalize_credentials(credentials: Optional[Dict[str, str]]) -> Optional[tuple]:
@@ -1027,7 +1047,6 @@ class MasterFetchServer:
         capped at 30s so a hung browser launch can't hold the session-creation
         lock forever (a later real fetch can then take the lock and retry). On
         any failure the browser simply lazy-launches on the first stealthy fetch.
-        smart_search renders DDG/Bing SERPs in this same browser.
         """
         async def _warm():
             # Run the (synchronous, ~5s) scrapling/playwright import in a WORKER
@@ -1145,12 +1164,6 @@ class MasterFetchServer:
             except BaseException:
                 pass
             entry._alive = False
-        # Close the persistent warm search-engine sessions (SERL) too.
-        try:
-            from master_fetch.search_engines import close_search_engines
-            await close_search_engines()
-        except BaseException:
-            pass
         # Drain pending loop callbacks (the Chrome subprocess transport's
         # connection_lost) so the transports fully close while the loop is
         # alive. Without this, their __del__ warns/errors after loop close.
@@ -2701,15 +2714,11 @@ class MasterFetchServer:
                 # the agent's first stealthy fetch/screenshot. It stays alive for
                 # the whole process (AUTO_SESSION_IDLE_TIMEOUT=0). Best-effort,
                 # runs in the background while the server handles the initialize
-                # handshake. smart_search renders DDG/Bing SERPs in this same browser.
+                # handshake.
                 warm = asyncio.create_task(self._prewarm_stealthy())
-                try:
-                    from master_fetch.search_engines import prewarm_search_engines
-                    from master_fetch.reranker import prewarm_reranker
-                except Exception:
-                    prewarm_search_engines = prewarm_reranker = lambda *a, **k: None  # type: ignore[assignment]
-                warm_search = asyncio.create_task(_safe_prewarm(prewarm_search_engines))
-                warm_reranker = asyncio.create_task(_safe_prewarm(prewarm_reranker))
+                warm_reranker = asyncio.create_task(
+                    _safe_imported_prewarm("master_fetch.reranker", "prewarm_reranker")
+                )
                 try:
                     async with stdio_server() as (read, write):
                         await server.run(read, write, server.create_initialization_options())
@@ -2719,12 +2728,12 @@ class MasterFetchServer:
                     # BaseException) so the process always exits cleanly. A noisy
                     # teardown traceback must never look like a server crash to the
                     # MCP client (which reports it as 'failed to load').
-                    for _t in (warm, warm_search, warm_reranker):
+                    for _t in (warm, warm_reranker):
                         try:
                             _t.cancel()
                         except BaseException:
                             pass
-                    for _t in (warm, warm_search, warm_reranker):
+                    for _t in (warm, warm_reranker):
                         try:
                             await _t
                         except BaseException:
@@ -2754,23 +2763,19 @@ class MasterFetchServer:
             @asynccontextmanager
             async def lifespan(app):
                 warm = asyncio.create_task(self._prewarm_stealthy())
-                try:
-                    from master_fetch.search_engines import prewarm_search_engines
-                    from master_fetch.reranker import prewarm_reranker
-                except Exception:
-                    prewarm_search_engines = prewarm_reranker = lambda *a, **k: None  # type: ignore[assignment]
-                warm_search = asyncio.create_task(_safe_prewarm(prewarm_search_engines))
-                warm_reranker = asyncio.create_task(_safe_prewarm(prewarm_reranker))
+                warm_reranker = asyncio.create_task(
+                    _safe_imported_prewarm("master_fetch.reranker", "prewarm_reranker")
+                )
                 try:
                     async with manager.run():
                         yield
                 finally:
-                    for _t in (warm, warm_search, warm_reranker):
+                    for _t in (warm, warm_reranker):
                         try:
                             _t.cancel()
                         except BaseException:
                             pass
-                    for _t in (warm, warm_search, warm_reranker):
+                    for _t in (warm, warm_reranker):
                         try:
                             await _t
                         except BaseException:

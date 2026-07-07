@@ -1,7 +1,7 @@
 [project]
 name = "hound-mcp"
-version = "9.1.0"
-description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. v9.1.0: native streamable HTTP transport for Open WebUI and other HTTP MCP clients, no proxy needed."
+version = "9.1.1"
+description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. v9.1.1: faster, safer startup with lazy search/reranker imports and no event-loop-blocking optional prewarms."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
 requires-python = ">=3.11"

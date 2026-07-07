@@ -41,9 +41,9 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
-## ✨ New in 9.0.0
+## ✨ New in 9.1.1
 
-**Production-hardening release.** The MCP server now starts in under 1 second and exits cleanly on Windows with an empty stderr: no more asyncio `__del__` tracebacks that a client can mistake for a crash (the old "failed to load"). The reranker prewarm is race-safe, and a CI lifecycle test proves the full connect → list → call → disconnect cycle stays clean. No new tools, no API breaks. [Release notes →](https://github.com/dondai1234/master-fetch/releases/tag/v9.0.0)
+**Startup reliability + speed release.** Hound keeps the live-search backend and neural reranker off the MCP handshake path until they are actually needed. Cached searches, validation errors, and startup no longer import the metasearch stack, bs4, trafilatura, Scrapling static fetcher, or reranker wrapper. Optional prewarm imports resolve off the event loop, so slow ONNX/Scrapling imports cannot mute the initialize response. No new tools, no API breaks. [Release notes →](https://github.com/dondai1234/master-fetch/releases/tag/v9.1.1)
 
 ---
 

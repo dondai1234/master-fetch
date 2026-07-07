@@ -1,5 +1,40 @@
 # Changelog
 
+## [9.1.1] - 2026-07-07
+
+### Startup reliability + lazy search/reranker imports
+
+This is a reliability and speed release for the MCP handshake path. No new
+tools, no schema breaks, no response-shape breaks.
+
+- Removed the no-op `search_engines` startup/shutdown imports from both stdio
+  and streamable HTTP serve paths. Startup no longer imports the metasearch
+  stack just to call no-op prewarm/close hooks.
+- Added `_safe_imported_prewarm()`: optional prewarm modules are resolved inside
+  `asyncio.to_thread()` before their async prewarm function runs. Slow optional
+  imports (reranker/ONNX chain, future prewarms) cannot block the event loop and
+  mute the MCP `initialize` response.
+- `master_fetch.search_engines` now lazy-loads `search_metasearch` only inside
+  `multi_search()`. Importing `master_fetch.search` for cache hits, validation
+  errors, or model construction no longer imports primp/httpx/lxml/fake_useragent.
+- `master_fetch.search` now lazy-loads `master_fetch.reranker`; cached searches
+  and invalid search requests no longer import the reranker wrapper or touch any
+  ONNX/tokenizer path.
+- Removed the broad `RuntimeWarning: coroutine was never awaited` suppression.
+  Hound still suppresses targeted Windows asyncio transport teardown noise, but
+  real async bugs now surface instead of being globally hidden.
+- Cleaned stale search response metadata from `keyword` to `merge`, matching the
+  existing reality that keyword/BM25 search mode was removed.
+
+### Tests
+
+- Added regression coverage proving `master_fetch.search` does not eagerly load
+  live-search/reranker backends.
+- Added regression coverage proving slow optional prewarm imports do not starve
+  the event loop.
+- Verified focused startup/search/lifecycle suite: 72 tests passing.
+- Repeated cold stdio probes: 6/6 initialized in ~0.9-1.1s, exit 0, empty stderr.
+
 ## [9.1.0] - 2026-07-06
 
 ### Native streamable HTTP transport (Open WebUI direct connect)

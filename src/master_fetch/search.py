@@ -33,11 +33,29 @@ from master_fetch.search_engines import (
     RawResult, multi_search, EngineReport, DEFAULT_ENGINES,
     fetch_source_for_similar, _INDEX_FAMILY,
 )
-from master_fetch.reranker import (
-    rerank as neural_rerank, unavailable_reason, get_reranker, ensure_reranker,
-)
 
 logger = logging.getLogger("master-fetch.search")
+
+
+def neural_rerank(query: str, ranked: list[RawResult]):
+    from master_fetch.reranker import rerank
+    return rerank(query, ranked)
+
+
+def unavailable_reason() -> str:
+    from master_fetch.reranker import unavailable_reason as _unavailable_reason
+    return _unavailable_reason()
+
+
+def get_reranker():
+    from master_fetch.reranker import get_reranker as _get_reranker
+    return _get_reranker()
+
+
+async def ensure_reranker(*, download: bool = True):
+    from master_fetch.reranker import ensure_reranker as _ensure_reranker
+    return await _ensure_reranker(download=download)
+
 
 SEARCH_CACHE_TTL = 300  # 5 minutes
 
@@ -160,7 +178,7 @@ class SearchResponseModel(BaseModel):
     total_results: int = Field(default=0, description="Results returned")
     engines_used: list[str] = Field(default=[], description="Engines that returned results")
     engine_blocked: list[str] = Field(default=[], description="Engines that did NOT contribute (rate-limited/CAPTCHA'd/timed out/parsed no results). Results still came from engines_used; retry shortly for more recall.")
-    rerank_mode: str = Field(default="keyword", description="Rerank used: keyword|neural|find_similar.")
+    rerank_mode: str = Field(default="merge", description="Rerank used: merge|neural|find_similar.")
     cached: bool = Field(default=False, description="Served from cache?")
     duration_ms: float = Field(default=0, description="Duration ms")
     error: str = Field(default="", description="Error message (empty = ok)")
@@ -173,7 +191,7 @@ class SearchResponseModel(BaseModel):
 # ─── tier derivation + hint ──────────────────────────────────────────────────
 
 def _tier(score: float, rank: int, total: int) -> str:
-    """Derive high|med|low from BM25 score + rank. Top result is never 'low'."""
+    """Derive high|med|low from relevance score + rank. Top result is never 'low'."""
     if score >= 0.5 or rank == 1:
         return "high"
     if score >= 0.15:
@@ -283,7 +301,7 @@ def _validate_mode(mode):
     if mode is None:
         return "auto"
     if not isinstance(mode, str) or mode.lower() not in _IMPLEMENTED_MODES:
-        raise SecurityError(f"Invalid mode: {mode!r} (auto|keyword|neural|find_similar)")
+        raise SecurityError(f"Invalid mode: {mode!r} (auto|neural|find_similar)")
     return mode.lower()
 
 
@@ -455,7 +473,7 @@ async def smart_search(
                 results_list = [SearchResult(**r) for r in data.get("results", [])]
                 _eu = data.get("engines_used", [])
                 _eb = data.get("engine_blocked", [])
-                _rm = data.get("rerank_mode", "keyword")
+                _rm = data.get("rerank_mode", "merge")
                 _rq = data.get("related_queries", [])
                 return SearchResponseModel(
                     query=cache_query, results=results_list,
@@ -476,7 +494,7 @@ async def smart_search(
     error = ""
     ranked: list[RawResult] = []
     reports: list[EngineReport] = []
-    rerank_used = "keyword"
+    rerank_used = "merge"
     rerank_note = ""
 
     # Start the reranker load in parallel with the engine fetch so the cold ONNX

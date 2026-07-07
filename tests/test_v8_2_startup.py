@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from master_fetch.server import _safe_prewarm
+from master_fetch.server import _safe_imported_prewarm, _safe_prewarm
 
 
 # ─── heavy imports are deferred (the core fix) ───────────────────────────────
@@ -56,6 +56,28 @@ def test_server_import_is_fast():
     assert dt < 2.0, f"server import too slow: {dt:.2f}s (was 5.45s pre-v8.2; target <2s)"
 
 
+def test_search_import_does_not_eagerly_load_live_search_backend():
+    """import master_fetch.search is needed for cache hits and validation errors;
+    it must not load the heavy live-search or reranker backend until needed."""
+    code = (
+        "import sys; import master_fetch.search; "
+        "print('|'.join(str(x) for x in ("
+        "'master_fetch.search_metasearch' in sys.modules, "
+        "'master_fetch.reranker' in sys.modules, "
+        "'bs4' in sys.modules, "
+        "'trafilatura' in sys.modules, "
+        "'onnxruntime' in sys.modules)))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, f"search import failed: {out.stderr[-400:]}"
+    metasearch, reranker, bs4, traf, onnx = [p == "True" for p in out.stdout.strip().split("|")]
+    assert metasearch is False, "search_metasearch must be lazy for cached/invalid searches"
+    assert reranker is False, "reranker must be lazy for cached/invalid searches"
+    assert bs4 is False, "bs4 must be lazy until find_similar/source extraction"
+    assert traf is False, "trafilatura must be lazy until find_similar/source extraction"
+    assert onnx is False, "onnxruntime must never load during search module import"
+
+
 # ─── prewarm isolation ───────────────────────────────────────────────────────
 
 def test_safe_prewarm_swallows_exceptions():
@@ -91,3 +113,36 @@ def test_safe_prewarm_runs_normal_callable():
         ran.append(1)
     asyncio.run(_safe_prewarm(ok))
     assert ran == [1]
+
+
+def test_safe_imported_prewarm_resolves_import_off_event_loop(monkeypatch):
+    """Optional prewarm imports can be slow; resolving them must not starve the
+    MCP handshake event loop while they import."""
+    import importlib
+
+    ran = []
+
+    class FakeModule:
+        @staticmethod
+        async def prewarm():
+            ran.append(1)
+
+    def slow_import(name):
+        assert name == "fake_heavy_module"
+        time.sleep(0.25)
+        return FakeModule
+
+    monkeypatch.setattr(importlib, "import_module", slow_import)
+
+    async def main():
+        task = asyncio.create_task(_safe_imported_prewarm("fake_heavy_module", "prewarm", timeout=1.0))
+        ticks = 0
+        while not task.done():
+            ticks += 1
+            await asyncio.sleep(0.02)
+        await task
+        return ticks
+
+    ticks = asyncio.run(main())
+    assert ran == [1]
+    assert ticks >= 3, "slow import ran on the event loop instead of a worker thread"
