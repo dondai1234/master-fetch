@@ -155,6 +155,12 @@ MAX_BULK_URLS = 100  # hard cap to prevent DoS via unbounded parallel requests
 AUTO_SESSION_IDLE_TIMEOUT = 0  # 0 = keep browser alive forever. Pre-warmed at server startup (eager), shared by smart_fetch + screenshot.
 IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 
+# Watchdog: pause the browser process tree (SIGSTOP on Linux/macOS, suspend on
+# Windows) after a period of idleness to free RAM. The browser is resumed on the
+# next fetch/screenshot call — no cold launch, sub-rms latency.
+_WATCHDOG_IDLE_TIMEOUT_DEFAULT = 60  # default seconds idle before pausing
+_WATCHDOG_CHECK_INTERVAL = 15  # seconds between watchdog checks
+
 # MCP initialize `instructions` — injected into the agent's context ONCE on
 # connect by clients that support it. This is the connect-time mastery doc:
 # the #1 workflow, the gotchas, and when to use each tool. Kept tight (~300
@@ -954,6 +960,18 @@ class MasterFetchServer:
         self._idle_monitor_task: Optional[Any] = None  # asyncio.Task for idle session cleanup
         self._auto_session_lock: Lock = Lock()  # serializes auto-session creation so the startup warm-up + a concurrent fetch never spawn a 2nd browser
 
+        # Watchdog: pause idle browser to free RAM (v9.1.3)
+        self._watchdog_idle_timeout: int = int(
+            os.environ.get("HOUND_BROWSER_IDLE_TIMEOUT", str(_WATCHDOG_IDLE_TIMEOUT_DEFAULT))
+        )
+        self._auto_stealthy_pids: list[int] = []
+        self._auto_stealthy_busy_count: int = 0
+        self._auto_stealthy_paused: bool = False
+        self._auto_stealthy_last_idle_time: float = 0.0
+        self._auto_stealthy_busy_lock: Lock = Lock()
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_shutdown: bool = False
+
     # ─── Core helpers ─────────────────────────────────────────────
 
     async def _get_session(self, session_id: str, expected_type: Optional[SessionType]) -> _SessionEntry:
@@ -990,14 +1008,18 @@ class MasterFetchServer:
         Idle timeout: when AUTO_SESSION_IDLE_TIMEOUT > 0, auto sessions close
         after that many seconds of inactivity. When it is 0 (default), the
         browser is kept alive forever and no idle monitor is started.
+
+        Watchdog: if the browser was paused to free RAM, resumes it before reuse.
         """
         attr = "_auto_dynamic_id" if session_type == "dynamic" else "_auto_stealthy_id"
         ts_attr = "_auto_dynamic_last_used" if session_type == "dynamic" else "_auto_stealthy_last_used"
 
-        # Fast path: reuse an existing alive session.
+        # Fast path: reuse an existing alive session. Resume if watchdog paused it.
         async with self._sessions_lock:
             existing_id = getattr(self, attr)
             if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
+                if session_type == "stealthy":
+                    self._resume_browser_if_paused()
                 setattr(self, ts_attr, now())
                 self._ensure_idle_monitor()
                 return existing_id
@@ -1012,9 +1034,16 @@ class MasterFetchServer:
             async with self._sessions_lock:
                 existing_id = getattr(self, attr)
                 if existing_id and existing_id in self._sessions and self._sessions[existing_id].session._is_alive:
+                    if session_type == "stealthy":
+                        self._resume_browser_if_paused()
                     setattr(self, ts_attr, now())
                     self._ensure_idle_monitor()
                     return existing_id
+            # Resume if browser was paused (e.g. watchdog paused it after the idle
+            # monitor killed the old session and before this new one was created —
+            # the PIDs are stale but _resume_browser_if_paused checks _paused first).
+            if session_type == "stealthy":
+                self._resume_browser_if_paused()
             # Create outside the sessions lock (expensive — browser launch) but
             # inside the creation lock (no concurrent 2nd launch).
             sid = await self.open_session(session_type=session_type, headless=True)
@@ -1030,6 +1059,13 @@ class MasterFetchServer:
                     return existing_id
                 setattr(self, attr, sid.session_id)
                 setattr(self, ts_attr, now())
+
+        # Capture browser PIDs for watchdog after creation
+        if session_type == "stealthy":
+            self._auto_stealthy_pids = self._find_browser_pids()
+            self._auto_stealthy_paused = False
+            self._auto_stealthy_last_idle_time = now()
+            await self._ensure_watchdog()
 
         self._ensure_idle_monitor()
         return sid.session_id
@@ -1153,6 +1189,19 @@ class MasterFetchServer:
         loop is alive, then close any lingering asyncio subprocess transports
         so their __del__ is a no-op (they're already closing).
         """
+        # Resume browser if watchdog paused it — session.close() communicates
+        # with the browser via CDP and would hang on a suspended process.
+        self._resume_browser_if_paused()
+
+        # Stop the watchdog background task
+        self._watchdog_shutdown = True
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except BaseException:
+                pass
+
         async with self._sessions_lock:
             entries = list(self._sessions.items())
             self._sessions.clear()
@@ -1205,6 +1254,136 @@ class MasterFetchServer:
                     transport.close()
             except BaseException:
                 pass
+
+    # ─── Watchdog ──────────────────────────────────────────────────
+
+    def _find_browser_pids(self) -> list[int]:
+        """Find Chrome/Chromium child processes of this process.
+
+        Called after session.start() creates the browser tree. Returns the PIDs
+        of all descendant processes with 'chrome' or 'chromium' in their name.
+        Best-effort; returns [] on failure (watchdog will skip pausing).
+        """
+        import psutil
+        try:
+            parent = psutil.Process(os.getpid())
+            children = parent.children(recursive=True)
+            pids = []
+            for child in children:
+                try:
+                    name = child.name().lower()
+                    if "chrome" in name or "chromium" in name:
+                        pids.append(child.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            return pids
+        except Exception:
+            return []
+
+    def _resume_browser_if_paused(self) -> None:
+        """Resume the browser process tree if it was paused by the watchdog.
+
+        Synchronous and fast (SIGCONT/suspend-resume is sub-ms). Must be called
+        BEFORE any operation that communicates with the browser (fetch, close),
+        otherwise those operations hang forever on a suspended process.
+
+        Idempotent: no-op if the browser is not paused.
+        """
+        if not self._auto_stealthy_paused:
+            return
+        if not self._auto_stealthy_pids:
+            self._auto_stealthy_paused = False
+            return
+        import os as _os
+        pids = list(self._auto_stealthy_pids)
+        is_windows = sys.platform == "win32"
+        for pid in pids:
+            try:
+                if is_windows:
+                    import psutil
+                    psutil.Process(pid).resume()
+                else:
+                    import signal
+                    _os.kill(pid, signal.SIGCONT)
+            except Exception:
+                pass
+        self._auto_stealthy_paused = False
+        self._auto_stealthy_last_idle_time = now()
+        logger.debug("Watchdog: resumed browser (PIDs: %s)", pids)
+
+    async def _mark_browser_busy(self) -> None:
+        """Mark the auto stealthy browser as busy (a fetch/screenshot is in flight)."""
+        async with self._auto_stealthy_busy_lock:
+            self._auto_stealthy_busy_count += 1
+
+    async def _mark_browser_idle(self) -> None:
+        """Mark the auto stealthy browser as idle (fetch/screenshot completed)."""
+        async with self._auto_stealthy_busy_lock:
+            self._auto_stealthy_busy_count = max(0, self._auto_stealthy_busy_count - 1)
+            if self._auto_stealthy_busy_count == 0:
+                self._auto_stealthy_last_idle_time = now()
+
+    async def _pause_browser(self) -> None:
+        """Pause the browser process tree (SIGSTOP/suspend) to free RAM.
+
+        Double-checks busy_count under lock before pausing to prevent races
+        with an incoming fetch.
+        """
+        if not self._auto_stealthy_pids:
+            self._auto_stealthy_pids = self._find_browser_pids()
+        if not self._auto_stealthy_pids:
+            return
+        async with self._auto_stealthy_busy_lock:
+            if self._auto_stealthy_busy_count > 0:
+                return
+            pids = list(self._auto_stealthy_pids)
+        import os as _os
+        is_windows = sys.platform == "win32"
+        for pid in pids:
+            try:
+                if is_windows:
+                    import psutil
+                    psutil.Process(pid).suspend()
+                else:
+                    import signal
+                    _os.kill(pid, signal.SIGSTOP)
+            except Exception:
+                pass
+        self._auto_stealthy_paused = True
+        logger.debug("Watchdog: paused browser after idle (PIDs: %s)", pids)
+
+    async def _ensure_watchdog(self) -> None:
+        """Start the watchdog task if enabled and not already running."""
+        if self._watchdog_idle_timeout <= 0:
+            return
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        self._watchdog_shutdown = False
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    async def _watchdog_loop(self) -> None:
+        """Background task: pause the browser after _watchdog_idle_timeout of idleness."""
+        try:
+            while not self._watchdog_shutdown:
+                await asyncio_sleep(_WATCHDOG_CHECK_INTERVAL)
+                try:
+                    if self._watchdog_idle_timeout <= 0:
+                        continue
+                    if self._auto_stealthy_paused:
+                        continue
+                    async with self._auto_stealthy_busy_lock:
+                        busy = self._auto_stealthy_busy_count
+                        last_idle = self._auto_stealthy_last_idle_time
+                    if busy == 0 and last_idle > 0 and (now() - last_idle) > self._watchdog_idle_timeout:
+                        await self._pause_browser()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Watchdog check failed, will retry on next cycle")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._watchdog_task = None
 
     async def _finalize_result(
         self,
@@ -1452,11 +1631,18 @@ class MasterFetchServer:
             except Exception as exc:
                 captured["error"] = exc
 
-        await entry.session.fetch(
-            url, wait=wait, timeout=timeout, network_idle=network_idle,
-            wait_selector=wait_selector, wait_selector_state=wait_selector_state,
-            page_action=_capture,
-        )
+        using_auto = bool(self._auto_stealthy_id and ssid == self._auto_stealthy_id)
+        if using_auto:
+            await self._mark_browser_busy()
+        try:
+            await entry.session.fetch(
+                url, wait=wait, timeout=timeout, network_idle=network_idle,
+                wait_selector=wait_selector, wait_selector_state=wait_selector_state,
+                page_action=_capture,
+            )
+        finally:
+            if using_auto:
+                await self._mark_browser_idle()
 
         if "error" in captured:
             raise captured["error"]
@@ -1971,17 +2157,25 @@ class MasterFetchServer:
 
         if session_id:
             entry = await self._get_session(session_id, "stealthy")
-            timed_tasks = [
-                _timed(entry.session.fetch(
-                    url, wait=wait, timeout=timeout, google_search=google_search,
-                    extra_headers=extra_headers, disable_resources=disable_resources,
-                    wait_selector=wait_selector, wait_selector_state=wait_selector_state,
-                    network_idle=network_idle, proxy=proxy, solve_cloudflare=solve_cloudflare,
-                    page_action=page_action,
-                ))
-                for url in urls
-            ]
-            timed_responses = await gather(*timed_tasks, return_exceptions=True)
+
+            using_auto = bool(self._auto_stealthy_id and session_id == self._auto_stealthy_id)
+            if using_auto:
+                await self._mark_browser_busy()
+            try:
+                timed_tasks = [
+                    _timed(entry.session.fetch(
+                        url, wait=wait, timeout=timeout, google_search=google_search,
+                        extra_headers=extra_headers, disable_resources=disable_resources,
+                        wait_selector=wait_selector, wait_selector_state=wait_selector_state,
+                        network_idle=network_idle, proxy=proxy, solve_cloudflare=solve_cloudflare,
+                        page_action=page_action,
+                    ))
+                    for url in urls
+                ]
+                timed_responses = await gather(*timed_tasks, return_exceptions=True)
+            finally:
+                if using_auto:
+                    await self._mark_browser_idle()
         else:
             s = _get_scrapling()
             async with s.AsyncStealthySession(

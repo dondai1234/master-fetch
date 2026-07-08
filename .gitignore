@@ -47,6 +47,7 @@ STATUS.md
 PROJECT.md
 PLAN.md
 TODO.md
+AGENTS.md
 ROADMAP-personal.md
 research/
 notes/
@@ -54,6 +55,7 @@ scratch/
 .pi/
 .claude/
 .cursor/
+.opencode/*
 keys.md
 master-fetch-bug-report.md
 

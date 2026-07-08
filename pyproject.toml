@@ -16,6 +16,7 @@ dependencies = [
     "httpx[http2]>=0.27",
     "fake-useragent>=2.0",
     "lxml>=5.0",
+    "psutil>=5.9",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
