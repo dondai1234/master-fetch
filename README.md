@@ -231,6 +231,7 @@ The lean install is fully functional: multi-engine keyless search with cross-bac
 |----------|---------|
 | `HOUND_SEARCH_PROXY` | Route all search-engine requests through your own proxy (`http://host:port`, `socks5://...`, or `user:pass@host:port`). For sustained heavy search use with a rotating / residential proxy. Not required for normal single-user use. |
 | `HOUND_SEARCH_MIN_INTERVAL` | Override the per-engine pacing floor (seconds, float). `0` = use the built-in defaults (DDG 1.2s, Bing 1.5s, Wikipedia 0.3s). Power-user tuning. |
+| `HOUND_BROWSER_IDLE_TIMEOUT` | Seconds of browser idleness before pausing the Chrome process tree (SIGSTOP/suspend) to free RAM. Resumed on next fetch in <1ms. Default 60. Set to 0 to disable. |
 
 No API keys or accounts are needed for anything: search is keyless and local.
 </details>

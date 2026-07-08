@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added — browser watchdog pauses idle Chrome to free RAM
+
+After 60s of idleness (no `smart_fetch`/`screenshot` in flight), the watchdog
+sends `SIGSTOP` (Linux/macOS) or `psutil.suspend()` (Windows) to the shared
+Patchright Chrome process tree, making it eligible for OS memory eviction.
+On the next fetch/screenshot call, the browser is resumed in <1ms — no cold
+launch penalty. `HOUND_BROWSER_IDLE_TIMEOUT` env var (default 60) controls
+the idle threshold; set to 0 to disable.
+
+- `psutil>=5.9` added as a core dependency (lightweight, no C deps).
+- `_find_browser_pids()` discovers Chrome/Chromium child PIDs after browser launch.
+- `_mark_browser_busy()`/`_mark_browser_idle()` track in-flight fetches with a
+  race-safe counter (`asyncio.Lock`).
+- `_pause_browser()` freezes the process tree; double-checks busy count under lock.
+- `_resume_browser_if_paused()` resumes before every fetch, screenshot, and shutdown
+  (synchronous, sub-ms; no-op when not paused).
+- `_watchdog_loop()` runs as a background `asyncio.Task` every 15s.
+- `_ensure_auto_session()` resumes before reuse, captures PIDs on browser creation.
+- `_shutdown_close_sessions()` resumes before CDP close (avoids hang on suspended
+  process).
+
+### Tests
+
+- `tests/test_watchdog.py` — 32 tests (config, PID discovery, SIGSTOP/SIGCONT,
+  Windows suspend/resume, busy/idle counters, watchdog lifecycle, shutdown).
+
 ## [9.1.2] - 2026-07-07
 
 ### Packaging hardening on top of 9.1.1 startup work
