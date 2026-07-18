@@ -363,6 +363,11 @@ class TestHelperSource:
 
     def test_spawn_inherits_console_so_output_shows(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
+        # Mock the launcher lookup so _build_helper_source doesn't call
+        # shutil.which with a faked win32 platform (its Windows branch hits
+        # _winapi, which is None on Linux - breaks on Py 3.12+).
+        monkeypatch.setattr("master_fetch.updater._hound_launcher_path",
+                            lambda: "C:/x/hound.exe")
         import subprocess as sp
         with patch.object(sp, "Popen") as m:
             assert _spawn_helper("10.2.0", "/r.py", 1) is True
@@ -370,6 +375,8 @@ class TestHelperSource:
 
     def test_spawn_returns_false_on_popen_error(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr("master_fetch.updater._hound_launcher_path",
+                            lambda: "C:/x/hound.exe")
         import subprocess as sp
         with patch.object(sp, "Popen", side_effect=OSError("boom")):
             assert _spawn_helper("10.2.0", "/r.py", 1) is False
