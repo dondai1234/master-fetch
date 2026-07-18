@@ -1,6 +1,6 @@
 [project]
 name = "hound-mcp"
-version = "10.2.0"
+version = "10.2.1"
 description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. Internet Archive recovery when a site hard-blocks, a research-grade response envelope, a polished cross-platform CLI, and a brick-proof self-update with hound doctor + rollback."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]

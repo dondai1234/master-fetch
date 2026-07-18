@@ -201,7 +201,7 @@ HOUND_INSTRUCTIONS = (
     "\n"
     "#1 workflow (answer a factual question): smart_search -> smart_fetch the results that match (relevance ranking is a hint, trust your judgment) -> synthesize, citing URLs.\n"
     "\n"
-    "Known unbypassable (no free tool beats these): DataDome, Akamai, Cloudflare Turnstile (interactive). If smart_fetch fails on one, switch sources - do not retry the same URL.\n"
+    "Known unbypassable live (no free tool beats these): DataDome, Akamai, Cloudflare Turnstile (interactive). smart_fetch already auto-recovers hard-blocks from the Internet Archive; if it still fails (no snapshot), switch sources - do not retry the same URL.\n"
 )
 
 
@@ -2305,9 +2305,14 @@ class MasterFetchServer:
         - Web search: use smart_search instead
         - You specifically need HTTP-only without escalation: set force_fetcher="http"
 
-        Response contains: url, status, content (extracted text), content_type (e.g. 'text/html',
-        'application/json'), total_size_bytes, is_truncated (if content was too long),
-        escalation_path (e.g. 'http→dynamic'), duration_ms, error (with recovery hints).
+        Response: url, status, content (extracted text), content_type, total_size_bytes,
+        is_truncated (+ next_offset to paginate), escalation_path, duration_ms, error.
+        Signals to branch on: content_ok (real content, not a login/bot wall?), next_action
+        (suggested next call), summary, page_type (article/docs/list/forum/auth_wall/paywall/...),
+        content_age_days + is_stale, source_type + is_official, source + archived_at. If the
+        live site hard-blocks (404/bot-wall/auth), content is auto-recovered from the Internet
+        Archive (source='archive.org', archived_at = snapshot date); archive_fallback=false
+        to opt out and get the raw live failure instead.
         """
         # Bulk mode: fetch multiple URLs in parallel
         if urls is not None:

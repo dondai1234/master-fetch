@@ -1,5 +1,29 @@
 # Changelog
 
+## [10.2.1] - 2026-07-18
+
+### Tool-description awareness (no behavior change)
+
+The `smart_fetch` tool docstring (the description every MCP client shows in the
+ tool list) was stale: its "Response contains" list predated the v10
+research-grade envelope and never mentioned the Internet Archive fallback. A
+model leaning on the tool description alone would miss `content_ok`,
+`next_action`, `page_type`, `content_age_days`/`is_stale`, `source_type`/`is_official`,
+`source`/`archived_at`, and the archive auto-recovery.
+
+- `smart_fetch` docstring now lists the envelope signals to branch on, plus the
+  archive fallback (`source='archive.org'`, `archived_at`, `archive_fallback=false`
+  to opt out).
+- The connect-time instructions' "Known unbypassable" line clarifies that
+  `smart_fetch` already auto-recovers hard-blocks from the Internet Archive
+  before telling you to switch sources (so the model doesn't abandon a URL that
+  smart_fetch can still recover).
+
+No tool behavior, schema, or response-shape change. The `archive_fallback`
+parameter and the `source`/`archived_at` field descriptions were already correct;
+this surfaces them in the one place a model is guaranteed to look - the tool
+description. 705 tests.
+
 ## [10.2.0] - 2026-07-18
 
 ### Reimagined, brick-proof self-update (+ `hound doctor`, `hound --rollback`)
