@@ -1,7 +1,7 @@
 [project]
 name = "hound-mcp"
-version = "10.0.0"
-description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. v10.0.0: automatic Internet Archive recovery when a live site hard-blocks, plus a research-grade response envelope (page_type, freshness, source authority, smart next_action)."
+version = "10.1.0"
+description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. Internet Archive recovery when a site hard-blocks, a research-grade response envelope, and a polished cross-platform CLI."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
 requires-python = ">=3.11"

@@ -35,7 +35,6 @@ from master_fetch.server import (
     _do_update,
     _run_pip_sync,
     _spawn_console_updater,
-    _corrupted_install_message,
 )
 
 
@@ -371,7 +370,8 @@ class TestRunPipSync:
         with patch("subprocess.run", return_value=self._ok(0)), \
              patch.object(srv, "_check_version", return_value=("3.6.7", "3.6.7", True)):
             srv._run_pip_sync(["pip", "install", "x"], "3.6.7")
-        assert "Hound v3.6.7" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "v3.6.7" in out and "updated" in out.lower()
 
     def test_silent_no_op_detected(self, capsys):
         import master_fetch.server as srv
@@ -409,7 +409,7 @@ class TestRunPipSync:
             with pytest.raises(SystemExit):
                 srv._run_pip_sync(["pip", "install", "x"], "3.6.7")
         out = capsys.readouterr().out
-        assert "metadata is missing" in out.lower()
+        assert "metadata" in out.lower()
         assert "hound-mcp==3.6.7" in out
 
 
@@ -420,7 +420,8 @@ class TestDoUpdate:
         import master_fetch.server as srv
         with patch.object(srv, "_check_version", return_value=("3.6.7", "3.6.7", True)):
             srv._do_update()
-        assert "Hound v3.6.7 (latest)" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "v3.6.7" in out and "up to date" in out.lower()
 
     def test_pypi_unreachable_message(self, capsys):
         import master_fetch.server as srv
@@ -428,7 +429,7 @@ class TestDoUpdate:
             srv._do_update()
         out = capsys.readouterr().out
         assert "couldn't reach PyPI" in out
-        assert "pip install --upgrade hound-mcp[all]" in out
+        assert "hound -u" in out
 
     @pytest.mark.skipif(sys.platform != "win32", reason="spawn path is Windows-only")
     def test_win32_spawns_console_updater_and_returns(self, monkeypatch, capsys):
@@ -462,7 +463,7 @@ class TestDoUpdate:
             srv._do_update()
         out = capsys.readouterr().out
         assert mock_sync.called, "POSIX must run pip synchronously"
-        assert "Updating v3.6.5 to v3.6.6" in out
+        assert "v3.6.5" in out and "v3.6.6" in out and "updating" in out.lower()
 
     def test_posix_warns_about_running_server_but_proceeds(self, monkeypatch, capsys):
         import master_fetch.server as srv

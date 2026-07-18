@@ -3,7 +3,7 @@
 $0 forever. Fetch any page with anti-bot bypass plus web search.
 """
 
-__version__ = "10.0.0"
+__version__ = "10.1.0"
 
 # Lazy imports — server pulls in heavy deps (scrapling, playwright, etc.)
 # Other modules (cache, security) are lightweight and can be imported directly

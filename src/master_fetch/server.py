@@ -3250,39 +3250,6 @@ def _reinstall_cmd(ver: str) -> str:
     return f"pip install --force-reinstall --no-deps hound-mcp=={ver}"
 
 
-def _corrupted_install_message() -> str:
-    """Message shown when hound-mcp package metadata is missing.
-
-    This happens when a previous `hound -u` (or a manual pip operation) was
-    interrupted mid-uninstall: pip deleted the dist-info but could not
-    overwrite hound.exe (WinError 32), leaving the launcher orphaned from its
-    package metadata. importlib.metadata then can't find the version, so
-    `hound -v` prints 'vunknown'. Tell the user exactly how to recover.
-    """
-    return (
-        "Hound install is corrupted: package metadata is missing (a previous\n"
-        "update was interrupted before it could finish). The launcher still\n"
-        "works, but pip no longer knows which version is installed. Recover with:\n"
-        "  pip install --force-reinstall --no-deps hound-mcp==<latest>\n"
-        "(find <latest> at https://pypi.org/project/hound-mcp/).\n"
-        "Also make sure you install 'hound-mcp' (the package), NOT 'hound'\n"
-        "(an unrelated PyPI package)."
-    )
-
-
-def _print_pip_failure(result) -> None:
-    """Print the most useful line from a failed pip run. Callers add recovery."""
-    err = (result.stderr or "").strip() if result is not None else ""
-    printed = False
-    for line in err.split("\n"):
-        if "ERROR" in line or "error" in line.lower():
-            print(f"  {line.strip()}")
-            printed = True
-            break
-    if not printed:
-        print(f"  {err.split(chr(10))[-1] if err else 'update failed'}")
-
-
 def _spawn_console_updater(pip_cmd: list, target_ver: str) -> bool:
     """Windows: spawn a child python.exe (NOT hound.exe) that inherits this
     console, waits for the hound.exe launcher to exit, then runs pip.
@@ -3339,22 +3306,18 @@ def _hound_pids():
 
 others = _hound_pids()
 if others:
-    print("Cannot update: a hound MCP server is still running and holds the")
-    print("launcher against replacement:")
+    print("  Hound  cannot update - a hound MCP server holds the launcher:")
     for p in others:
-        print("  PID %d" % p)
-    print("Stop it first:")
-    print("  {stop_cmd}")
-    print("then re-run:  hound -u")
-    print("or recover manually:  {reinstall}")
+        print("    PID %d" % p)
+    print("  stop it:  {stop_cmd}")
+    print("  then:  hound -u   (or recover:  {reinstall})")
     sys.exit(1)
 
-print("Running pip...")
 r = subprocess.run([{pip_repr}])
 if r.returncode != 0:
-    print("Update failed (pip returned %d)." % r.returncode)
-    print("Stop any running hound MCP server:  {stop_cmd}")
-    print("or recover manually:  {reinstall}")
+    print("  Hound  update failed (pip returned %d)" % r.returncode)
+    print("  stop any running hound server:  {stop_cmd}")
+    print("  or recover:  {reinstall}")
     sys.exit(1)
 
 from importlib.metadata import version as _v
@@ -3370,13 +3333,11 @@ def _pad(v):
         return None
 np_, tp_ = _pad(new_ver), _pad(target)
 if new_ver == "unknown" or (np_ and tp_ and np_ < tp_):
-    print("The upgrade to v%s did not complete. hound.exe could not be" % target)
-    print("replaced (a running hound MCP server likely holds it). Stop it:")
-    print("  {stop_cmd}")
-    print("then re-run:  hound -u")
-    print("or recover manually:  {reinstall}")
+    print("  Hound  upgrade to v%s did not complete (a running server holds the launcher)" % target)
+    print("  stop it:  {stop_cmd}")
+    print("  then:  hound -u   (or recover:  {reinstall})")
     sys.exit(1)
-print("Hound v" + new_ver)
+print("  Hound  v" + new_ver + "  updated")
 '''
     try:
         # Inherit the parent console (no DETACHED / CREATE_NEW_PROCESS_GROUP)
@@ -3392,42 +3353,44 @@ def _run_pip_sync(pip_cmd: list, target_ver: str) -> None:
 
     Used on POSIX (no file lock) and as a Windows fallback if the detached
     console updater can't be spawned. Detects a silent no-op (pip returns 0
-    but the version didn't advance) and every failure path.
+    but the version didn't advance) and every failure path. Clean one-line
+    status via cli_ui; pip itself is quiet (--quiet in pip_cmd).
     """
+    from master_fetch import cli_ui as ui
     import subprocess
     try:
         result = subprocess.run(pip_cmd, timeout=300)
         rc = result.returncode
     except subprocess.TimeoutExpired:
-        print("  update timed out (pip took too long). Re-run:  hound -u")
-        print(f"  or recover manually:  {_reinstall_cmd(target_ver)}")
+        print("  " + ui.err("update timed out"))
+        print("  " + ui.warn("re-run") + "  " + ui.cmd("hound -u"))
+        print("  " + ui.warn("or recover") + "  " + ui.cmd(_reinstall_cmd(target_ver)))
         sys.exit(1)
     except Exception as e:
-        print(f"  update failed: {e}")
-        print(f"  Recover manually:  {_reinstall_cmd(target_ver)}")
+        print("  " + ui.err(f"update failed: {e}"))
+        print("  " + ui.warn("recover") + "  " + ui.cmd(_reinstall_cmd(target_ver)))
         sys.exit(1)
     if rc != 0:
-        print(f"  Update failed (pip returned {rc}).")
-        print(f"  Stop any running hound MCP server:  {_stop_hound_cmd()}")
-        print(f"  or recover manually:  {_reinstall_cmd(target_ver)}")
+        print("  " + ui.err(f"update failed (pip returned {rc})"))
+        print("  " + ui.warn("stop any running hound server") + "  " + ui.cmd(_stop_hound_cmd()))
+        print("  " + ui.warn("or recover") + "  " + ui.cmd(_reinstall_cmd(target_ver)))
         sys.exit(1)
     new_ver = _check_version()[0]
     if new_ver == "unknown":
-        print("  Upgrade failed: package metadata is missing after the update.")
-        print(f"  Recover manually:  {_reinstall_cmd(target_ver)}")
+        print("  " + ui.err("package metadata missing after update"))
+        print("  " + ui.warn("recover") + "  " + ui.cmd(_reinstall_cmd(target_ver)))
         sys.exit(1)
     try:
         advanced = _pad_version(new_ver) >= _pad_version(target_ver)
     except (ValueError, IndexError):
         advanced = (new_ver == target_ver)
     if not advanced:
-        print(f"  The upgrade to v{target_ver} did not complete. hound.exe could not be")
-        print("  replaced (a running hound MCP server likely holds it). Stop it:")
-        print(f"    {_stop_hound_cmd()}")
-        print("  then re-run:  hound -u")
-        print(f"  or recover manually:  {_reinstall_cmd(target_ver)}")
+        print("  " + ui.err(f"upgrade to v{target_ver} did not complete (a running hound server holds the launcher)"))
+        print("  " + ui.warn("stop it") + "  " + ui.cmd(_stop_hound_cmd()))
+        print("  " + ui.warn("then") + "  " + ui.cmd("hound -u"))
+        print("  " + ui.warn("or recover") + "  " + ui.cmd(_reinstall_cmd(target_ver)))
         sys.exit(1)
-    print(f"Hound v{new_ver}")
+    print(ui.branded(ui.ver(new_ver), ui.ok("updated")))
 
 
 def _do_update():
@@ -3447,37 +3410,38 @@ def _do_update():
     keeps the old code in memory until restarted — we warn so the user knows.
     Every failure path prints an actionable, platform-aware recovery command.
     """
+    from master_fetch import cli_ui as ui
     installed, latest, is_current = _check_version()
 
     if installed == "unknown":
-        print("Hound install metadata is missing; reinstalling to recover...")
+        print(ui.branded(ui.red("install corrupted"), ui.dim("reinstalling to recover...")))
 
     if not latest:
-        print(f"Hound v{installed}: couldn't reach PyPI to check for updates.")
-        print("  Check your internet connection, then re-run:  hound -u")
-        print("  or upgrade manually:  pip install --upgrade hound-mcp[all]")
+        print(ui.branded(ui.ver(installed), ui.dim("couldn't reach PyPI")))
+        print("  " + ui.warn("check your connection, then") + "  " + ui.cmd("hound -u"))
         return
 
     try:
         if _pad_version(installed) >= _pad_version(latest):
-            print(f"Hound v{installed} (latest)")
+            print(ui.branded(ui.ver(installed), ui.ok("up to date")))
             return
     except (ValueError, IndexError):
         # installed is "unknown" or unparseable — fall through and reinstall.
         pass
 
-    # Verbose pip (no -qq) so the user sees progress in the console.
+    # Quiet pip: no progress-bar wall. We print our own clean status lines; on
+    # failure we surface a clean error + the manual recovery command.
     pip_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hound-mcp[all]",
-               "--no-cache-dir", "--disable-pip-version-check",
+               "--quiet", "--no-cache-dir", "--disable-pip-version-check",
                "--no-python-version-warning"]
 
     if sys.platform == "win32":
         if _spawn_console_updater(pip_cmd, latest):
-            print(f"Updating v{installed} to v{latest}...")
-            print("  (the upgrade finishes in this window once this command exits)")
+            print(ui.branded(ui.ver_transition(installed, latest), ui.dim("updating...")))
+            print("  " + ui.dim("(finishes in this window once this command exits)"))
             return
         # Spawn failed — best-effort synchronous attempt with honest messaging.
-        print(f"Updating v{installed} to v{latest}...")
+        print(ui.branded(ui.ver_transition(installed, latest), ui.dim("updating...")))
         _run_pip_sync(pip_cmd, latest)
         return
 
@@ -3485,32 +3449,91 @@ def _do_update():
     # (they'll keep old code until restarted) but don't refuse — pip works.
     others = _other_hound_pids()
     if others:
-        print("Note: other hound processes are running. They will keep using the")
-        print("old code until restarted:")
+        print(ui.branded(ui.dim("note"), ui.dim(f"{len(others)} other hound process(es) running - restart them after")))
         for p in others:
-            print(f"  PID {p}")
-        print(f"  After the update, restart them:  {_stop_hound_cmd()}  (then start hound again)")
-        print()
-    print(f"Updating v{installed} to v{latest}...")
+            print(f"    {ui.dim('PID')} {p}")
+    print(ui.branded(ui.ver_transition(installed, latest), ui.dim("updating...")))
     _run_pip_sync(pip_cmd, latest)
+
+
+def _print_version() -> None:
+    """Render `hound -v`: a compact bordered version panel (or a clean error
+    panel when the install is corrupted)."""
+    from master_fetch import cli_ui as ui
+    W = 50
+    inner = W - 4
+    installed, latest, is_current = _check_version()
+    if installed == "unknown":
+        ver_cmd = latest or "<latest>"
+        body = [
+            ui.dim("package metadata is missing - a previous update was"),
+            ui.dim("interrupted. The launcher works, but pip lost the version."),
+            "",
+            ui.dim("recover with:"),
+            "  " + ui.cmd(f"pip install --force-reinstall --no-deps hound-mcp=={ver_cmd}"),
+        ]
+        print(ui.panel([ui.err("install corrupted")] + body, 62))
+        return
+    if latest is None:
+        print(ui.panel([
+            ui.lr(ui.wordmark(), "", inner),
+            ui.lr(ui.ver(installed), ui.dim("couldn't reach PyPI"), inner),
+        ], W))
+        print("  " + ui.warn("check your connection, then") + "  " + ui.cmd("hound -v"))
+        return
+    try:
+        up_to_date = _pad_version(installed) >= _pad_version(latest)
+    except (ValueError, IndexError):
+        up_to_date = bool(is_current)
+    if up_to_date:
+        print(ui.panel([
+            ui.lr(ui.wordmark(), "", inner),
+            ui.lr(ui.ver(installed), ui.ok("up to date"), inner),
+        ], W))
+    else:
+        print(ui.panel([
+            ui.lr(ui.wordmark(), "", inner),
+            ui.lr(ui.ver(installed), ui.magenta(f"v{latest} available"), inner),
+        ], W))
+        print("  " + ui.warn("update with") + "  " + ui.cmd("hound -u"))
+
+
+def _help_epilog() -> str:
+    """Styled epilog for `hound --help`: the command cheat-sheet + docs link."""
+    from master_fetch import cli_ui as ui
+    return "\n".join([
+        ui.dim("commands:"),
+        f"  {ui.cyan('hound')}            {ui.dim('serve · stdio MCP (Claude Code, Cursor, OpenCode, Pi)')}",
+        f"  {ui.cyan('hound --http')}     {ui.dim('serve · streamable HTTP (Open WebUI), use --host/--port')}",
+        f"  {ui.cyan('hound -v')}         {ui.dim('version + update check')}",
+        f"  {ui.cyan('hound -u')}         {ui.dim('update to the latest version')}",
+        "",
+        ui.dim("docs:") + "  " + ui.cyan("https://github.com/dondai1234/master-fetch"),
+    ])
 
 
 def main():
     """Entry point for the hound CLI."""
+    from master_fetch import cli_ui as ui
     import argparse
-    parser = argparse.ArgumentParser(description="Hound MCP Server")
+    parser = argparse.ArgumentParser(
+        prog="hound",
+        description=ui.branded(ui.dim("web research for AI agents · $0 · no keys"), ""),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_help_epilog(),
+    )
     parser.add_argument("--http", action="store_true",
-                        help="Serve over streamable HTTP (MCP 2025-03-26) at http://host:port/mcp for Open WebUI and other HTTP MCP clients")
+                        help="serve over streamable HTTP (MCP 2025-03-26) at http://host:port/mcp")
     parser.add_argument("--host", default="127.0.0.1",
-                        help="Host for HTTP transport")
+                        help="host for HTTP transport (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765,
-                        help="Port for HTTP transport")
+                        help="port for HTTP transport (default 8765)")
     parser.add_argument("--cache-ttl", type=int, default=3600,
-                        help="Default cache TTL in seconds")
+                        help="default cache TTL in seconds (default 3600)")
     parser.add_argument("-v", "--version", action="store_true",
-                        help="Check installed version + update status")
+                        help="show version + update status")
     parser.add_argument("-u", "--update", action="store_true",
-                        help="Update Hound to latest version")
+                        help="update hound to the latest version")
     args = parser.parse_args()
 
     # Sweep a stale launcher left by a previous `hound -u` (Windows only).
@@ -3521,26 +3544,14 @@ def main():
         return
 
     if args.version:
-        installed, latest, is_current = _check_version()
-        if installed == "unknown":
-            print(_corrupted_install_message())
-            if latest:
-                print(f"  Latest known version: v{latest}")
-                print(f"  Recover with:  {_reinstall_cmd(latest)}")
-            return
-        if latest is None:
-            print(f"Hound v{installed} (couldn't reach PyPI to check for updates).")
-            print("  Check your internet, then re-run:  hound -v")
-            return
-        try:
-            up_to_date = _pad_version(installed) >= _pad_version(latest)
-        except (ValueError, IndexError):
-            up_to_date = bool(is_current)
-        if up_to_date:
-            print(f"Hound v{installed} (latest)")
-        else:
-            print(f"Hound v{installed}. v{latest} available. Run `hound -u` to update.")
+        _print_version()
         return
+
+    # HTTP mode: stdout is free (not an MCP stdio pipe), so a one-line banner is
+    # safe. uvicorn follows with its own URL line. Stdio mode stays silent — any
+    # stdout/stderr noise corrupts the MCP protocol or reads as a crash.
+    if args.http:
+        print(ui.branded(ui.cyan("serving HTTP"), ui.dim(f"http://{args.host}:{args.port}/mcp")))
 
     srv = MasterFetchServer(cache_ttl=args.cache_ttl)
     srv.serve(http=args.http, host=args.host, port=args.port)

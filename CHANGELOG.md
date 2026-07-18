@@ -1,5 +1,67 @@
 # Changelog
 
+## [10.1.0] - 2026-07-18
+
+### Polished, professional CLI (zero new dependencies)
+
+The `hound` CLI commands were plain `print()` text — a single line for `-v`, a
+wall of pip output for `-u`, generic argparse `--help`. v10.1 gives every
+command a clean, GitHub-grade look that works on any machine (Linux / Windows /
+macOS) without adding a dependency.
+
+New module `cli_ui.py` (stdlib only — no rich) renders:
+
+- `hound -v`: a compact bordered version panel — magenta wordmark, cyan
+  version, right-aligned status (green ✓ up to date / magenta "vX available"),
+  plus an `→ update with hound -u` hint when an update exists. A clean error
+  panel with the exact recovery command when the install is corrupted.
+- `hound -u`: a branded one-line progress flow (`Hound  v9.2.0 → v10.0.0 …
+  updating`) with **quiet pip** (no progress-bar wall) and a clean
+  `Hound  v10.0.0  ✓ updated` result. Every failure path prints one clean
+  error line + the platform-aware recovery command.
+- `hound --help`: a styled description (wordmark + tagline) + concise options +
+  a command cheat-sheet + docs link.
+- `hound --http`: a one-line `Hound  serving HTTP  http://host:port/mcp`
+  banner (stdio mode stays silent — never corrupts the MCP protocol).
+
+Cross-platform reliability (the renderer degrades gracefully, never breaks):
+
+- Color only when stdout is a TTY; respects `NO_COLOR` (any value) and
+  `FORCE_COLOR`. Enables Windows VT processing (Win10+). When piped, output is
+  clean plain text — `hound -v | grep` never sees ANSI escapes.
+- Unicode box borders (╭─│╰) with an **automatic ASCII fallback** (+-|) when
+  stdout isn't UTF-8 (legacy consoles), and status glyphs (✓ → ✗) fall back to
+  ASCII too. No mojibake on any machine.
+- Visible-length math excludes ANSI codes, so the right border always aligns.
+
+Palette: magenta + cyan-teal accents, dim gray secondary, red errors (no
+amber/gold, no forest green). Minimal — one panel for `-v`, one-liners
+elsewhere.
+
+### Code hygiene
+
+- Removed two dead functions (`_print_pip_failure` was never called;
+  `_corrupted_install_message` lost its caller when `-v` moved to the panel).
+- The Windows self-update child process prints clean one-line status (no pip
+  wall) and the recovery command on every failure path.
+
+### Tests
+
+- `tests/test_v10_1_cli.py` (6 tests): panel rows equal visible width
+  (borders align), NO_COLOR strips ANSI, `ver_transition` stamps both versions
+  with `v` (the v10.1 bug where `ver(f"{a} → {b}")` gave one missing `v`),
+  glyph ASCII fallback, `lr` right-alignment.
+- `tests/test_optimizations_v361.py`: the `-v`/`-u`/`_run_pip_sync` tests
+  updated to assert on stable visible substrings (work whether color/borders
+  are on or off).
+- Full suite: 693 passed (was 687; +6 cli_ui tests), 0 failed.
+
+### Compatibility
+
+No new tools, no schema breaks, no response-shape breaks, no new dependencies.
+The CLI output format changed (that's the point); the 6 tools and the MCP
+protocol are unchanged.
+
 ## [10.0.0] - 2026-07-18
 
 ### The web research tool that never gives up, and tells your agent what to do next

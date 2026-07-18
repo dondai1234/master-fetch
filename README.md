@@ -41,13 +41,14 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
-## ✨ New in 10.0.0
+## ✨ New in 10.1.0
 
-**The web research tool that never gives up — and tells your agent what to do next.**
+**A polished, professional CLI. And the tool that never gives up.**
 
-- 🗄️ **Automatic Internet Archive recovery.** When a live site hard-blocks your agent (404 / 451 / 500 / bot wall / auth wall), Hound silently pulls the page from the Wayback Machine's closest snapshot and returns it — dated and honestly marked (`source=archive.org`, `archived_at`). Fetched via the Wayback `id_` marker so the content is clean (no toolbar, original links). The only **free, keyless, zero-setup** fetch tool that does this. Opt out with `archive_fallback=false`.
-- 🧠 **Research-grade response envelope.** Every `smart_fetch` now carries `page_type` (article / docs / list / forum / auth_wall / paywall / …), `content_age_days` + `is_stale` (from the page's own dates), and `source_type` + `is_official` (gov / edu / github / docs / …). And `next_action` got a brain: a list page points to its top links, a stale article suggests a dated search, an auth wall suggests the archive. ~26µs per response.
-- 🔧 **Professional internals.** Truncation can no longer silently drop fields; cache hits now return the full response (metadata / links / quality / envelope); the dev test trap that ran stale code is gone. 687 tests. [Release notes →](https://github.com/dondai1234/master-fetch/releases/tag/v10.0.0)
+- 🎨 **Beautiful cross-platform CLI.** `hound -v` shows a clean bordered version panel, `hound -u` runs a quiet one-line self-update (no pip wall), and `hound --help` is styled with a command cheat-sheet. Zero new dependencies: a stdlib-only renderer with color detection, Windows VT, `NO_COLOR` support, and Unicode/ASCII border fallback so it looks right on Linux, Windows, and macOS. [Release notes →](https://github.com/dondai1234/master-fetch/releases/tag/v10.1.0)
+- 🗄️ **Automatic Internet Archive recovery** (v10.0.0). When a live site hard-blocks your agent (404 / 451 / 500 / bot wall / auth wall), Hound silently pulls the page from the Wayback Machine's closest snapshot and returns it, dated and honestly marked (`source=archive.org`, `archived_at`). Fetched via the Wayback `id_` marker so the content is clean (no toolbar, original links). The only **free, keyless, zero-setup** fetch tool that does this. Opt out with `archive_fallback=false`.
+- 🧠 **Research-grade response envelope** (v10.0.0). Every `smart_fetch` carries `page_type` (article / docs / list / forum / auth_wall / paywall / ...), `content_age_days` + `is_stale` (from the page's own dates), and `source_type` + `is_official` (gov / edu / github / docs / ...). And `next_action` got a brain: a list page points to its top links, a stale article suggests a dated search, an auth wall suggests the archive. ~26µs per response.
+- 🔧 **Professional internals.** Truncation can no longer silently drop fields; cache hits return the full response; the dev test trap that ran stale code is gone. 693 tests.
 
 ---
 
@@ -59,7 +60,7 @@ Hound is one [MCP](https://modelcontextprotocol.io) server that gives any agent 
 - 🧠 **Mastered on connect**: a one-time `instructions` block hands the agent the mental model, the #1 workflow, and the known limits. Effective on turn one.
 - 📐 **~2.7K tokens, 6 tools**: hand-crafted tool defs, no Pydantic schema bloat. More capability than tools shipping 5K+.
 - 🎯 **Every response is actionable**: `content_ok`, `next_action`, `summary`, `page_type`, `content_age_days`/`is_stale`, `source_type`/`is_official`, `relevance_score`, `fetch_relevance`. Agents branch on structured fields, not error text. And when the live site blocks, `source=archive.org` tells them the content came from the Internet Archive.
-- 🗄️ **Never gives up.** A live hard-block (404, bot wall, paywall) is no longer a dead end — Hound auto-recovers the page from the Internet Archive, honestly marked with the snapshot date.
+- 🗄️ **Never gives up.** A live hard-block (404, bot wall, paywall) is no longer a dead end. Hound auto-recovers the page from the Internet Archive, honestly marked with the snapshot date.
 - 🛡️ **Production-safe startup + shutdown**: cold start under 1s so the MCP handshake never times out; exits 0 with clean stderr, no crash-like teardown noise.
 
 > Hound is for the agent itself. You install it once; the agent calls it whenever it needs the web.
