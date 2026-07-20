@@ -3095,12 +3095,13 @@ def _help_epilog() -> str:
     from master_fetch import cli_ui as ui
     return "\n".join([
         ui.dim("commands:"),
-        f"  {ui.cyan('hound')}            {ui.dim('serve · stdio MCP (Claude Code, Cursor, OpenCode, Pi)')}",
-        f"  {ui.cyan('hound --http')}     {ui.dim('serve · streamable HTTP (Open WebUI), use --host/--port')}",
-        f"  {ui.cyan('hound -v')}         {ui.dim('version + update check')}",
-        f"  {ui.cyan('hound -u')}         {ui.dim('update to the latest version')}",
-        f"  {ui.cyan('hound --doctor')}   {ui.dim('health check + fix advice')}",
-        f"  {ui.cyan('hound --rollback')} {ui.dim('undo the last update')}",
+        f"  {ui.cyan('hound')}              {ui.dim('serve · stdio MCP (Claude Code, Cursor, OpenCode, Pi)')}",
+        f"  {ui.cyan('hound --http')}       {ui.dim('serve · streamable HTTP (Open WebUI), use --host/--port')}",
+        f"  {ui.cyan('hound -v')}           {ui.dim('version + update check')}",
+        f"  {ui.cyan('hound -u')}           {ui.dim('update to the latest version')}",
+        f"  {ui.cyan('hound --reinstall')}  {ui.dim('full reinstall with all deps + [all] extras')}",
+        f"  {ui.cyan('hound --doctor')}     {ui.dim('health check + fix advice')}",
+        f"  {ui.cyan('hound --rollback')}   {ui.dim('undo the last update')}",
         "",
         ui.dim("docs:") + "  " + ui.cyan("https://github.com/dondai1234/master-fetch"),
     ])
@@ -3133,6 +3134,8 @@ def main():
                         help="diagnose the install and suggest fixes")
     parser.add_argument("--rollback", action="store_true",
                         help="reinstall the version from before the last update")
+    parser.add_argument("--reinstall", action="store_true",
+                        help="full reinstall with all deps + [all] extras")
     args = parser.parse_args()
 
     # Sweep a stale launcher left by a previous `hound -u` (Windows only).
@@ -3140,6 +3143,9 @@ def main():
 
     if args.update:
         updater.do_update()
+        return
+    if args.reinstall:
+        updater.reinstall()
         return
     if args.rollback:
         updater.rollback()

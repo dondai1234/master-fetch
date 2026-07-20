@@ -42,7 +42,7 @@ import sys
 
 __all__ = [
     "check_version", "pad_version",
-    "do_update", "print_version", "doctor", "rollback",
+    "do_update", "reinstall", "print_version", "doctor", "rollback",
     "cleanup_old_launcher", "repair_script_path",
 ]
 
@@ -304,6 +304,18 @@ def _heal_cmd(target: str) -> list[str]:
             "--no-python-version-warning"]
 
 
+def _pip_cmd_full(target: str) -> list[str]:
+    """Full reinstall: force-reinstall hound-mcp[all] at the pinned version
+    with --no-deps. The --force-reinstall triggers pip to install the [all]
+    extras (rapidocr, onnxruntime, tokenizers) even when hound-mcp itself is
+    already at the target version. The --no-deps prevents pip from
+    force-reinstalling transitive deps (which can break version compatibility,
+    e.g. pydantic vs pydantic-core)."""
+    return [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps",
+            f"hound-mcp[all]=={target}", "--quiet", "--disable-pip-version-check",
+            "--no-python-version-warning"]
+
+
 def _run_pip(cmd: list[str]) -> tuple[int, str]:
     """Run pip, capturing stderr for diagnosis. Returns (returncode, stderr)."""
     import subprocess
@@ -329,7 +341,7 @@ def _diagnose(stderr: str) -> str:
 
 # ─── the detached Windows helper (standalone python -c, survives brick) ────
 
-def _build_helper_source(target: str, repair_path: str, parent_pid: int) -> str:
+def _build_helper_source(target: str, repair_path: str, parent_pid: int, full: bool = False) -> str:
     """Build the standalone helper source. Pure stdlib, no master_fetch import,
     so it runs even if the package is mid-replacement or bricked.
 
@@ -345,6 +357,7 @@ TARGET = __TARGET__
 REPAIR = __REPAIR__
 EXE = __EXE__
 WIN = (sys.platform == "win32")
+FULL = __FULL__
 
 def _wait_parent_exit(timeout=15):
     if not WIN or not PARENT:
@@ -450,37 +463,52 @@ except Exception:
     pass
 
 servers_before = _hound_pids()
+if FULL:
+    _stop_all_hound()
+    servers_before = []
 _stage()
 
-rc, stderr = _pip("--no-deps", "hound-mcp==" + TARGET)
+if FULL:
+    rc, stderr = _pip("--force-reinstall", "--no-deps", "hound-mcp[all]==" + TARGET)
+else:
+    rc, stderr = _pip("--no-deps", "hound-mcp==" + TARGET)
 if not _advanced(_ver()):
-    # Self-heal: force-reinstall with the launcher now free.
     print("  first pass did not complete - recovering...")
-    rc2, stderr2 = _pip("--force-reinstall", "--no-deps", "hound-mcp==" + TARGET)
+    if FULL:
+        rc2, stderr2 = _pip("--force-reinstall", "--no-deps", "hound-mcp[all]==" + TARGET)
+    else:
+        rc2, stderr2 = _pip("--force-reinstall", "--no-deps", "hound-mcp==" + TARGET)
     if not _advanced(_ver()):
-        print("  Hound  update failed - " + (stderr2 or stderr or "pip failed").strip().splitlines()[-1:][0] if (stderr2 or stderr) else "pip failed")
+        print("  Hound  " + ("reinstall" if FULL else "update") + " failed - " + (stderr2 or stderr or "pip failed").strip().splitlines()[-1:][0] if (stderr2 or stderr) else "pip failed")
         print("  recover with:  python \\"" + REPAIR + "\\"")
         sys.exit(1)
 
 # Best-effort: sweep the staged .old (fails if a server still maps it - fine).
+# Safety: if pip didn't recreate the .exe (already satisfied, no --force-reinstall),
+# restore it from the .old backup.
 try:
-    if WIN and EXE and os.path.exists(EXE + ".old"):
-        os.remove(EXE + ".old")
+    if WIN and EXE:
+        if os.path.exists(EXE + ".old"):
+            if not os.path.exists(EXE):
+                os.rename(EXE + ".old", EXE)
+            else:
+                os.remove(EXE + ".old")
 except OSError:
     pass
 
 new = _ver()
-print("  Hound  v" + new + "  updated")
+print("  Hound  v" + new + "  " + ("reinstalled" if FULL else "updated"))
 if servers_before:
     print("  restart your running hound server (PID " + ", ".join(str(p) for p in servers_before) + ") to use it")
-'''.replace("__PARENT_PID__", str(parent_pid)).replace("__TARGET__", repr(target)).replace("__REPAIR__", repr(repair_path)).replace("__EXE__", repr(_hound_launcher_path()))
+'''.replace("__PARENT_PID__", str(parent_pid)).replace("__TARGET__", repr(target)).replace("__REPAIR__", repr(repair_path)).replace("__EXE__", repr(_hound_launcher_path())).replace("__FULL__", str(full))
 
 
-def _spawn_helper(target: str, repair_path: str, parent_pid: int) -> bool:
+def _spawn_helper(target: str, repair_path: str, parent_pid: int, full: bool = False) -> bool:
     """Spawn the detached Windows helper (inherits this console). Returns True
-    if spawned."""
+    if spawned. `full=True` triggers a complete reinstall with deps + [all]
+    extras instead of the usual --no-deps update."""
     import subprocess
-    src = _build_helper_source(target, repair_path, parent_pid)
+    src = _build_helper_source(target, repair_path, parent_pid, full)
     try:
         subprocess.Popen([sys.executable, "-c", src])
         return True
@@ -545,6 +573,54 @@ def do_update(target: str | None = None) -> None:
             sys.exit(1)
     new_ver = check_version()[0]
     print(ui.branded(ui.ver(new_ver), ui.ok("updated")))
+    if others:
+        print("  " + ui.dim(f"restart PID {', '.join(str(p) for p in others)} to use the new version"))
+
+
+def reinstall() -> None:
+    """Full reinstall: hound-mcp + all deps + [all] extras. Fixes broken deps,
+    missing extras, or a stale CDN-downgraded install. Pinned to the latest
+    PyPI version (or current if PyPI is unreachable) to prevent version drift."""
+    from master_fetch import cli_ui as ui
+    installed, latest, _ = check_version()
+    target = latest or installed
+    if not target or target == "unknown":
+        print(ui.branded(ui.red("cannot reinstall"), ui.dim("version unknown")))
+        print("  " + ui.warn("try") + "  " + ui.cmd("pip install hound-mcp[all]"))
+        return
+
+    _write_repair_script()
+    _write_last_version(installed)
+    repair = repair_script_path()
+
+    if installed == "unknown":
+        print(ui.branded(ui.red("install corrupted"), ui.dim("reinstalling...")))
+    else:
+        print(ui.branded(ui.ver(installed), ui.dim("reinstalling with all deps...")))
+
+    if sys.platform == "win32":
+        if _spawn_helper(target, repair, os.getpid(), full=True):
+            print("  " + ui.dim("(completes in this window once this command exits)"))
+            return
+        print("  " + ui.err("could not start the reinstaller"))
+        print("  " + ui.warn("recover with") + "  " + ui.cmd(f'python "{repair}"'))
+        return
+
+    # POSIX: no file lock. Run pip inline with self-heal + verify.
+    others = _other_hound_pids()
+    if others:
+        print("  " + ui.dim(f"{len(others)} hound server(s) running - restart them after"))
+    rc, stderr = _run_pip(_pip_cmd_full(target))
+    if not _advanced(check_version()[0], target):
+        print("  " + ui.dim("first pass did not complete - recovering..."))
+        rc2, stderr2 = _run_pip(_pip_cmd_full(target))
+        new_ver = check_version()[0]
+        if not _advanced(new_ver, target):
+            print("  " + ui.err("reinstall failed: " + _diagnose(stderr2 or stderr)))
+            print("  " + ui.warn("recover with") + "  " + ui.cmd(f'python "{repair}"'))
+            sys.exit(1)
+    new_ver = check_version()[0]
+    print(ui.branded(ui.ver(new_ver), ui.ok("reinstalled")))
     if others:
         print("  " + ui.dim(f"restart PID {', '.join(str(p) for p in others)} to use the new version"))
 
@@ -680,7 +756,17 @@ def doctor() -> None:
     checks.append(("core dependencies", not missing,
                    ", ".join(missing) + " missing" if missing else "ok"))
 
-    # 7. PyPI reachability + version (info only, not a failure)
+    # 7. [all] extras (optional, non-blocking - neural reranking + PDF OCR)
+    optional_missing = []
+    for mod in ("onnxruntime", "tokenizers", "rapidocr"):
+        try:
+            __import__(mod)
+        except Exception:
+            optional_missing.append(mod)
+    optional_ok = not optional_missing
+    optional_detail = ", ".join(optional_missing) + " missing" if optional_missing else "ok"
+
+    # 8. PyPI reachability + version (info only, not a failure)
     installed, latest, _ = check_version()
     if latest is None:
         checks.append(("PyPI reachable", False, "couldn't reach PyPI"))
@@ -700,12 +786,18 @@ def doctor() -> None:
         mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if ok_flag
                 else ui._sty(ui._glyph("\u2717", "x"), ui._RED))
         rows.append(f"{mark} {label:<22} {ui.dim(_short(detail, 30))}")
+    # Optional [all] extras (non-blocking, shown with a different marker)
+    opt_mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if optional_ok
+                else ui._sty(ui._glyph("!", "!"), ui._MAGENTA))
+    rows.append(f"{opt_mark} {'[all] extras':<22} {ui.dim(_short(optional_detail, 30))}")
     print(ui.panel(rows, 64))
     # Verdict + fixes (outside the panel)
     if missing:
         print("  " + ui.warn("fix deps") + "  " + ui.cmd("pip install --force-reinstall hound-mcp"))
     if any(not ok for _, ok, _ in checks) and not missing:
         print("  " + ui.warn("repair") + "  " + ui.cmd(f'python "{_short(rp, 46)}"'))
+    if not optional_ok:
+        print("  " + ui.warn("install extras") + "  " + ui.cmd("pip install hound-mcp[all]"))
     if latest and installed != "unknown":
         try:
             if pad_version(installed) < pad_version(latest):
