@@ -36,7 +36,22 @@ pip install hound-mcp[all] && playwright install chromium
 
 Same prompt, three tools. Hound does the whole thing on its own, search + fetch + crawl, locally. The others get stuck on the parts they don't do.
 
-<video src="https://github.com/user-attachments/assets/4e69e476-9c46-40cd-9bdf-f1b45882ac3e" controls muted width="860"></video>
+<div align="center">
+<table>
+<tr>
+<td align="center"><b>OpenCode + Hound</b></td>
+<td align="center"><b>Pi + Hound</b></td>
+</tr>
+<tr>
+<td>
+<video src="https://github.com/user-attachments/assets/4e69e476-9c46-40cd-9bdf-f1b45882ac3e" controls muted width="420"></video>
+</td>
+<td>
+<video src="https://github.com/dondai1234/master-fetch/releases/download/v10.4.0/hound-pi-demo.mp4" controls muted width="420"></video>
+</td>
+</tr>
+</table>
+</div>
 
 
 ---
@@ -318,8 +333,6 @@ pi update npm:@houndmcp/hound-mcp-pi  # update the extension
 ```
 
 The extension checks version sync at session start and warns if the extension and hound diverge by a major version.
-
-<video src="https://github.com/dondai1234/master-fetch/releases/download/v10.4.0/hound-pi-demo.mp4" controls muted width="860"></video>
 
 </details>
 
