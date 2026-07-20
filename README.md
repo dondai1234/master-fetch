@@ -58,29 +58,6 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
-## ✨ New in 10.3.0
-
-**Optimized for AI agents + official Pi agent extension.**
-
-- 🪙 **29.6% token reduction.** Tool definitions compressed from 3,900 to 2,746 tokens. Same information, tighter LLM language. Every functional fact preserved.
-- 🐍 **Official Pi agent extension.** All 6 Hound tools as native Pi tools with TUI rendering. Singleton subprocess, prewarmed at session start. `pi install npm:@houndmcp/hound-mcp-pi`
-- 🐛 **Fixed two v10 bugs.** The envelope signals + `archive_fallback` opt-out were in the wrong surface (method docstrings instead of `_TOOL_DEFS`) and not wired through dispatch. Both fixed.
-- 🔧 **Professional internals.** 705 tests.
-
----
-
-## ✨ New in 10.2.0
-
-**A self-update that never bricks. Plus a polished CLI and a tool that never gives up.**
-
-- 🛡️ **Brick-proof self-update + `hound doctor` + `hound --rollback`.** `hound -u` can no longer leave hound unusable. It updates with `--no-deps` (no heavy extras that fail mid-install), runs pip in a detached helper after the launcher exits (Windows can't overwrite a running .exe), frees the launcher via the rename trick, and **self-heals** a half-failed install. A surviving `~/.hound/repair.py` (outside site-packages) recovers from any brick with `python ~/.hound/repair.py`. `hound doctor` catches a half-broken install before it bricks; `hound --rollback` undoes a bad update. [Release notes →](https://github.com/dondai1234/master-fetch/releases/tag/v10.2.0)
-- 🎨 **Beautiful cross-platform CLI** (v10.1.0). `hound -v` shows a bordered version panel, `hound -u` runs a quiet one-line self-update, `hound --help` is styled. Zero deps: color detection, Windows VT, `NO_COLOR`, Unicode/ASCII border fallback.
-- 🗄️ **Automatic Internet Archive recovery** (v10.0.0). When a live site hard-blocks your agent (404, bot wall, paywall), Hound pulls the page from the Wayback Machine, dated and honestly marked (`source=archive.org`).
-- 🧠 **Research-grade response envelope** (v10.0.0). Every `smart_fetch` carries `page_type`, `content_age_days`/`is_stale`, `source_type`/`is_official`, and a smart `next_action`.
-- 🔧 **Professional internals.** 705 tests.
-
----
-
 ## Why you should pick Hound
 
 Hound is one [MCP](https://modelcontextprotocol.io) server that gives any agent (Claude Code, Cursor, OpenCode, Hermes, Pi, anything that speaks MCP) full web research from a single local process.
