@@ -41,6 +41,17 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
+## ✨ New in 10.3.0
+
+**Optimized for AI agents + official Pi agent extension.**
+
+- 🪙 **29.6% token reduction.** Tool definitions compressed from 3,900 to 2,746 tokens. Same information, tighter LLM language. Every functional fact preserved.
+- 🐍 **Official Pi agent extension.** All 6 Hound tools as native Pi tools with TUI rendering. Singleton subprocess, prewarmed at session start. `pi install npm:@houndmcp/hound-mcp-pi`
+- 🐛 **Fixed two v10 bugs.** The envelope signals + `archive_fallback` opt-out were in the wrong surface (method docstrings instead of `_TOOL_DEFS`) and not wired through dispatch. Both fixed.
+- 🔧 **Professional internals.** 705 tests.
+
+---
+
 ## ✨ New in 10.2.0
 
 **A self-update that never bricks. Plus a polished CLI and a tool that never gives up.**
