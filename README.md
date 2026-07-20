@@ -319,6 +319,8 @@ pi update npm:@houndmcp/hound-mcp-pi  # update the extension
 
 The extension checks version sync at session start and warns if the extension and hound diverge by a major version.
 
+<video src="https://github.com/dondai1234/master-fetch/releases/download/v10.4.0/hound-pi-demo.mp4" controls muted width="860"></video>
+
 </details>
 
 <details>
