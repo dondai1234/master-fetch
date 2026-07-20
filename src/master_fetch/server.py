@@ -401,6 +401,15 @@ def _detect_content_issue(result: ResponseModel) -> str:
     if result.status in (403, 503) and _is_cloudflare_from_response(result):
         return "bot_challenge_detected: page returned bot challenge/verification page"
 
+    # Universal: any 4xx/5xx is an error, even if the server returned an HTML
+    # error page as content. Without this, a 404 page gets treated as real
+    # content (error="" -> agent trusts it). Set the error field so agents,
+    # cache, and archive fallback all see it as a failure.
+    if result.status >= 400:
+        return f"http_error_{result.status}: server returned error status"
+    if result.status == 0:
+        return "network_error: request failed (DNS/timeout/connection refused)"
+
     return ""
 
 
@@ -2580,10 +2589,17 @@ class MasterFetchServer:
             result.escalation_path = "direct:http"
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
-        # Should we escalate? Two reasons:
+        # Should we escalate? Stealthy browser can genuinely help for:
         # 1. Status 200 with JS shell -> page needs a real browser
-        # 2. Status 403 or 503 -> explicit bot block
-        should_escalate = (result.status < 400 and _is_js_shell(result)) or result.status in (403, 503)
+        # 2. Status 403 or 503 -> explicit bot block / bot challenge
+        # 3. Status 429 -> rate limited; stealthy has a different fingerprint
+        # 4. Status 500/502 -> server error; may be intermittent or bot-related
+        # NOT for 401/407 (auth needed, not bot), 404/410 (page gone, stealthy
+        # gets the same 404), 451 (legal block), 400 (bad request).
+        should_escalate = (
+            (result.status < 400 and _is_js_shell(result))
+            or result.status in (403, 429, 500, 502, 503)
+        )
         if not should_escalate:
             result.duration_ms = elapsed
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)

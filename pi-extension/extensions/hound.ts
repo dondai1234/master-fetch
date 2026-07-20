@@ -411,6 +411,15 @@ export default function (pi: ExtensionAPI) {
         const trunc = parsed.is_truncated ? ` | next_offset=${parsed.next_offset}` : "";
         const fetcher = parsed.fetcher_used ?? "";
         const src = parsed.source === "archive.org" ? ` | ARCHIVE ${parsed.archived_at ?? ""}` : "";
+        // When the server signals an error (http_error_*, network_error, etc.)
+        // AND content_ok is false, show the error prominently instead of
+        // dumping the error page HTML as if it were real content.
+        if (parsed.error && parsed.content_ok === false && parsed.source !== "archive.org") {
+          return {
+            content: [{ type: "text", text: `Fetch failed: ${parsed.error}\nURL: ${args.url ?? ""}${parsed.next_action ? `\nNext: ${parsed.next_action}` : ""}` }],
+            details: { url: args.url, error: parsed.error, content_ok: false, source: parsed.source ?? "live", status: parsed.status },
+          };
+        }
         return {
           content: [{ type: "text", text: content + (foot.length ? `\n\n${foot.join("\n")}` : "") + `\n[${fetcher}${trunc}${src}]` }],
           details: { url: args.url, chars: content.length, content_ok: parsed.content_ok, truncated: !!parsed.is_truncated, source: parsed.source ?? "live" },
@@ -428,6 +437,7 @@ export default function (pi: ExtensionAPI) {
       if (isPartial) return new Text(theme.fg("dim", "fetching..."), 0, 0);
       const d = result.details as any;
       if (d?.error) return new Text(theme.fg("error", `error: ${d.error}`), 0, 0);
+      if (d?.content_ok === false) return new Text(theme.fg("error", "failed"), 0, 0);
       if (d?.bulk) return new Text(theme.fg("accent", `${d.ok}/${d.total} URLs`), 0, 0);
       const kb = ((d?.chars ?? 0) / 1024).toFixed(1);
       const src = d?.source === "archive.org" ? " (archive)" : "";
