@@ -198,7 +198,14 @@ def _extract_type(html: str, url: str, extraction_type: str) -> str | None:
 
 def _fallback_extract(page, extraction_type: str, css_selector: Optional[str]) -> list[str]:
     """Fall back to Scrapling's built-in extraction (last resort)."""
-    from scrapling.core.shell import Convertor
+    try:
+        from scrapling.core.shell import Convertor
+    except ImportError:
+        # Scrapling unavailable (HTTP-only mode): return raw HTML as last resort
+        html = getattr(page, 'content', '') or ''
+        if not html and getattr(page, 'body', None):
+            html = page.body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace')
+        return [html] if html else [""]
     # Scrapling only knows markdown/html/text/raw: map our extended types
     scrapling_type = "markdown" if extraction_type in ("article", "structured") else extraction_type
     logger.info(f"Falling back to Scrapling extraction (type={scrapling_type})")
