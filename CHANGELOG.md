@@ -1,5 +1,118 @@
 # Changelog
 
+## [11.1.0] - 2026-07-21
+
+### Stealth fetch: next-generation anti-detection
+
+Six novel innovations that make hound's stealthy browser significantly harder
+to detect, based on 2026 anti-detection research (31-target benchmark,
+CDP protocol analysis, Cloudflare v9 behavioral scoring).
+
+**1. System Chrome auto-detection (channel=chrome)**
+
+The biggest single win from the benchmark. Hound now defaults to using the
+system-installed Google Chrome (channel='chrome') instead of bundled
+Chromium. System Chrome has a real TLS fingerprint (JA4) that matches what
+real users have. Bundled Chromium's fingerprint differs and is detectable.
+Falls back to bundled Chromium if Chrome isn't installed.
+
+`_detect_chrome_channel()` auto-detects Chrome on Windows (PROGRAMFILES
+paths) and POSIX (google-chrome in PATH). Cached.
+
+**2. Coherent fingerprint profiles + init script**
+
+4 internally consistent fingerprint identities (Win32+NVIDIA/Intel/AMD,
+MacIntel+Apple). Each profile has matching platform, WebGL renderer,
+languages, plugins, hardware specs. No contradictions that detectors
+cross-check for.
+
+`_build_stealth_init_script()` generates a JS init script that patches
+JS-layer signals patchright does NOT handle. Injected per-page via CDP
+`Page.addScriptToEvaluateOnNewDocument` (not context.add_init_script,
+which uses Routes and breaks DNS with patchright).
+
+Essential patches (always applied, even with system Chrome):
+- navigator.webdriver → undefined (patchright sets false)
+- navigator.userAgent: removes 'HeadlessChrome' (dead giveaway)
+- navigator.languages: adds 'en' fallback for consistency
+- Canvas fingerprint: per-session deterministic noise (seeded PRNG)
+- Permissions API: consistent responses
+
+Full patches (only for bundled Chromium, where defaults are wrong):
+- WebGL vendor/renderer: replaces SwiftShader with real GPU strings
+- navigator.plugins: populates from 0 to 5 entries
+- navigator.hardwareConcurrency / deviceMemory
+- navigator.platform
+- window.chrome runtime object
+
+**3. Human behavior simulation**
+
+Cloudflare v9 ML model weights behavioral telemetry (mouse path entropy,
+time-on-page, scroll velocity). `_simulate_human_behavior()` adds:
+- Randomized dwell time (1-2.5s before interaction)
+- Bezier curve mouse movement (15-30 steps, ease-in-out, overshoot+correction)
+- Smooth scroll (variable speed, slight pauses)
+
+~1.5-2.5s total, only for stealthy fetch, configurable via `humanize=True`.
+
+**4. Cloudflare Turnstile solver with human mouse movement**
+
+The CF solver now moves the mouse to the checkbox via a bezier curve
+before clicking, instead of a straight-line click. Passes behavioral
+scoring that checks mouse trajectory entropy.
+
+**5. HeadlessChrome UA fix (both JS and HTTP headers)**
+
+`_get_chrome_ua()` reads the system Chrome version (PowerShell on Windows,
+`chrome --version` on POSIX) and constructs a UA with 'Chrome' instead of
+'HeadlessChrome'. Applied to both `navigator.userAgent` (via init script)
+and HTTP headers (via context user_agent option). The UA matches the
+real Chrome TLS fingerprint from channel=chrome.
+
+**6. Removed contradicting overrides for system Chrome**
+
+When using channel=chrome, hound no longer overrides:
+- User-Agent (uses real Chrome UA with HeadlessChrome fix)
+- device_scale_factor (was hardcoded to 2, a Mac Retina giveaway)
+
+System Chrome already has correct WebGL, plugins, platform, window.chrome.
+Overriding them with profile values creates contradictions that detectors
+specifically look for.
+
+794 tests (43 new in test_stealth_v11.py).
+
+**Post-testing fixes:**
+
+- Canvas noise was not working: `_noisePixels` only intercepted `toDataURL`
+  (detectors like sannysoft/creepjs use `getImageData` directly). Fixed to
+  intercept BOTH `toDataURL` and `getImageData`.
+- Canvas noise size guard (`<= 16`) blocked noise on large reads (200x50).
+  Fixed: noise applies to ALL reads, limited to first 16 pixels for perf.
+- `const _seed` bug crashed the entire init script (Assignment to constant
+  variable). Changed to `let _seed`. This was preventing ALL JS-layer patches
+  from running.
+- CDP `Page.addScriptToEvaluateOnNewDocument` does NOT work with patchright
+  (it patches `Runtime.enable`). `context.add_init_script` uses Routes which
+  breaks DNS. Fixed: inject via `page.goto(wait_until='commit')` + immediate
+  `page.evaluate()`, which runs BEFORE the page's own JS.
+- CDP session leak: each fetch created a CDP session that was never detached.
+  Fixed: CDP session created for memory cleanup only, detached after use.
+
+**Live verification (real-world results):**
+
+- bot.sannysoft.com: ALL checks pass (HEADCHR_UA, WebDriver, Chrome,
+  Plugins, PHANTOM_*, SELENIUM, CHR_DEBUG_TOOLS, etc.)
+- navigator.webdriver: undefined (patched from false)
+- navigator.userAgent: Chrome/150 (no HeadlessChrome)
+- Canvas noise: different hashes per session (verified)
+- CanadianInsider (CF Turnstile, hardest 31-site benchmark target): 200 OK
+- Medium (CF interstitial): 200 OK
+- StackOverflow (CF): 200 OK
+- NowSecure (CF challenge): 200 OK
+- Glassdoor (DataDome): 200 OK
+- Memory: RSS decreased over 5 sequential fetches (no leak, pressure
+  notification working)
+
 ## [11.0.3] - 2026-07-21
 
 ### Reliability: self-healing entry point + stale process cleanup

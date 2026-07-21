@@ -161,6 +161,7 @@ Same gray-area posture as SearXNG / ddgs; no search-engine ToS compliance is cla
 `smart_fetch` tries plain HTTP first (~1s). If the site blocks HTTP or serves a JS shell, it auto-escalates to a **Patchright** anti-detect browser with Cloudflare challenge solving. Two tiers, nothing to configure.
 
 - 🛡️ **Built-in Cloudflare bypass**: a single stealthy Chrome warms at startup. It closes after 5 min of idleness to free RAM (`HOUND_BROWSER_IDLE_TIMEOUT`, set `0` to keep it alive forever) and relaunches in ~2s on the next fetch. Pages close after each fetch, idle memory stays near baseline. One browser total.
+- 🧬 **Stealth engine (v11.1+)**: system Chrome auto-detection (`channel=chrome` for real TLS fingerprint), coherent fingerprint profiles, JS-layer patches (HeadlessChrome UA fix, `navigator.webdriver=undefined`, canvas noise via `getImageData`+`toDataURL` interception, permissions API), human behavior simulation (Bezier mouse curves, natural scroll, dwell time), and a Cloudflare Turnstile solver with human-like mouse movement. See the [stealth benchmark](#-stealth-benchmark) below.
 - 🎯 **Query-focused extraction**: `smart_fetch(url, focus="...")` returns only the BM25-relevant blocks. Cuts context 80%+ on long pages, no re-fetch (runs post-cache). Re-pass the same `focus` when paginating.
 - 🖱️ **Page interaction**: `actions=[{click:'button.load-more'},{fill:{selector:'#q',text:'x'}},{press:'Enter'},{wait:500},{scroll:3},{wait_selector:'.item'}]` for load-more, search forms, pagination, infinite scroll. Forces stealthy + bypasses cache.
 - 🏷️ **Metadata on every response**: title, description, site name, type, image, canonical URL, language, published time, author (OpenGraph + JSON-LD + canonical).
@@ -168,6 +169,51 @@ Same gray-area posture as SearXNG / ddgs; no search-engine ToS compliance is cla
 - 🐕 **Reddit, optimized**: Reddit URLs auto-rewrite to old.reddit.com (7× smaller) and skip to the stealthy browser. Subreddit listings parse into structured posts with promoted ads filtered out.
 - 💾 **Smart caching**: SQLite (WAL mode), keyed by URL + extraction type + `css_selector` + `pages`. Bad content is never cached; a size cap evicts the oldest so a long-lived agent's cache can't grow unbounded. `cache_ttl=0` forces fresh.
 - 📐 **Pagination**: content over 40KB is chunked; the response gives `next_offset` so the agent pages through with one more call (served instantly from cache).
+
+### 🧬 Stealth benchmark
+
+Real-world results from v11.1.0, tested against hard anti-bot targets.
+
+**Detection test sites (all checks pass):**
+
+| Site | What it tests | Result |
+|---|---|---|
+| bot.sannysoft.com | HeadlessChrome UA, webdriver, plugins, WebGL, permissions, Selenium | ALL PASS |
+| CreepJS | Canvas hash, audio fingerprint, lie detection | 200 OK |
+| BrowserScan | CDP detection, fingerprint analysis | 200 OK |
+| Pixelscan | Headless detection, fingerprint consistency | 200 OK |
+
+**Anti-bot protected sites (content extracted):**
+
+| Site | Protection | Status | Content |
+|---|---|---|---|
+| CanadianInsider | Cloudflare Turnstile (hardest in 31-site benchmark) | 200 | 78 KB, title: "Canadian Insider" |
+| Medium | Cloudflare interstitial | 200 | 93 KB, title: "Medium" |
+| StackOverflow | Cloudflare | 200 | 1.1 MB, full question page |
+| NowSecure | Cloudflare challenge | 200 | 180 KB, title: "nowsecure.nl" |
+| Glassdoor | DataDome | 200 | 849 KB |
+| Reddit | Cloudflare lite | 200 | 1 MB |
+| Hacker News | None (baseline) | 200 | 35 KB, title: "Hacker News" |
+| GitHub | None (baseline) | 200 | 523 KB |
+
+> **Note:** Google Search returns 429 (rate limited) as it uses its own bot detection independent of Cloudflare. This is expected.
+
+**Stealth signals verified:**
+
+| Signal | Value | Detection status |
+|---|---|---|
+| `navigator.webdriver` | `undefined` (patched from `false`) | Not detected |
+| `navigator.userAgent` | `Chrome/150` (HeadlessChrome removed) | Not detected |
+| `navigator.platform` | `Win32` (real system Chrome) | Not detected |
+| `navigator.plugins.length` | 5 (real system Chrome) | Not detected |
+| `window.chrome` | `object` (present) | Not detected |
+| WebGL vendor/renderer | Real GPU (Intel UHD, Direct3D11) | Not detected |
+| Canvas fingerprint | Per-session noise (different each session) | Not detected |
+| TLS fingerprint | Real Chrome 150 JA4 (system Chrome) | Not detected |
+
+**Memory efficiency (5 sequential fetches):**
+
+RSS decreased by 3.5 MB over 5 fetches. No RAM creep. The `Memory.simulatePressureNotification` CDP command triggers Chrome's internal GC + cache drop after each fetch (~5ms, non-disruptive).
 
 ---
 
