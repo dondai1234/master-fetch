@@ -1773,7 +1773,7 @@ class MasterFetchServer:
         from master_fetch.fetcher import HTTPSession
         http_proxy = proxy if isinstance(proxy, str) else None
         async with HTTPSession(
-            impersonate=impersonate or "chrome131",
+            impersonate=impersonate or "chrome",
             proxy=http_proxy,
             stealthy_headers=stealthy_headers,
             retries=retries,

@@ -1,5 +1,22 @@
 # Changelog
 
+## [11.0.2] - 2026-07-21
+
+### Fixed: smart_fetch and smart_crawl broken (follow_redirects type error)
+
+`smart_fetch` and `smart_crawl` were completely broken after the scrapling
+removal in v11.0.0. The root cause: `follow_redirects` defaults to the
+string `"safe"` (scrapling's API accepted strings: "safe", "always",
+"never"). Hound's new `HTTPSession` passed this string directly to
+`primp.Client.get(follow_redirects="safe")`, but primp expects a `bool`.
+
+**Fix**: `HTTPSession.get()` now coerces `follow_redirects` from string to
+bool before passing to primp. `"safe"` and `"always"` become `True`,
+`"never"` becomes `False`, and actual `bool` values pass through unchanged.
+
+Also fixed: stale `"chrome131"` default impersonate value in `bulk_get()`
+that triggered a primp warning on every fetch.
+
 ## [11.0.1] - 2026-07-21
 
 ### Fixed: self-update installs core deps (not --no-deps)

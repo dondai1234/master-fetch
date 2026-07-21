@@ -401,7 +401,7 @@ class HTTPSession:
         timeout: Optional[int] = None,
         retries: Optional[int] = None,
         proxy: Optional[str] = None,
-        follow_redirects: bool = True,
+        follow_redirects: Union[bool, str] = True,
         max_redirects: int = 5,
         params: Optional[Dict[str, str]] = None,
         **kwargs: Any,
@@ -410,6 +410,11 @@ class HTTPSession:
 
         Returns a Response object.
         """
+        # Coerce follow_redirects from scrapling-style string to bool.
+        # Scrapling accepted: "safe", "always", "never". primp expects bool.
+        if isinstance(follow_redirects, str):
+            follow_redirects = follow_redirects.lower() != "never"
+
         if self._client is None:
             await self._init_client()
 
