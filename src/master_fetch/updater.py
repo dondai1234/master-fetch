@@ -766,6 +766,21 @@ def doctor() -> None:
     optional_ok = not optional_missing
     optional_detail = ", ".join(optional_missing) + " missing" if optional_missing else "ok"
 
+    # 8. Browser deps (optional, non-blocking - stealthy fetch + screenshot)
+    # These may not install on all platforms (playwright has no aarch64/Termux
+    # wheels). When missing, hound runs in HTTP-only mode.
+    browser_missing = []
+    for mod in ("playwright", "patchright", "curl_cffi"):
+        try:
+            __import__(mod)
+        except Exception:
+            browser_missing.append(mod)
+    browser_ok = not browser_missing
+    if browser_missing:
+        browser_detail = ", ".join(browser_missing) + " missing (HTTP-only mode)"
+    else:
+        browser_detail = "ok"
+
     # 8. PyPI reachability + version (info only, not a failure)
     installed, latest, _ = check_version()
     if latest is None:
@@ -790,6 +805,10 @@ def doctor() -> None:
     opt_mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if optional_ok
                 else ui._sty(ui._glyph("!", "!"), ui._MAGENTA))
     rows.append(f"{opt_mark} {'[all] extras':<22} {ui.dim(_short(optional_detail, 30))}")
+    # Browser deps (non-blocking, same marker style as [all] extras)
+    bw_mark = (ui._sty(ui._glyph("\u2713", "+"), ui._GREEN) if browser_ok
+               else ui._sty(ui._glyph("!", "!"), ui._MAGENTA))
+    rows.append(f"{bw_mark} {'browser deps':<22} {ui.dim(_short(browser_detail, 30))}")
     print(ui.panel(rows, 64))
     # Verdict + fixes (outside the panel)
     if missing:
@@ -798,6 +817,9 @@ def doctor() -> None:
         print("  " + ui.warn("repair") + "  " + ui.cmd(f'python "{_short(rp, 46)}"'))
     if not optional_ok:
         print("  " + ui.warn("install extras") + "  " + ui.cmd("pip install hound-mcp[all]"))
+    if not browser_ok:
+        print("  " + ui.warn("browser mode") + "  HTTP-only (stealthy/screenshot disabled). "
+              + ui.cmd("pip install hound-mcp[all]") + " if your platform supports playwright)")
     if latest and installed != "unknown":
         try:
             if pad_version(installed) < pad_version(latest):

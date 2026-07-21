@@ -1,5 +1,82 @@
 # Changelog
 
+## [10.5.0] - 2026-07-21
+
+### Fixed: Termux/Android install + HTTP-only graceful degradation
+
+The lean install (`pip install hound-mcp`) pulled `scrapling[ai]`, which
+transitively activates `scrapling[fetchers]`, which pins `playwright==X.Y.Z`
+exactly. Playwright has no wheels for Termux/aarch64/Python 3.13, so the
+entire install failed. Even if the pin were loosened, playwright itself
+returns "no matching distribution" on Termux.
+
+**Root cause**: `scrapling[ai]` was a core dependency. It dragged in
+`scrapling[fetchers]` (playwright, patchright, curl_cffi, browserforge) at
+install time, and `scrapling.fetchers` imports `playwright` at module level
+(via `engines.toolbelt.convertor`), so even HTTP-only fetch paths were
+blocked.
+
+**Fix (two parts)**:
+
+1. **Dependency restructure**: `scrapling[ai]>=0.4.7` replaced with
+   `scrapling>=0.4.7` (core parsing only, no extras). Browser deps
+   (playwright>=1.50, patchright>=1.50, curl_cffi>=0.15, browserforge,
+   apify-fingerprint-datapoints, msgspec, anyio, protego, markdownify, click)
+   moved to the `[all]` extra with loose pins (>=, not ==). Now
+   `pip install hound-mcp` installs only scrapling core + httpx + trafilatura
+   + primp + mcp, all of which have universal wheels.
+
+2. **Graceful degradation**: when scrapling's browser deps can't be imported,
+   hound falls back to HTTP-only mode:
+   - `_get_scrapling()` catches `ImportError` and returns None instead of
+     crashing.
+   - `_FallbackResponse` class mimics the scrapling Response interface for
+     `_translate_response` and trafilatura extraction.
+   - `_fallback_http_get()` fetches URLs via httpx directly (no scrapling
+     FetcherSession needed).
+   - `_translate_response` uses trafilatura for extraction when scrapling's
+     Convertor is unavailable, with a raw HTML/text fallback.
+   - `_auto_escalate` skips the stealthy browser tier when unavailable and
+     returns the HTTP result with a `browser_unavailable` error.
+   - `screenshot`, `stealthy_fetch`, `open_session`, `bulk_fetch` raise clear
+     `RuntimeError` with install instructions.
+   - `_prewarm_stealthy` is a silent no-op.
+   - `trafilatura_extractor._fallback_extract` handles missing scrapling.
+
+**What works in HTTP-only mode**: `web_fetch` (HTTP tier only, no stealthy
+escalation), `web_search` (primp/httpx, no scrapling needed), `web_crawl`
+(HTTP fetch only), `cache_clear`, `hound_version`.
+
+**What's disabled**: stealthy browser escalation (403/429/503 pages won't
+get a browser retry), `web_screenshot`, persistent browser sessions.
+
+**Doctor**: added a `browser deps` check (non-blocking, magenta `!` marker).
+Checks `playwright`, `patchright`, `curl_cffi`. If missing, reports
+"HTTP-only mode" and suggests `pip install hound-mcp[all]` if the platform
+supports playwright.
+
+18 new tests in `test_graceful_degradation.py` covering: pyproject dep
+structure, _FallbackResponse, _fallback_http_get, browser method errors,
+_auto_escalate skip, _prewarm no-op, _translate_response fallback paths.
+
+742 tests pass, 0 fail.
+
+### Changed
+
+- `pyproject.toml`: `scrapling[ai]>=0.4.7` -> `scrapling>=0.4.7` (core only)
+- `pyproject.toml`: browser deps moved from core to `[all]` extra
+- `pyproject.toml`: browser dep pins loosened from `==X.Y.Z` to `>=1.50`
+- `server.py`: `_get_scrapling()` catches ImportError, sets
+  `_scrapling_import_error`, logs warning
+- `server.py`: `_scrapling_available()`, `_FallbackResponse`,
+  `_fallback_http_get()` added
+- `server.py`: all browser methods raise RuntimeError when unavailable
+- `server.py`: `_auto_escalate` skips browser tier when unavailable
+- `server.py`: `_prewarm_stealthy` no-op when unavailable
+- `server.py`: `_translate_response` trafilatura + raw fallback paths
+- `trafilatura_extractor.py`: `_fallback_extract` handles missing scrapling
+- `updater.py`: doctor adds `browser deps` check (non-blocking)
+
 ## [10.4.1] - 2026-07-20
 
 ### Removed: Internet Archive fallback

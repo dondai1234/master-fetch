@@ -1,6 +1,6 @@
 {
   "name": "@houndmcp/hound-mcp-pi",
-  "version": "10.4.1",
+  "version": "10.5.0",
   "description": "Hound web research for Pi agent - keyless search, anti-bot fetch, deep crawl, screenshot, Internet Archive dead-link recovery. Free, MIT, no API key.",
   "publishConfig": {"access": "public"},
   "files": ["extensions/", "README.md"],

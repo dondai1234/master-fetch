@@ -356,6 +356,7 @@ function cleanError(error: string, status?: number): string {
   if (e.includes("bot_challenge")) return "Blocked by bot protection (Cloudflare)";
   if (e.includes("geo_redirect")) return "Page returned a region redirect";
   if (e.includes("all_tiers_failed")) return "Couldn't fetch this page - all methods failed";
+  if (e.includes("browser_unavailable")) return "Browser not installed (HTTP-only mode). Stealthy/screenshot disabled. Install: pip install hound-mcp[all]";
   if (e.includes("auth_required")) return "Login required";
   if (e.includes("robots_txt")) return "Blocked by robots.txt";
   if (e.includes("encrypted_pdf")) return "PDF is password-protected";

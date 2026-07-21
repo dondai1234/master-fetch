@@ -47,6 +47,17 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
+## ✨ New in 10.5.0
+
+**Termux/Android support + HTTP-only graceful degradation.**
+
+- 📱 **Lean install works everywhere.** `pip install hound-mcp` no longer pulls `playwright` (which has no wheels for Termux/aarch64). Browser deps moved to `[all]` extra with loose pins. On platforms without playwright, hound runs in HTTP-only mode.
+- 🔧 **Graceful degradation.** When browser deps are unavailable, `web_fetch` uses httpx + trafilatura directly. `web_search` and `web_crawl` work normally. Stealthy browser escalation is skipped with a clear `browser_unavailable` error. `web_screenshot` raises a clear RuntimeError with install instructions.
+- 🩺 **Doctor browser check.** `hound --doctor` now checks for browser deps (non-blocking, shows HTTP-only mode when missing).
+- 🔧 **742 tests** (18 new graceful degradation tests).
+
+---
+
 ## ✨ New in 10.4.1
 
 **Removed archive fallback + added hound --reinstall.**
@@ -229,14 +240,16 @@ playwright install chromium
 ```
 
 <details>
-<summary><b>Lean install (no neural rerank, no PDF/OCR)</b></summary>
+<summary><b>Lean install (HTTP-only mode, no browser/OCR)</b></summary>
 
 ```bash
-pip install hound-mcp               # fetch + crawl + keyless search (consensus + engine-position ranking)
-playwright install chromium
+pip install hound-mcp               # fetch + crawl + keyless search (HTTP-only, no stealthy browser)
 ```
 
-The lean install is fully functional: multi-engine keyless search with cross-backend consensus, anti-bot, crawl, fetch, caching. `[all]` adds the ONNX neural reranker, PDF extraction, and OCR (scanned PDFs + CID-recovery + image pages) on the same `onnxruntime`.
+The lean install works on all platforms (including Termux/Android). It gives you
+multi-engine keyless search, HTTP fetch with auto-escalation (HTTP tier only, no
+stealthy browser), crawl, and caching. Stealthy browser escalation and screenshot
+require browser deps from the `[all]` extra.
 </details>
 
 <details>
