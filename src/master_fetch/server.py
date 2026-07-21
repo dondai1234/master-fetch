@@ -328,6 +328,21 @@ _JS_SHELL_SIGNALS = [
     "enable javascript to run this app",
 ]
 
+# Cloudflare challenge page markers. These appear in the raw HTML of CF
+# interstitial / Turnstile challenge pages (which can return 200). Used by
+# _is_js_shell to detect CF pages that bypass the generic JS-shell signals
+# (large HTML body with CF-specific scripts). Without this, extraction_type=html
+# (used by smart_crawl) gets the challenge page as "content" and never escalates.
+_CF_CHALLENGE_SIGNALS = [
+    "challenges.cloudflare.com/turnstile",
+    "cf-turnstile",
+    "cf_chl_opt",
+    "__cf_chl",
+    "cf-browser-verification",
+    "challenge-platform",
+    "cf-mitigated",
+]
+
 _GEO_REDIRECT_SIGNALS = [
     "choose a country", "select your country", "select your region",
     "shopping in the u.s.", "choose your country",
@@ -367,6 +382,13 @@ def _is_js_shell(result: ResponseModel) -> bool:
         return True  # Empty content after extraction = JS shell or blank page
     if any(signal in content_str for signal in _JS_SHELL_SIGNALS):
         return True
+    # Cloudflare challenge pages can return 200 with large HTML (Turnstile
+    # scripts, challenge-platform divs). With extraction_type=html (used by
+    # smart_crawl), the raw HTML is large so the text-length heuristic below
+    # doesn't trigger. Check for CF-specific markers to catch these.
+    if result.fetcher_used == "http" and result.status == 200:
+        if any(signal in content_str for signal in _CF_CHALLENGE_SIGNALS):
+            return True
     # Heuristic: the HTTP tier returned a 200 with a large HTML body but almost
     # no extractable text -> the page is JS-rendered and HTTP got the empty shell
     # (e.g. a SPA whose nav-only shell doesn't match the known signal phrases).

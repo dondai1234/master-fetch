@@ -1,5 +1,26 @@
 # Changelog
 
+## [11.1.6] - 2026-07-21
+
+### Fixed: smart_crawl does not bypass Cloudflare on protected sites
+
+`smart_crawl` uses `extraction_type=html` internally to extract links from
+pages. When a CF-protected site returns a 200 challenge page, the raw HTML is
+large (40KB+ of CF Turnstile scripts), so `_is_js_shell()` did not detect it
+as a JS shell. The crawl never escalated to the stealthy browser and returned
+the CF challenge page as content.
+
+Fix: add CF challenge page markers (`cf-turnstile`, `challenges.cloudflare.com/turnstile`,
+`cf_chl_opt`, `__cf_chl`, `cf-browser-verification`, `challenge-platform`,
+`cf-mitigated`) to the JS shell detection. When any of these appear in the
+HTTP response content, the page is detected as a CF challenge and escalation
+to the stealthy browser is triggered.
+
+Verified: `smart_crawl` on nowsecure.nl (CF challenge on every page) now uses
+`http->stealthy` escalation instead of returning the challenge page as content.
+
+806 tests (1 new: `test_is_js_shell_detects_cf_turnstile`).
+
 ## [11.1.5] - 2026-07-21
 
 ### Fixed: Response.css() no longer silently returns [] on errors

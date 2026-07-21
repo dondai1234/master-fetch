@@ -172,6 +172,38 @@ def test_response_empty_body():
     assert r.css("div") == []
 
 
+def test_is_js_shell_detects_cf_turnstile():
+    """_is_js_shell detects Cloudflare Turnstile challenge pages in raw HTML.
+
+    This is critical for smart_crawl which uses extraction_type=html. Without
+    CF-specific detection, the CF challenge page (200 + 40KB HTML) looks like
+    real content and the crawl never escalates to the stealthy browser.
+    """
+    from master_fetch.server import _is_js_shell, ResponseModel
+    # Simulate a CF Turnstile challenge page returned by HTTP with extraction_type=html
+    cf_html = ResponseModel(
+        url="https://example.com",
+        content=["<html><head><script src='challenges.cloudflare.com/turnstile/v0/api.js'></script>"
+                 "<div class='cf-turnstile'></div></head><body>Checking your browser...</body></html>"],
+        status=200,
+        fetcher_used="http",
+        total_size_bytes=40000,
+    )
+    assert _is_js_shell(cf_html), "CF Turnstile page should be detected as JS shell"
+
+    # Normal page with real content should NOT be detected as JS shell
+    normal = ResponseModel(
+        url="https://example.com",
+        content=["<html><body><p>This is a real article about web development and software engineering. "
+                 "It has substantial text content that is clearly not a bot challenge page. "
+                 "The content is long enough to exceed the JS shell heuristic threshold for minimum text length.</p></body></html>"],
+        status=200,
+        fetcher_used="http",
+        total_size_bytes=40000,
+    )
+    assert not _is_js_shell(normal), "Normal page should NOT be detected as JS shell"
+
+
 def test_response_css_invalid_selector_raises():
     """Response.css() raises on invalid selector instead of silently returning []."""
     import pytest
