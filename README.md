@@ -58,17 +58,6 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
-## ✨ New in 10.4.1
-
-**Removed archive fallback + added hound --reinstall.**
-
-- 🗄️ **Removed Internet Archive fallback.** The archive recovery feature was slow and unreliable in practice. Hard-blocks now return clean errors immediately instead of spending time querying archive.org.
-- 🔧 **hound --reinstall.** Full reinstall with all deps + [all] extras, pinned to the latest PyPI version. Uses `--force-reinstall --no-deps` to avoid breaking transitive deps.
-- 🩺 **Fixed doctor [all] extras check.** Was checking `rapidocr_onnxruntime` (old v1 name) instead of `rapidocr` (v3). Now correctly detects installed extras.
-- 🔧 **Professional internals.** 705 tests.
-
----
-
 ## Why you should pick Hound
 
 Hound is one [MCP](https://modelcontextprotocol.io) server that gives any agent (Claude Code, Cursor, OpenCode, Hermes, Pi, anything that speaks MCP) full web research from a single local process.
