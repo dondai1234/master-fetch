@@ -32,7 +32,7 @@ def _awaitable(value):
 
 
 class _FakeFetcherSession:
-    """Replacement for scrapling FetcherSession: `async with FetcherSession() as sess`."""
+    """Replacement for HTTPSession: `async with HTTPSession() as sess`."""
     def __init__(self, body, encoding="utf-8"):
         self._logic = _FakeSessionLogic(body, encoding)
 
@@ -162,8 +162,8 @@ class TestClearRobotsCache:
             assert mock_fetch.call_count == 2
 
 
-class TestFetchRobotsTxtScraplingPath:
-    """The scrapling (impersonated) fetch path must actually be used.
+class TestFetchRobotsTxtHTTPSessionPath:
+    """The primp/HTTPSession (impersonated) fetch path must actually be used.
 
     Regression: previously _fetch_robots_txt wrapped an async sess.get()
     coroutine in asyncio.to_thread and unpacked the result as a
@@ -176,7 +176,7 @@ class TestFetchRobotsTxtScraplingPath:
         body = b"User-agent: *\nDisallow: /private\n"
         fake = _FakeFetcherSession(body)
 
-        with patch("scrapling.engines.static.FetcherSession", lambda *a, **kw: fake):
+        with patch("master_fetch.fetcher.HTTPSession", lambda *a, **kw: fake):
             out = await _fetch_robots_txt("example.com")
 
         assert out == "User-agent: *\nDisallow: /private\n"
@@ -188,8 +188,8 @@ class TestFetchRobotsTxtScraplingPath:
     async def test_returns_none_when_body_empty(self):
         fake = _FakeFetcherSession(None)
 
-        with patch("scrapling.engines.static.FetcherSession", lambda *a, **kw: fake):
+        with patch("master_fetch.fetcher.HTTPSession", lambda *a, **kw: fake):
             out = await _fetch_robots_txt("example.com")
-        # Empty body from scrapling -> falls through to urllib fallback path,
+        # Empty body from fetcher -> falls through to urllib fallback path,
         # which can't reach the synthetic domain -> None.
         assert out is None

@@ -115,17 +115,17 @@ def _passes_site_filter(url: str, site: Optional[str], exclude_sites: Optional[l
 async def fetch_source_for_similar(url: str, *, timeout: int = 10, max_chars: int = 4000
                                     ) -> tuple[str, str]:
     """Fetch a URL for find_similar: returns (title, body_text). Uses a one-off
-    impersonated HTTP fetch (scrapling) - a single arbitrary page, not a repeated
+    impersonated HTTP fetch (primp) - a single arbitrary page, not a repeated
     engine hit, so the metasearch's backend rotation does not apply."""
     try:
-        from scrapling.engines.static import FetcherSession
+        from master_fetch.fetcher import HTTPSession
         from master_fetch.search_metasearch import _PROXY as _p
         from urllib.parse import urlparse as _up
         from bs4 import BeautifulSoup
         # rotation pool kept here (not imported from the removed SERL module)
-        _pool = ["chrome131", "chrome136", "chrome142", "edge", "safari184", "firefox147"]
-        async with FetcherSession(impersonate=_pool, proxy=_p,
-                                  stealthy_headers=True, retries=1) as sess:
+        _pool = ["chrome", "safari", "firefox", "edge"]
+        async with HTTPSession(impersonate=_pool, proxy=_p,
+                               stealthy_headers=True, retries=1) as sess:
             resp = await sess.get(url, timeout=timeout)
             text = (getattr(resp, "body", None) or b"").decode(
                 getattr(resp, "encoding", None) or "utf-8", errors="replace")

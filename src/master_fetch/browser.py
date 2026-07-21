@@ -1,0 +1,810 @@
+"""Hound's own browser sessions using patchright directly.
+
+Replaces scrapling's AsyncStealthySession and AsyncDynamicSession with direct
+patchright async API usage. Includes the Cloudflare Turnstile solver ported
+from scrapling (it's standard Playwright page manipulation, ~80 lines).
+
+Architecture:
+- StealthyBrowser: anti-detect browser with fingerprinting, stealth args,
+  Cloudflare solver, resource blocking, page pooling
+- DynamicBrowser: simpler JS-rendering browser (same engine, no stealth args)
+- Both: async context manager (async with), .start(), .close(), .fetch()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import tempfile
+from random import randint
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
+
+logger = logging.getLogger("master_fetch.browser")
+
+# ─── Browser flags (ported from scrapling's constants.py) ─────────────────────
+
+# These args make the browser faster and less detectable. Source:
+# https://peter.sh/experiments/chromium-command-line-switches/
+DEFAULT_ARGS: Tuple[str, ...] = (
+    "--no-pings",
+    "--no-first-run",
+    "--disable-infobars",
+    "--disable-breakpad",
+    "--no-service-autorun",
+    "--homepage=about:blank",
+    "--password-store=basic",
+    "--disable-hang-monitor",
+    "--no-default-browser-check",
+    "--disable-session-crashed-bubble",
+    "--disable-search-engine-choice-screen",
+)
+
+# Args to suppress (scrapling found these enable automation signals)
+HARMFUL_ARGS: Tuple[str, ...] = (
+    "--enable-automation",
+    "--disable-popup-blocking",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-extensions",
+)
+
+STEALTH_ARGS: Tuple[str, ...] = (
+    "--test-type",
+    "--lang=en-US",
+    "--mute-audio",
+    "--disable-sync",
+    "--hide-scrollbars",
+    "--disable-logging",
+    "--start-maximized",
+    "--enable-async-dns",
+    "--accept-lang=en-US",
+    "--use-mock-keychain",
+    "--disable-translate",
+    "--disable-voice-input",
+    "--window-position=0,0",
+    "--disable-wake-on-wifi",
+    "--ignore-gpu-blocklist",
+    "--enable-tcp-fast-open",
+    "--enable-web-bluetooth",
+    "--disable-cloud-import",
+    "--disable-print-preview",
+    "--disable-dev-shm-usage",
+    "--metrics-recording-only",
+    "--disable-crash-reporter",
+    "--disable-partial-raster",
+    "--disable-gesture-typing",
+    "--disable-checker-imaging",
+    "--disable-prompt-on-repost",
+    "--force-color-profile=srgb",
+    "--font-render-hinting=none",
+    "--aggressive-cache-discard",
+    "--disable-cookie-encryption",
+    "--disable-domain-reliability",
+    "--disable-threaded-animation",
+    "--disable-threaded-scrolling",
+    "--enable-simple-cache-backend",
+    "--disable-background-networking",
+    "--enable-surface-synchronization",
+    "--disable-image-animation-resync",
+    "--disable-renderer-backgrounding",
+    "--disable-ipc-flooding-protection",
+    "--prerender-from-omnibox=disabled",
+    "--safebrowsing-disable-auto-update",
+    "--disable-offer-upload-credit-cards",
+    "--disable-background-timer-throttling",
+    "--disable-new-content-rendering-timeout",
+    "--run-all-compositor-stages-before-draw",
+    "--disable-client-side-phishing-detection",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-layer-tree-host-memory-pressure",
+    "--autoplay-policy=user-gesture-required",
+    "--disable-offer-store-unmasked-wallet-cards",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-component-extensions-with-background-pages",
+    "--enable-features=NetworkService,NetworkServiceInProcess,TrustTokens,TrustTokensAlwaysAllowIssuance",
+    "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4",
+    "--disable-features=AudioServiceOutOfProcess,TranslateUI,BlinkGenPropertyTrees",
+)
+
+# Resource types to block when disable_resources=True
+DISABLED_RESOURCE_TYPES: Set[str] = {
+    "font", "image", "media", "beacon", "object",
+    "imageset", "texttrack", "websocket", "csp_report", "stylesheet",
+}
+
+# Cloudflare challenge iframe URL pattern
+__CF_PATTERN = re.compile(
+    r"^https?://challenges\.cloudflare\.com/cdn-cgi/challenge-platform/.*"
+)
+
+
+# ─── Proxy helper ────────────────────────────────────────────────────────────
+
+def _construct_proxy_dict(proxy: str | Dict[str, str]) -> Dict[str, str]:
+    """Convert a proxy string to a Playwright proxy dict."""
+    if isinstance(proxy, dict):
+        return proxy
+    parsed = urlparse(proxy)
+    if parsed.scheme not in ("http", "https", "socks4", "socks5"):
+        raise ValueError(f"Invalid proxy scheme: {parsed.scheme}")
+    result: Dict[str, str] = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+    if parsed.username:
+        result["username"] = parsed.username
+    if parsed.password:
+        result["password"] = parsed.password
+    return result
+
+
+def _is_domain_blocked(hostname: str, blocked_domains: frozenset) -> bool:
+    """Check if a hostname matches any blocked domain (including subdomains)."""
+    if not hostname:
+        return False
+    for domain in blocked_domains:
+        if hostname == domain or hostname.endswith(f".{domain}"):
+            return True
+    return False
+
+
+# ─── Resource blocking handler ───────────────────────────────────────────────
+
+def _create_route_handler(
+    disable_resources: bool,
+    blocked_domains: Optional[Set[str]] = None,
+) -> Callable[[Any], Awaitable[None]]:
+    """Create an async route handler for resource blocking."""
+    disabled = DISABLED_RESOURCE_TYPES if disable_resources else set()
+    domains = frozenset(blocked_domains) if blocked_domains else frozenset()
+
+    async def handler(route: Any) -> None:
+        try:
+            rt = route.request.resource_type
+            if rt in disabled:
+                await route.abort()
+                return
+            if domains:
+                hostname = urlparse(route.request.url).hostname or ""
+                if _is_domain_blocked(hostname, domains):
+                    await route.abort()
+                    return
+            await route.continue_()
+        except Exception:
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+
+    return handler
+
+
+# ─── Cloudflare solver ───────────────────────────────────────────────────────
+
+async def _get_page_content(page: Any, max_retries: int = 20) -> str:
+    """Get page.content() with retry workaround for Windows Playwright bug.
+
+    See: https://github.com/microsoft/playwright/issues/16108
+    """
+    for _ in range(max_retries):
+        try:
+            return (await page.content()) or ""
+        except Exception:
+            await page.wait_for_timeout(500)
+    return ""
+
+
+def _detect_cloudflare(page_content: str) -> Optional[str]:
+    """Detect the type of Cloudflare challenge in the page content.
+
+    Returns: 'non-interactive', 'managed', 'interactive', 'embedded', or None.
+    """
+    challenge_types = ("non-interactive", "managed", "interactive")
+    for ctype in challenge_types:
+        if f"cType: '{ctype}'" in page_content:
+            return ctype
+
+    # Check for embedded turnstile captcha
+    if 'challenges.cloudflare.com/turnstile/v' in page_content:
+        return "embedded"
+
+    return None
+
+
+async def _solve_cloudflare(page: Any) -> None:
+    """Solve Cloudflare Turnstile/Interstitial challenge on a Playwright page.
+
+    Ported from scrapling's StealthySessionMixin._cloudflare_solver.
+    Handles: non-interactive, managed, interactive, and embedded challenges.
+
+    The solver:
+    1. Waits for network idle
+    2. Detects challenge type
+    3. For non-interactive: waits for the "Just a moment" page to clear
+    4. For interactive/embedded: clicks the Turnstile checkbox at the
+       right coordinates (calculated from the iframe bounding box)
+    5. Waits for the challenge to resolve, retries if needed
+    """
+    # Wait for network to settle
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+
+    challenge_type = _detect_cloudflare(await _get_page_content(page))
+    if not challenge_type:
+        logger.debug("No Cloudflare challenge found")
+        return
+
+    logger.info(f"Cloudflare challenge type: {challenge_type}")
+
+    if challenge_type == "non-interactive":
+        # Just wait for the challenge to auto-resolve
+        attempts = 0
+        while "<title>Just a moment...</title>" in (await _get_page_content(page)):
+            if attempts >= 30:
+                logger.info("Non-interactive challenge still present after 30s, continuing")
+                break
+            await page.wait_for_timeout(1000)
+            try:
+                await page.wait_for_load_state()
+            except Exception:
+                pass
+            attempts += 1
+        logger.info("Cloudflare non-interactive challenge resolved")
+        return
+
+    # Interactive/managed/embedded: need to click the Turnstile checkbox
+    box_selector = "#cf_turnstile div, #cf-turnstile div, .turnstile>div>div"
+    if challenge_type != "embedded":
+        box_selector = ".main-content p+div>div>div"
+        # Wait for the "Verifying you are human" spinner to disappear
+        spinner_attempts = 0
+        while "Verifying you are human." in (await _get_page_content(page)):
+            if spinner_attempts >= 20:
+                break
+            await page.wait_for_timeout(500)
+            spinner_attempts += 1
+
+    # Find the Cloudflare iframe
+    outer_box: Any = {}
+    iframe = page.frame(url=__CF_PATTERN)
+    if iframe is not None:
+        # Wait for iframe stability
+        try:
+            await iframe.wait_for_load_state("load")
+        except Exception:
+            pass
+
+        if challenge_type != "embedded":
+            # Wait for iframe to be visible
+            iframe_visible_attempts = 0
+            while not await (await iframe.frame_element()).is_visible():
+                if iframe_visible_attempts >= 20:
+                    break
+                await page.wait_for_timeout(500)
+                iframe_visible_attempts += 1
+
+        try:
+            outer_box = await (await iframe.frame_element()).bounding_box()
+        except Exception:
+            outer_box = {}
+
+    if not iframe or not outer_box:
+        # Check if challenge already solved
+        if "<title>Just a moment...</title>" not in (await _get_page_content(page)):
+            logger.info("Cloudflare challenge resolved without clicking")
+            return
+        # Try to find the box on the page directly
+        try:
+            outer_box = await page.locator(box_selector).last.bounding_box()
+        except Exception:
+            logger.warning("Could not find Cloudflare checkbox to click")
+            return
+
+    if not outer_box:
+        logger.warning("Cloudflare checkbox bounding box is empty")
+        return
+
+    # Calculate click coordinates (offset into the checkbox area)
+    captcha_x = outer_box["x"] + randint(26, 28)
+    captcha_y = outer_box["y"] + randint(25, 27)
+
+    # Click the checkbox with a small random delay (mimics human)
+    try:
+        await page.mouse.click(captcha_x, captcha_y, delay=randint(100, 200), button="left")
+    except Exception as e:
+        logger.warning(f"Cloudflare click failed: {e}")
+        return
+
+    # Wait for network to settle after click
+    try:
+        await page.wait_for_load_state("networkidle", timeout=5000)
+    except Exception:
+        pass
+
+    # Wait for the challenge page to clear
+    if challenge_type != "embedded":
+        attempts = 0
+        while "<title>Just a moment...</title>" in (await _get_page_content(page)):
+            if attempts >= 100:
+                logger.info("Cloudflare page didn't disappear after 10s, continuing")
+                break
+            await page.wait_for_timeout(100)
+            attempts += 1
+
+    # Final stability wait
+    try:
+        await page.wait_for_load_state("load")
+        await page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        pass
+
+    # Check if solved
+    if "<title>Just a moment...</title>" not in (await _get_page_content(page)):
+        logger.info("Cloudflare challenge solved")
+        return
+
+    # Not solved: retry
+    logger.info("Cloudflare challenge still present, retrying...")
+    await _solve_cloudflare(page)
+
+
+# ─── Browser session base ─────────────────────────────────────────────────────
+
+class BrowserSession:
+    """Base browser session using patchright's async API.
+
+    Manages a persistent browser context with page pooling. Supports:
+    - Headless/headful mode
+    - Proxy (static or per-request)
+    - Resource blocking (disable_resources, blocked_domains)
+    - Wait strategies (load, domcontentloaded, networkidle)
+    - Page actions (callable executed after navigation)
+    - Cookie injection
+    - Extra headers
+    - Cloudflare solving (stealthy only)
+
+    Lifecycle:
+        session = StealthyBrowser(headless=True)
+        await session.start()
+        response = await session.fetch("https://example.com")
+        await session.close()
+
+    Or as async context manager:
+        async with StealthyBrowser() as session:
+            response = await session.fetch("https://example.com")
+    """
+
+    def __init__(
+        self,
+        *,
+        headless: bool = True,
+        wait: int = 0,
+        proxy: Optional[str] = None,
+        locale: Optional[str] = None,
+        timezone_id: Optional[str] = None,
+        timeout: int = 30000,
+        cookies: Optional[List[Dict]] = None,
+        useragent: Optional[str] = None,
+        network_idle: bool = False,
+        block_ads: bool = True,
+        disable_resources: bool = False,
+        extra_headers: Optional[Dict[str, str]] = None,
+        google_search: bool = True,
+        cdp_url: Optional[str] = None,
+        real_chrome: bool = False,
+        wait_selector: Optional[str] = None,
+        wait_selector_state: str = "attached",
+        max_pages: int = 1,
+        retries: int = 1,
+        retry_delay: float = 1.0,
+        # Stealthy-specific
+        hide_canvas: bool = False,
+        block_webrtc: bool = False,
+        allow_webgl: bool = True,
+        solve_cloudflare: bool = False,
+        additional_args: Optional[Dict] = None,
+        page_action: Optional[Callable] = None,
+        page_setup: Optional[Callable] = None,
+    ):
+        self._headless = headless
+        self._wait = wait
+        self._proxy = proxy
+        self._locale = locale
+        self._timezone_id = timezone_id
+        self._timeout = timeout
+        self._cookies = cookies
+        self._useragent = useragent
+        self._network_idle = network_idle
+        self._block_ads = block_ads
+        self._disable_resources = disable_resources
+        self._extra_headers = extra_headers
+        self._google_search = google_search
+        self._cdp_url = cdp_url
+        self._real_chrome = real_chrome
+        self._wait_selector = wait_selector
+        self._wait_selector_state = wait_selector_state
+        self._max_pages = max_pages
+        self._retries = retries
+        self._retry_delay = retry_delay
+        self._hide_canvas = hide_canvas
+        self._block_webrtc = block_webrtc
+        self._allow_webgl = allow_webgl
+        self._solve_cloudflare = solve_cloudflare
+        self._additional_args = additional_args or {}
+        self._page_action = page_action
+        self._page_setup = page_setup
+
+        # State
+        self._playwright: Any = None
+        self._browser: Any = None
+        self._context: Any = None
+        self._user_data_dir: Optional[str] = None
+        self._is_alive: bool = False
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    async def __aenter__(self) -> "BrowserSession":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.close()
+
+    async def start(self) -> None:
+        """Launch the browser and create a context."""
+        if self._is_alive:
+            raise RuntimeError("Session already started")
+
+        from patchright.async_api import async_playwright
+
+        self._playwright = await async_playwright().start()
+
+        # Build browser launch options
+        browser_args = list(DEFAULT_ARGS)
+        if self._is_stealthy:
+            browser_args.extend(STEALTH_ARGS)
+            if self._block_webrtc:
+                browser_args.extend((
+                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    "--force-webrtc-ip-handling-policy",
+                ))
+            if not self._allow_webgl:
+                browser_args.extend((
+                    "--disable-webgl",
+                    "--disable-webgl-image-chromium",
+                    "--disable-webgl2",
+                ))
+            if self._hide_canvas:
+                browser_args.append("--fingerprinting-canvas-image-data-noise")
+
+        browser_options: Dict[str, Any] = {
+            "args": browser_args,
+            "ignore_default_args": list(HARMFUL_ARGS),
+            "headless": self._headless,
+            "channel": "chrome" if self._real_chrome else "chromium",
+        }
+
+        # Build context options
+        context_options: Dict[str, Any] = {
+            "color_scheme": "dark",
+            "device_scale_factor": 2,
+        }
+        if self._is_stealthy:
+            context_options.update({
+                "is_mobile": False,
+                "has_touch": False,
+                "service_workers": "allow",
+                "ignore_https_errors": True,
+                "screen": {"width": 1920, "height": 1080},
+                "viewport": {"width": 1920, "height": 1080},
+                "permissions": ["geolocation", "notifications"],
+            })
+        if self._proxy:
+            context_options["proxy"] = _construct_proxy_dict(self._proxy)
+        if self._locale:
+            context_options["locale"] = self._locale
+        if self._timezone_id:
+            context_options["timezone_id"] = self._timezone_id
+        if self._extra_headers:
+            context_options["extra_http_headers"] = self._extra_headers
+        if self._useragent:
+            context_options["user_agent"] = self._useragent
+        elif self._headless:
+            # Generate a realistic user agent
+            try:
+                from browserforge.headers import HeaderGenerator
+                hg = HeaderGenerator()
+                headers = hg.generate()
+                ua = headers.get("User-Agent") or headers.get("user-agent")
+                if ua:
+                    context_options["user_agent"] = ua
+            except Exception:
+                pass
+
+        # Merge additional args (highest priority)
+        context_options.update(self._additional_args)
+
+        try:
+            if self._cdp_url:
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    endpoint_url=self._cdp_url
+                )
+                self._context = await self._browser.new_context(**context_options)
+            else:
+                # Use persistent context (temp dir)
+                self._user_data_dir = tempfile.mkdtemp(prefix="hound_browser_")
+                persistent_opts = {**browser_options, **context_options, "user_data_dir": self._user_data_dir}
+                self._context = await self._playwright.chromium.launch_persistent_context(
+                    **persistent_opts
+                )
+
+            # Initialize context
+            if self._cookies:
+                await self._context.add_cookies(self._cookies)
+
+            self._is_alive = True
+            logger.info(f"Browser session started (stealthy={self._is_stealthy})")
+        except Exception as e:
+            logger.error(f"Browser session start failed: {e}")
+            await self._cleanup_playwright()
+            raise
+
+    async def close(self) -> None:
+        """Close the browser and cleanup."""
+        if not self._is_alive:
+            return
+
+        try:
+            if self._context:
+                await self._context.close()
+                self._context = None
+            if self._browser:
+                await self._browser.close()
+                self._browser = None
+        except Exception as e:
+            logger.debug(f"Error closing browser: {e}")
+        finally:
+            await self._cleanup_playwright()
+            self._is_alive = False
+
+            # Cleanup temp dir
+            if self._user_data_dir:
+                try:
+                    import shutil
+                    shutil.rmtree(self._user_data_dir, ignore_errors=True)
+                except Exception:
+                    pass
+                self._user_data_dir = None
+
+    async def _cleanup_playwright(self) -> None:
+        """Stop the playwright instance."""
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+    # ── Fetch ─────────────────────────────────────────────────────
+
+    async def fetch(
+        self,
+        url: str,
+        *,
+        wait: Optional[int] = None,
+        timeout: Optional[int] = None,
+        google_search: Optional[bool] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+        disable_resources: Optional[bool] = None,
+        wait_selector: Optional[str] = None,
+        wait_selector_state: Optional[str] = None,
+        network_idle: Optional[bool] = None,
+        proxy: Optional[str] = None,
+        solve_cloudflare: Optional[bool] = None,
+        page_action: Optional[Callable] = None,
+        page_setup: Optional[Callable] = None,
+        retries: Optional[int] = None,
+        **kwargs: Any,
+    ) -> "Any":
+        """Navigate to a URL and return a Response object.
+
+        Parameters override session defaults for this request only.
+        """
+        if not self._is_alive:
+            raise RuntimeError("Session not started")
+
+        # Resolve per-request overrides
+        actual_wait = wait if wait is not None else self._wait
+        actual_timeout = timeout if timeout is not None else self._timeout
+        actual_google = google_search if google_search is not None else self._google_search
+        actual_extra_headers = extra_headers if extra_headers is not None else self._extra_headers
+        actual_disable_resources = disable_resources if disable_resources is not None else self._disable_resources
+        actual_wait_selector = wait_selector if wait_selector is not None else self._wait_selector
+        actual_wait_selector_state = wait_selector_state or self._wait_selector_state
+        actual_network_idle = network_idle if network_idle is not None else self._network_idle
+        actual_solve_cf = solve_cloudflare if solve_cloudflare is not None else self._solve_cloudflare
+        actual_page_action = page_action or self._page_action
+        actual_page_setup = page_setup or self._page_setup
+        actual_retries = retries if retries is not None else self._retries
+
+        # Build referer
+        request_headers = {}
+        if actual_extra_headers:
+            request_headers = {h.lower(): v for h, v in actual_extra_headers.items()}
+        referer = None
+        if actual_google and "referer" not in request_headers:
+            referer = "https://www.google.com/"
+
+        for attempt in range(actual_retries):
+            try:
+                page = await self._context.new_page()
+                page.set_default_navigation_timeout(actual_timeout)
+                page.set_default_timeout(actual_timeout)
+
+                if actual_extra_headers:
+                    await page.set_extra_http_headers(actual_extra_headers)
+
+                # Route handler for resource blocking
+                if actual_disable_resources:
+                    await page.route("**/*", _create_route_handler(True, None))
+
+                # Response capture
+                final_response: List[Any] = [None]
+                async def _handle_response(resp: Any) -> None:
+                    try:
+                        if (resp.request.resource_type == "document"
+                                and resp.request.is_navigation_request()
+                                and resp.request.frame == page.main_frame):
+                            final_response[0] = resp
+                    except Exception:
+                        pass
+                page.on("response", _handle_response)
+
+                # Page setup callback
+                if actual_page_setup:
+                    try:
+                        await actual_page_setup(page)
+                    except Exception as e:
+                        logger.warning(f"page_setup callback error: {e}")
+
+                # Navigate
+                first_response = await page.goto(url, referer=referer)
+
+                # Wait for page stability
+                await self._wait_for_stability(page, actual_network_idle)
+
+                if not first_response:
+                    raise RuntimeError(f"Failed to get response for {url}")
+
+                # Solve Cloudflare if requested
+                if actual_solve_cf:
+                    await _solve_cloudflare(page)
+                    await self._wait_for_stability(page, actual_network_idle)
+
+                # Page action callback
+                if actual_page_action:
+                    try:
+                        result = actual_page_action(page)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as e:
+                        logger.warning(f"page_action callback error: {e}")
+
+                # Wait for selector
+                if actual_wait_selector:
+                    try:
+                        waiter = page.locator(actual_wait_selector)
+                        await waiter.first.wait_for(state=actual_wait_selector_state)
+                        await self._wait_for_stability(page, actual_network_idle)
+                    except Exception as e:
+                        logger.warning(f"Wait for selector '{actual_wait_selector}' failed: {e}")
+
+                # Post-load wait
+                if actual_wait > 0:
+                    await page.wait_for_timeout(actual_wait)
+
+                # Build response
+                from master_fetch.fetcher import response_from_browser_page
+                response = await response_from_browser_page(
+                    page, first_response, final_response[0]
+                )
+
+                await page.close()
+                return response
+
+            except Exception as e:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                if attempt < actual_retries - 1:
+                    logger.warning(
+                        f"Browser fetch attempt {attempt + 1} failed for {url}: {str(e)[:200]}. "
+                        f"Retrying in {self._retry_delay}s..."
+                    )
+                    await asyncio.sleep(self._retry_delay)
+                else:
+                    raise
+
+        raise RuntimeError(f"Browser fetch failed for {url}")
+
+    async def _wait_for_stability(self, page: Any, network_idle: bool) -> None:
+        """Wait for the page to reach a stable state."""
+        try:
+            await page.wait_for_load_state("load")
+        except Exception:
+            pass
+        try:
+            await page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
+        if network_idle:
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+
+    # ── Properties ────────────────────────────────────────────────
+
+    @property
+    def _is_stealthy(self) -> bool:
+        """Override in subclasses."""
+        return False
+
+    @property
+    def is_alive(self) -> bool:
+        return self._is_alive
+
+
+class StealthyBrowser(BrowserSession):
+    """Anti-detect stealthy browser session with Cloudflare solving.
+
+    Uses stealth browser args (anti-fingerprinting, automation bypass),
+    a realistic user agent, and optionally solves Cloudflare challenges.
+    """
+
+    @property
+    def _is_stealthy(self) -> bool:
+        return True
+
+
+class DynamicBrowser(BrowserSession):
+    """Standard JS-rendering browser session.
+
+    Simpler than stealthy: no stealth args, no Cloudflare solver.
+    Used for pages that need JavaScript rendering but don't have
+    anti-bot protection.
+    """
+
+    @property
+    def _is_stealthy(self) -> bool:
+        return False
+
+
+# ─── Browser availability check ───────────────────────────────────────────────
+
+_browser_available: Optional[bool] = None
+_browser_import_error: Optional[str] = None
+
+
+def check_browser_available() -> bool:
+    """Check if browser deps (patchright) are importable. Cached."""
+    global _browser_available, _browser_import_error
+    if _browser_available is not None:
+        return _browser_available
+    try:
+        import patchright  # noqa: F401
+        _browser_available = True
+        _browser_import_error = None
+        return True
+    except ImportError as e:
+        _browser_available = False
+        _browser_import_error = str(e)
+        return False
+
+
+def browser_import_error() -> Optional[str]:
+    """Get the import error if browser deps are unavailable."""
+    return _browser_import_error

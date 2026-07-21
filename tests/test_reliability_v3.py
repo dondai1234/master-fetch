@@ -591,7 +591,7 @@ class TestOpenSessionExceptionHandler:
         # then calls session.start() (outside lock). On failure, it acquires lock
         # again and sets _alive=False before popping.
 
-        # We'll mock _get_scrapling to return our controlled session class
+        # Mock DynamicBrowser to simulate a start failure
         class MockDynamicSession:
             def __init__(self, **kwargs):
                 self._kwargs = kwargs
@@ -603,14 +603,10 @@ class TestOpenSessionExceptionHandler:
             async def close(self):
                 pass
 
-        with patch.object(
-            __import__("master_fetch.server", fromlist=["_get_scrapling"]),
-            "_get_scrapling",
-        ) as mock_get_s:
-            mock_s = MagicMock()
-            mock_s.AsyncDynamicSession = MockDynamicSession
-            mock_get_s.return_value = mock_s
-
+        with patch(
+            "master_fetch.browser.DynamicBrowser",
+            MockDynamicSession,
+        ):
             with pytest.raises(RuntimeError, match="Simulated start failure"):
                 await srv.open_session(session_type="dynamic", session_id="crash-sess")
 
@@ -640,15 +636,10 @@ class TestOpenSessionExceptionHandler:
             async def close(self):
                 pass
 
-        with patch.object(
-            __import__("master_fetch.server", fromlist=["_get_scrapling"]),
-            "_get_scrapling",
-        ) as mock_get_s:
-            mock_s = MagicMock()
-            mock_s.AsyncDynamicSession = FailingSession
-            mock_s.AsyncStealthySession = FailingSession
-            mock_get_s.return_value = mock_s
-
+        with patch(
+            "master_fetch.browser.DynamicBrowser",
+            FailingSession,
+        ):
             with pytest.raises(RuntimeError, match="Browser failed to start"):
                 await srv.open_session(session_type="dynamic", session_id="doomed-session")
 

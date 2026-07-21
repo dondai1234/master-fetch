@@ -1,20 +1,18 @@
 [project]
 name = "hound-mcp"
-version = "10.5.0"
-description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. Graceful degradation when browser deps are unavailable (HTTP-only mode on Termux/Android). Token-optimized tool definitions, polished cross-platform CLI, brick-proof self-update with hound doctor + rollback."
+version = "11.0.0"
+description = "Web research for AI agents. Fetch any page with anti-bot bypass plus web search. $0 forever. No scrapling dependency: hound uses primp + patchright directly. Graceful degradation when browser deps are unavailable (HTTP-only mode on Termux/Android). Token-optimized tool definitions, polished cross-platform CLI, brick-proof self-update with hound doctor + rollback."
 readme = "README.md"
 authors = [{name = "Bishesh Bhandari", email = "bishesh@master-fetch.dev"}]
 requires-python = ">=3.11"
 dependencies = [
-    # scrapling CORE only (no extras). scrapling's fetchers extra pins
-    # playwright==X.Y.Z exactly, and playwright has no wheels for some
-    # platforms (Termux/aarch64). By declaring scrapling core only, the lean
-    # install works everywhere. Browser deps are in the all extra.
-    # When browser deps are missing, hound falls back to HTTP-only mode
-    # (see _get_scrapling + _fallback_http_get in server.py).
-    "scrapling>=0.4.7",
+    # hound uses primp for HTTP TLS impersonation and patchright for browser.
+    # No scrapling dependency. Core deps all have universal wheels.
+    # Browser deps (patchright, playwright, browserforge) are in [all] extra.
+    # When browser deps are missing, hound runs in HTTP-only mode
+    # (see _scrapling_available + _fallback_http_get in server.py).
     # Core deps:
-    "mcp>=1.27.0",  # brings anyio transitively
+    "mcp>=1.27.0",
     "pydantic>=2.0",
     "trafilatura>=2.0.0",
     "aiosqlite>=0.20.0",
@@ -23,6 +21,8 @@ dependencies = [
     "httpx[http2]>=0.27",
     "fake-useragent>=2.0",
     "lxml>=5.0",
+    # Content extraction (HTML->markdown fallback):
+    "markdownify>=1.2.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -45,20 +45,13 @@ dev = [
     "pytest-mock>=3.14",
 ]
 all = [
-    # Browser deps (were in scrapling's fetchers extra, now with loose pins
-    # so pip can resolve any compatible version). These may not install on all
-    # platforms (e.g. playwright has no aarch64/Termux wheels). When missing,
-    # hound runs in HTTP-only mode.
-    "playwright>=1.50",
+    # Browser deps (patchright for anti-detect browser, playwright for JS
+    # rendering, browserforge for fingerprint generation). These may not
+    # install on all platforms (e.g. playwright has no aarch64/Termux wheels).
+    # When missing, hound runs in HTTP-only mode.
     "patchright>=1.50",
-    "curl_cffi>=0.15",
+    "playwright>=1.50",
     "browserforge>=1.2.4",
-    "apify-fingerprint-datapoints>=0.13.0",
-    "msgspec>=0.21.1",
-    "anyio>=4.13.0",
-    "protego>=0.6.2",
-    "markdownify>=1.2.0",
-    "click>=8.3.0",
     # PDF + OCR deps:
     "requests>=2.31",
     "pdfplumber>=0.11.0",

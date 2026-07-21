@@ -8,7 +8,7 @@ Extraction chain (robust fallback):
 1. Try requested format (markdown/text/article/structured)
 2. If empty, try trafilatura.extract() with markdown output (different heuristics)
 3. If still empty, try trafilatura.bare_extraction() for metadata
-4. If all Trafilatura fails, fall back to Scrapling's built-in extraction
+4. If all Trafilatura fails, fall back to markdownify (HTML->markdown) or raw text
 """
 import json
 import logging
@@ -31,7 +31,7 @@ def _is_probably_binary(data: bytes) -> bool:
 
 
 def _get_html_from_page(page) -> str | None:
-    """Extract raw HTML string from a Scrapling Response object."""
+    """Extract raw HTML string from a Response object."""
     if hasattr(page, 'body') and page.body:
         html_bytes = page.body
         return html_bytes.decode(page.encoding or 'utf-8', errors='replace')
@@ -197,22 +197,57 @@ def _extract_type(html: str, url: str, extraction_type: str) -> str | None:
 
 
 def _fallback_extract(page, extraction_type: str, css_selector: Optional[str]) -> list[str]:
-    """Fall back to Scrapling's built-in extraction (last resort)."""
+    """Fallback extraction: markdownify for markdown/html, raw text for text type.
+
+    Replaces scrapling's Convertor._extract_content with direct markdownify
+    and lxml usage. No scrapling dependency.
+    """
+    # Get raw HTML
+    html = getattr(page, 'content', '') or ''
+    if not html and getattr(page, 'body', None):
+        html = page.body.decode(
+            getattr(page, 'encoding', None) or 'utf-8', errors='replace'
+        )
+    if not html:
+        return [""]
+
+    # CSS selector narrowing
+    if css_selector:
+        try:
+            from lxml import html as lxml_html
+            from lxml.etree import tostring
+            tree = lxml_html.fromstring(html)
+            from lxml.cssselect import CSSSelector
+            sel = CSSSelector(css_selector)
+            matches = sel(tree)
+            if matches:
+                html = '\n'.join(
+                    tostring(m, encoding='unicode') for m in matches
+                )
+        except Exception as e:
+            logger.debug(f"CSS selector '{css_selector}' failed: {e}")
+
+    # Map extended types to what we can handle
+    if extraction_type == "html":
+        return [html]
+    if extraction_type == "text":
+        import re
+        # Strip tags for plain text
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<noscript[^>]*>.*?</noscript>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return [text] if text else [html]
+    # markdown, article, structured: use markdownify
     try:
-        from scrapling.core.shell import Convertor
+        from markdownify import markdownify
+        result = markdownify(html)
+        logger.info(f"Falling back to markdownify extraction (type={extraction_type})")
+        return [result] if result else [html]
     except ImportError:
-        # Scrapling unavailable (HTTP-only mode): return raw HTML as last resort
-        html = getattr(page, 'content', '') or ''
-        if not html and getattr(page, 'body', None):
-            html = page.body.decode(getattr(page, 'encoding', None) or 'utf-8', errors='replace')
-        return [html] if html else [""]
-    # Scrapling only knows markdown/html/text/raw: map our extended types
-    scrapling_type = "markdown" if extraction_type in ("article", "structured") else extraction_type
-    logger.info(f"Falling back to Scrapling extraction (type={scrapling_type})")
-    return list(Convertor._extract_content(
-        page, css_selector=css_selector,
-        extraction_type=scrapling_type, main_content_only=True,
-    ))
+        # markdownify not installed: return raw HTML
+        return [html]
 
 
 def extract_content_from_html(html: str, url: str = "", extraction_type: str = "markdown") -> str | None:
@@ -227,15 +262,14 @@ def extract_html_title(html: str) -> str:
 
 
 def extract_with_trafilatura(
-    page,  # Scrapling Response/Selector object
+    page,  # Response object (master_fetch.fetcher.Response or compatible)
     extraction_type: str = "markdown",
     css_selector: Optional[str] = None,
 ) -> list[str]:
-    """Use Trafilatura on a Scrapling response.
+    """Use Trafilatura on a Response object.
 
-    This is the drop-in replacement for Scrapling's Convertor._extract_content.
-    Uses a robust multi-stage extraction chain to maximize content quality.
-    Falls back to Scrapling's own extraction only if ALL Trafilatura methods fail.
+    Robust multi-stage extraction chain to maximize content quality.
+    Falls back to markdownify only if ALL Trafilatura methods fail.
     """
     try:
         # Check for binary content before decoding
@@ -247,7 +281,7 @@ def extract_with_trafilatura(
 
         html = _get_html_from_page(page)
         if html is None:
-            logger.warning("Cannot extract HTML from page object, falling back to Scrapling extractor")
+            logger.warning("Cannot extract HTML from page object, falling back to markdownify")
             return _fallback_extract(page, extraction_type, css_selector)
 
         page_url = page.url if hasattr(page, 'url') else ""
@@ -281,10 +315,10 @@ def extract_with_trafilatura(
                 logger.info(f"Requested type '{extraction_type}' failed, returning markdown fallback")
                 return [md]
 
-        # Total failure: fall back to Scrapling
-        logger.warning(f"All Trafilatura methods failed for {page_url}, falling back to Scrapling")
+        # Total failure: fall back to markdownify
+        logger.warning(f"All Trafilatura methods failed for {page_url}, falling back to markdownify")
         return _fallback_extract(page, extraction_type, css_selector)
 
     except Exception as e:
-        logger.warning(f"Trafilatura extraction crashed: {e}, falling back to Scrapling")
+        logger.warning(f"Trafilatura extraction crashed: {e}, falling back to markdownify")
         return _fallback_extract(page, extraction_type, css_selector)

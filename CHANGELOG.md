@@ -1,5 +1,52 @@
 # Changelog
 
+## [11.0.0] - 2026-07-21
+
+### Removed scrapling dependency entirely
+
+Hound no longer depends on scrapling. All scrapling functionality is replaced
+with hound's own modules using the underlying libraries directly (primp,
+patchright, browserforge, trafilatura, lxml, markdownify).
+
+**New modules:**
+- `fetcher.py` (18KB): Response class + HTTPSession (primp-based HTTP fetch
+  with TLS impersonation). Replaces scrapling's FetcherSession (curl_cffi).
+- `browser.py` (29KB): StealthyBrowser + DynamicBrowser (patchright-based).
+  Includes Cloudflare Turnstile solver, anti-detection stealth args,
+  fingerprint generation via browserforge, resource blocking. Replaces
+  scrapling's AsyncStealthySession + AsyncDynamicSession.
+- `extractor.py` (5KB): Content extraction using trafilatura (primary) +
+  markdownify (fallback). Replaces scrapling's Convertor._extract_content.
+
+**Dependency changes:**
+- `scrapling>=0.4.7` removed from core deps entirely
+- `curl_cffi`, `msgspec`, `protego`, `click`, `apify-fingerprint-datapoints`
+  removed from [all] extra (were scrapling transitive deps)
+- `markdownify>=1.2.0` added to core deps (HTML->markdown fallback)
+- `patchright>=1.50`, `playwright>=1.50`, `browserforge>=1.2.4` remain in [all]
+
+**What this means:**
+- No more scrapling dependency surprises (API changes, broken transitive deps)
+- Drop scrapling + ~15 transitive deps from the install
+- Full control over the fetch pipeline (can fix bugs without waiting for
+  scrapling releases)
+- Faster cold start (no scrapling import chain)
+- Smaller, cleaner dependency tree
+- The v10.5.0 graceful degradation code is now the primary path, not a fallback
+
+**Response class** mimics scrapling's interface: .status, .url, .headers,
+.body (bytes), .encoding, .content (decoded), .css() (CSS selector via lxml),
+.reason, .cookies. ElementWrapper provides ._root (lxml node) for
+trafilatura's CSS-selector narrowing path.
+
+**Cloudflare solver** ported from scrapling's StealthySessionMixin (~80 lines):
+detects challenge type (non-interactive, managed, interactive, embedded),
+calculates Turnstile checkbox coordinates from iframe bounding box, clicks
+with random delay, waits for challenge to clear. Standard Playwright page
+manipulation, no secret sauce.
+
+753 tests pass (29 new tests for the replacement modules).
+
 ## [10.5.0] - 2026-07-21
 
 ### Fixed: Termux/Android install + HTTP-only graceful degradation

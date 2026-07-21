@@ -247,9 +247,9 @@ def test_metasearch_resolves_hound_engine_names(monkeypatch):
 # ─── fetch_source_for_similar (stubbed transport) ───────────────────────────
 
 def test_fetch_source_for_similar_returns_empty_on_failure(monkeypatch):
-    # scrapling import path fails -> ("", "")
+    # fetcher import path fails -> ("", "")
     import sys
-    real = sys.modules.get("scrapling.engines.static")
-    monkeypatch.setitem(sys.modules, "scrapling.engines.static", None)
+    real = sys.modules.get("master_fetch.fetcher")
+    monkeypatch.setitem(sys.modules, "master_fetch.fetcher", None)
     out = asyncio.run(fetch_source_for_similar("https://example.com"))
     assert out == ("", "")

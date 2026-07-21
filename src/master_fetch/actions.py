@@ -5,7 +5,7 @@ tier and runs the actions on the page after navigation, before content
 extraction. This reaches content behind a click, a search form, a "load more"
 button, or infinite scroll — cases a plain fetch can't.
 
-Implementation: scrapling's stealthy fetch accepts a `page_action` callable that
+Implementation: patchright's stealthy fetch accepts a `page_action` callable that
 receives the Playwright AsyncPage after goto and is awaited. We build that
 callable from a validated list of action dicts and thread it through
 smart_fetch -> _force_fetch -> stealthy_fetch -> session.fetch(page_action=...).

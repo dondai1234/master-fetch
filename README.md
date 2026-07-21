@@ -47,6 +47,19 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 
 ---
 
+## ✨ New in 11.0.0
+
+**Scrapling dependency removed entirely. Hound now uses primp + patchright directly.**
+
+- 🐍 **No more scrapling.** All scrapling functionality replaced with hound's own modules: `fetcher.py` (primp-based HTTP), `browser.py` (patchright-based browser + Cloudflare solver), `extractor.py` (trafilatura + markdownify).
+- 📦 **Smaller install.** Drop scrapling + ~15 transitive deps (curl_cffi, msgspec, protego, click, etc.).
+- 🔧 **Full control.** Fix bugs and add features without waiting for scrapling releases. The entire fetch pipeline is now hound's own code.
+- 🚀 **Faster cold start.** No scrapling import chain.
+- 🛡️ **Cloudflare solver ported.** The Turnstile solver (~80 lines of standard Playwright page manipulation) is now hound's own.
+- 🔧 **753 tests** (29 new tests for the replacement modules).
+
+---
+
 ## ✨ New in 10.5.0
 
 **Termux/Android support + HTTP-only graceful degradation.**

@@ -42,17 +42,13 @@ def _extract_netloc(url: str) -> str:
 
 
 async def _fetch_robots_txt(domain: str) -> str | None:
-    """Fetch robots.txt for a domain using curl_cffi (async, impersonated).
+    """Fetch robots.txt for a domain using primp (async, impersonated).
 
     Returns the raw text content or None if unreachable.
     """
     try:
-        from scrapling.engines.static import FetcherSession
-        async with FetcherSession() as sess:
-            # sess.get is a coroutine returning a Response directly (not a tuple).
-            # Previously this was wrapped in asyncio.to_thread around a coroutine,
-            # which always raised and silently fell through to the urllib fallback —
-            # defeating the impersonated-fetch path entirely.
+        from master_fetch.fetcher import HTTPSession
+        async with HTTPSession(stealthy_headers=False, retries=1) as sess:
             response = await sess.get(
                 f"https://{domain}/robots.txt", timeout=_FETCH_TIMEOUT,
             )
@@ -62,9 +58,9 @@ async def _fetch_robots_txt(domain: str) -> str | None:
                     getattr(response, 'encoding', None) or 'utf-8', errors='replace',
                 )
     except ImportError:
-        logger.debug(f"scrapling not available for robots.txt fetch of {domain}, using fallback")
+        logger.debug(f"fetcher not available for robots.txt fetch of {domain}, using fallback")
     except Exception as e:
-        logger.debug(f"Scrapling robots.txt fetch failed for {domain}: {e}")
+        logger.debug(f"Robots.txt fetch failed for {domain}: {e}")
 
     # Fallback: urllib in thread (no impersonation, but works for basic sites)
     try:

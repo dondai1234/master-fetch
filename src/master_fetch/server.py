@@ -83,12 +83,11 @@ logger = logging.getLogger("master-fetch.server")
 from master_fetch import __version__
 from pydantic import BaseModel, Field
 
-# Lazy imports: scrapling pulls in playwright (~5s load). Defer until first use
-# so the MCP server responds to initialize immediately.
-_scrapling = None
-# Set when scrapling import fails (e.g. playwright not installable on Termux).
-# When set, hound runs in HTTP-only mode: fetch + search + crawl work via httpx
-# + trafilatura, but stealthy browser escalation and screenshot are disabled.
+# Lazy imports: browser deps (patchright) pull in playwright (~5s load). Defer
+# until first use so the MCP server responds to initialize immediately.
+# Set when browser import fails (e.g. patchright not installable on Termux).
+# When set, hound runs in HTTP-only mode: fetch + search + crawl work via primp
+# + httpx + trafilatura, but stealthy browser escalation and screenshot are disabled.
 _scrapling_import_error: Optional[str] = None
 
 # Module-level type placeholders — needed because FastMCP evaluates string
@@ -99,73 +98,19 @@ FollowRedirects: Any = None
 ImpersonateType: Any = None
 
 
-def _get_scrapling():
-    """Import scrapling on first call. Cached for subsequent calls.
-
-    Returns the scrapling namespace, or None if scrapling (or its transitive
-    deps like playwright) can't be imported. When None is returned, callers
-    should use the httpx/trafilatura fallback path.
-    """
-    global _scrapling, _scrapling_import_error
-    global SetCookieParam, SelectorWaitStates, FollowRedirects, ImpersonateType
-    if _scrapling is None and _scrapling_import_error is None:
-        try:
-            from scrapling.core.shell import Convertor
-            from scrapling.engines.toolbelt.custom import Response as _SResponse
-            from scrapling.engines.static import ImpersonateType as _Imp
-            from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
-            from scrapling.core._types import SetCookieParam as _SCP, SelectorWaitStates as _SWS, FollowRedirects as _FR
-            from types import SimpleNamespace
-            _scrapling = SimpleNamespace()
-            _scrapling.Convertor = Convertor
-            _scrapling.Response = _SResponse
-            _scrapling.ImpersonateType = _Imp
-            _scrapling.FetcherSession = FetcherSession
-            _scrapling.AsyncDynamicSession = AsyncDynamicSession
-            _scrapling.AsyncStealthySession = AsyncStealthySession
-            _scrapling.SetCookieParam = _SCP
-            _scrapling.SelectorWaitStates = _SWS
-            _scrapling.FollowRedirects = _FR
-            # Also set module-level placeholders so function signature evaluation works
-            SetCookieParam = _SCP  # type: ignore[assignment]
-            SelectorWaitStates = _SWS
-            FollowRedirects = _FR
-            ImpersonateType = _Imp
-        except ImportError as e:
-            _scrapling_import_error = str(e)
-            logger.warning(
-                "Scrapling/browser deps unavailable (%s). "
-                "Running in HTTP-only mode: fetch + search + crawl work, "
-                "stealthy browser escalation and screenshot are disabled.",
-                str(e)[:200],
-            )
-    return _scrapling
-
-
 def _scrapling_available() -> bool:
-    """True if scrapling (and browser deps) are importable."""
-    return _get_scrapling() is not None
+    """True if browser deps (patchright) are importable.
 
-
-class _FallbackResponse:
-    """Minimal response object for HTTP-only mode (scrapling unavailable).
-
-    Mimics the subset of scrapling's Response interface that _translate_response
-    and extract_with_trafilatura access: .status, .url, .headers, .body,
-    .encoding, .content. The .css() method is a no-op stub so trafilatura's
-    css_selector path degrades gracefully.
+    Replaces the old scrapling availability check. Browser deps are needed
+    for stealthy fetch, dynamic fetch, and screenshot. HTTP fetch, search,
+    and crawl work without them.
     """
-    def __init__(self, url: str, status: int, headers: dict, body: bytes, encoding: str = "utf-8"):
-        self.url = url
-        self.status = status
-        self.headers = headers
-        self.body = body
-        self.encoding = encoding
-        self.content = body.decode(encoding, errors="replace") if body else ""
-        self.status_message = ""
-
-    def css(self, selector: str):  # type: ignore[override]
-        return []
+    from master_fetch.browser import check_browser_available, browser_import_error
+    global _scrapling_import_error
+    if check_browser_available():
+        return True
+    _scrapling_import_error = browser_import_error()
+    return False
 
 
 async def _fallback_http_get(
@@ -175,29 +120,19 @@ async def _fallback_http_get(
     cookies: Optional[Dict[str, str]] = None,
     timeout: int = 30,
     verify: bool = True,
-) -> _FallbackResponse:
-    """HTTP fetch via httpx when scrapling's FetcherSession is unavailable."""
-    import httpx
-    client_kwargs: Dict[str, Any] = {"follow_redirects": True}
-    if proxy:
-        client_kwargs["proxy"] = proxy
-    if not verify:
-        client_kwargs["verify"] = False
-    async with httpx.AsyncClient(**client_kwargs) as client:
-        resp = await client.get(
-            url, headers=headers, cookies=cookies, timeout=timeout,
-        )
-        return _FallbackResponse(
-            url=str(resp.url),
-            status=resp.status_code,
-            headers=dict(resp.headers),
-            body=resp.content,
-            encoding=resp.encoding or "utf-8",
-        )
+):
+    """HTTP fetch via primp (TLS impersonation). Used as the HTTP tier.
+
+    Returns a Response object from master_fetch.fetcher.
+    """
+    from master_fetch.fetcher import http_get
+    return await http_get(
+        url, proxy=proxy, headers=headers, cookies=cookies, timeout=timeout,
+    )
 
 if TYPE_CHECKING:
-    from scrapling.engines.toolbelt.custom import Response as _ScraplingResponse
-    from scrapling.fetchers import FetcherSession, AsyncDynamicSession, AsyncStealthySession
+    from master_fetch.fetcher import Response as _HoundResponse
+    from master_fetch.browser import StealthyBrowser, DynamicBrowser
     from master_fetch.search import SearchResponseModel
     from mcp.server.fastmcp import Image
     from mcp.types import ImageContent, TextContent
@@ -943,7 +878,6 @@ def _translate_response(
                 extracted_type="text", error=f"image_ocr_failed: {str(e)[:160]}",
             )
 
-    s = _get_scrapling()
     content: list[str]
     
     # Reddit optimization: use custom parser for old.reddit.com listings
@@ -954,19 +888,16 @@ def _translate_response(
         and extraction_type in ("markdown", "text")
     )
 
-    def _convertor_extract():
-        """Extract content via scrapling's Convertor (scrapling-only path)."""
-        return list(
-            s.Convertor._extract_content(
-                page,
-                css_selector=css_selector,
-                extraction_type=extraction_type if extraction_type in ("markdown", "html", "text") else "markdown",
-                main_content_only=main_content_only,
-            )
+    def _hound_extract():
+        """Extract content via hound's own extractor (trafilatura + markdownify)."""
+        from master_fetch.extractor import extract_content
+        return extract_content(
+            page, extraction_type=extraction_type,
+            css_selector=css_selector, main_content_only=main_content_only,
         )
 
     def _trafilatura_extract():
-        """Extract content via trafilatura (works without scrapling)."""
+        """Extract content via trafilatura."""
         from master_fetch.trafilatura_extractor import extract_with_trafilatura
         return extract_with_trafilatura(page, extraction_type=extraction_type, css_selector=css_selector)
 
@@ -989,35 +920,21 @@ def _translate_response(
             parsed = parse_old_reddit_listing(html_text)
             if parsed:  # parser found real posts -> use structured markdown
                 content = [parsed]
-            elif s is not None:
-                content = _convertor_extract()
             else:
-                content = _trafilatura_extract() if use_trafilatura else _raw_extract()
+                content = _hound_extract()
         except Exception:
-            if s is not None:
-                content = _convertor_extract()
-            else:
-                content = _trafilatura_extract() if use_trafilatura else _raw_extract()
-    elif s is not None and (not use_trafilatura or extraction_type not in ("markdown", "text", "article", "structured")):
-        # Scrapling available and trafilatura not requested (or wrong type):
-        content = _convertor_extract()
+            content = _hound_extract()
     elif use_trafilatura and extraction_type in ("markdown", "text", "article", "structured"):
-        # Trafilatura-first path (works with or without scrapling)
+        # Trafilatura-first path
         content = _trafilatura_extract()
         if (not content or content == [""] or content == ["\n"]):
-            if s is not None:
-                content = _convertor_extract()
-            else:
+            content = _hound_extract()
+            if (not content or content == [""] or content == ["\n"]):
                 content = _raw_extract()
-    elif s is not None:
-        content = _convertor_extract()
     else:
-        # No scrapling, no trafilatura request: try trafilatura anyway, then raw
-        try:
-            content = _trafilatura_extract()
-            if not content or content == [""] or content == ["\n"]:
-                content = _raw_extract()
-        except Exception:
+        # Non-trafilatura path: use hound extractor (markdownify + lxml)
+        content = _hound_extract()
+        if (not content or content == [""] or content == ["\n"]):
             content = _raw_extract()
 
     if page.status == 503 and fetcher_used == "stealthy":
@@ -1217,7 +1134,7 @@ class MasterFetchServer:
         """
         if not _scrapling_available():
             raise RuntimeError(
-                f"Browser unavailable: {_scrapling_import_error or 'scrapling not importable'}. "
+                f"Browser unavailable: {_scrapling_import_error or 'patchright not importable'}. "
                 "Install browser deps: pip install hound-mcp[all] "
                 "(or pip install playwright patchright)."
             )
@@ -1282,14 +1199,17 @@ class MasterFetchServer:
         async def _warm():
             if not _scrapling_available():
                 return  # HTTP-only mode, no browser to prewarm
-            # Run the (synchronous, ~5s) scrapling/playwright import in a WORKER
-            # THREAD, not on the event loop. A bare `_get_scrapling()` call here
+            # Run the (synchronous, ~5s) patchright import in a WORKER
+            # THREAD, not on the event loop. A bare import here
             # freezes the single-threaded asyncio loop for the whole import, which
             # starves `server.run` so the `initialize` handshake never gets its
             # reply out — the MCP client sees a silent dead hang and reports
             # "failed to start". asyncio.wait_for cannot interrupt a synchronous
             # blocking call, so this matters even with the 30s cap below.
-            await asyncio.to_thread(_get_scrapling)
+            def _import_browser():
+                from master_fetch.browser import check_browser_available
+                check_browser_available()  # triggers import + cache
+            await asyncio.to_thread(_import_browser)
             await self._ensure_auto_session("stealthy")
         try:
             await asyncio.wait_for(_warm(), timeout=30.0)
@@ -1577,7 +1497,7 @@ class MasterFetchServer:
         if not _scrapling_available():
             raise RuntimeError(
                 f"Browser sessions require browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'scrapling not importable'}. "
+                f"{_scrapling_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
         session_id = session_id or uuid4().hex[:12]
@@ -1593,6 +1513,7 @@ class MasterFetchServer:
         validate_headers(extra_headers)
         validate_css_selector(wait_selector)
 
+        from master_fetch.browser import StealthyBrowser, DynamicBrowser
         common_kwargs: Dict[str, Any] = dict(
             wait=wait, proxy=proxy, locale=locale, timeout=timeout, cookies=cookies,
             cdp_url=cdp_url, headless=headless, block_ads=True, max_pages=max_pages,
@@ -1602,16 +1523,14 @@ class MasterFetchServer:
             wait_selector_state=wait_selector_state,
         )
 
-        s = _get_scrapling()
-        session: Union[s.AsyncDynamicSession, s.AsyncStealthySession]
         if session_type == "stealthy":
-            session = s.AsyncStealthySession(
+            session = StealthyBrowser(
                 **common_kwargs, hide_canvas=hide_canvas, block_webrtc=block_webrtc,
                 allow_webgl=allow_webgl, solve_cloudflare=solve_cloudflare,
                 additional_args=additional_args,
             )
         else:
-            session = s.AsyncDynamicSession(**common_kwargs)
+            session = DynamicBrowser(**common_kwargs)
 
         entry = _SessionEntry(session=session, session_type=session_type)
         async with self._sessions_lock:
@@ -1683,7 +1602,7 @@ class MasterFetchServer:
         if not _scrapling_available():
             raise RuntimeError(
                 f"Screenshot requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'scrapling not importable'}. "
+                f"{_scrapling_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -1851,63 +1770,41 @@ class MasterFetchServer:
         normalized_auth = _normalize_credentials(auth)
         use_tf = use_trafilatura and extraction_type in ("markdown", "text", "article", "structured")
 
-        s = _get_scrapling()
-        if s is not None:
-            async with s.FetcherSession() as session:
-                timed_tasks = [
-                    _timed(session.get(
-                        url, auth=normalized_auth, proxy=proxy, http3=http3, verify=verify,
-                        params=params, headers=headers, cookies=cookies, timeout=timeout,
-                        retries=retries, proxy_auth=normalized_proxy_auth, retry_delay=retry_delay,
-                        impersonate=impersonate, max_redirects=max_redirects,
-                        follow_redirects=follow_redirects, stealthy_headers=stealthy_headers,
-                    ))
-                    for url in urls
-                ]
-                timed_responses = await gather(*timed_tasks, return_exceptions=True)
-                results = []
-                for i, resp in enumerate(timed_responses):
-                    if isinstance(resp, BaseException):
-                        results.append(ResponseModel(
-                            url=urls[i], status=0,
-                            content=[f"[Fetch error: {redact_api_key(str(resp)[:200])}]"],
-                            fetcher_used="http", error=redact_api_key(str(resp)[:200]),
-                        ))
-                    else:
-                        page, elapsed = resp
-                        results.append(_annotate_quality(
-                                _translate_response(
-                                    page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
-                                )
-                            ))
-        else:
-            # HTTP-only fallback (scrapling unavailable — e.g. playwright not
-            # installable on Termux/Android). Uses httpx directly.
+        from master_fetch.fetcher import HTTPSession
+        http_proxy = proxy if isinstance(proxy, str) else None
+        async with HTTPSession(
+            impersonate=impersonate or "chrome131",
+            proxy=http_proxy,
+            stealthy_headers=stealthy_headers,
+            retries=retries,
+            retry_delay=retry_delay,
+            timeout=max(1, min(int(timeout), 30)),
+        ) as session:
+            timed_tasks = [
+                _timed(session.get(
+                    url, headers=headers, cookies=cookies if isinstance(cookies, dict) else None,
+                    timeout=max(1, min(int(timeout), 30)), retries=retries,
+                    proxy=http_proxy, follow_redirects=follow_redirects,
+                    max_redirects=max_redirects, params=params,
+                ))
+                for url in urls
+            ]
+            timed_responses = await gather(*timed_tasks, return_exceptions=True)
             results = []
-            for url in urls:
-                t0 = now()
-                try:
-                    http_proxy = proxy if isinstance(proxy, str) else None
-                    http_cookies = cookies if isinstance(cookies, dict) else None
-                    page = await _fallback_http_get(
-                        url, proxy=http_proxy, headers=headers,
-                        cookies=http_cookies, timeout=max(1, min(int(timeout), 30)),
-                        verify=verify,
-                    )
-                    elapsed = (now() - t0) * 1000
-                    results.append(_annotate_quality(
-                        _translate_response(
-                            page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
-                        )
-                    ))
-                except Exception as e:
-                    elapsed = (now() - t0) * 1000
+            for i, resp in enumerate(timed_responses):
+                if isinstance(resp, BaseException):
                     results.append(ResponseModel(
-                        url=url, status=0,
-                        content=[f"[Fetch error: {redact_api_key(str(e)[:200])}]"],
-                        fetcher_used="http", error=redact_api_key(str(e)[:200]),
-                        duration_ms=elapsed,
+                        url=urls[i], status=0,
+                        content=[f"[Fetch error: {redact_api_key(str(resp)[:200])}]"],
+                        fetcher_used="http", error=redact_api_key(str(resp)[:200]),
                     ))
+                else:
+                    page, elapsed = resp
+                    results.append(_annotate_quality(
+                            _translate_response(
+                                page, extraction_type, css_selector, main_content_only, use_tf, "http", elapsed,
+                            )
+                        ))
         successful = sum(1 for r in results if r.status < 400 and not r.error)
         return BulkResponseModel(results=results, total=len(results), successful=successful)
 
@@ -2045,7 +1942,7 @@ class MasterFetchServer:
         if not _scrapling_available():
             raise RuntimeError(
                 f"Dynamic fetch requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'scrapling not importable'}. "
+                f"{_scrapling_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -2064,8 +1961,8 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks, return_exceptions=True)
         else:
-            s = _get_scrapling()
-            async with s.AsyncDynamicSession(
+            from master_fetch.browser import DynamicBrowser
+            async with DynamicBrowser(
                 wait=wait, proxy=proxy, locale=locale, timeout=timeout,
                 cookies=cookies, cdp_url=cdp_url, headless=headless,
                 block_ads=True, max_pages=len(urls), useragent=useragent,
@@ -2177,7 +2074,7 @@ class MasterFetchServer:
         if not _scrapling_available():
             raise RuntimeError(
                 f"Stealthy fetch requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'scrapling not importable'}. "
+                f"{_scrapling_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -2270,7 +2167,7 @@ class MasterFetchServer:
         if not _scrapling_available():
             raise RuntimeError(
                 f"Stealthy fetch requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'scrapling not importable'}. "
+                f"{_scrapling_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -2290,8 +2187,8 @@ class MasterFetchServer:
             ]
             timed_responses = await gather(*timed_tasks, return_exceptions=True)
         else:
-            s = _get_scrapling()
-            async with s.AsyncStealthySession(
+            from master_fetch.browser import StealthyBrowser
+            async with StealthyBrowser(
                 wait=wait, proxy=proxy, locale=locale, cdp_url=cdp_url,
                 timeout=timeout, cookies=cookies, headless=headless,
                 block_ads=True, useragent=useragent, timezone_id=timezone_id,
