@@ -11,6 +11,11 @@
   repo name are treated as case-insensitive for `github.com` URLs, while branch
   and file-path casing remains unchanged. Credential-bearing URLs skip the
   GitHub-specific folding.
+- `detect_page_type()` no longer classifies a page as a paywall solely because
+  raw HTML contains the bare token `paywall`. Concrete visible subscription
+  prompts and active, exact paywall data attributes remain signals; false-like
+  values, foreign attribute names, and examples inside metadata, scripts,
+  styles, fallbacks, templates, or comments are ignored.
 
 ## [11.1.6] - 2026-07-21
 

@@ -2,9 +2,8 @@
 signals computed for every fetch so an agent gets trust + currency + the next
 step without a second call.
 
-All functions are dependency-free (stdlib + regex) and run in microseconds on
-already-extracted HTML / the URL string, so the envelope adds negligible cost
-to every response.
+All functions use only the standard library and run on already-extracted HTML /
+the URL string, keeping the envelope self-contained and low-overhead.
 
 Design principles:
 - CONSERVATIVE over RECALL. A wrong ``is_official=True`` or a mislabelled
@@ -21,6 +20,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, date, timezone
+from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
@@ -190,7 +190,98 @@ _DOCS_MARKERS = ("mkdocs", "docusaurus", "readthedocs", "sphinx-document",
 _PAYWALL_MARKERS = ("subscribe to continue", "subscribe to read", "this article is for subscribers",
                     "create a free account to continue", "sign in to continue reading",
                     "you've reached your free article limit", "subscriber-only content",
-                    "premium content", "paywall")
+                    "premium content")
+# Explicit HTML data attributes are a structural paywall signal. Deliberately do
+# not match the bare word "paywall": it can appear in ordinary README links,
+# explanatory copy, scripts, or metadata. Parse HTML so attribute names are
+# matched exactly and attribute values cannot impersonate names.
+_PAYWALL_ATTRIBUTE_NAMES = frozenset({
+    "data-paywall",
+    "data-content-gate",
+    "data-subscription-wall",
+})
+_FALSE_PAYWALL_ATTRIBUTE_VALUES = frozenset({
+    "0", "false", "no", "off", "disabled", "none", "null",
+})
+_PAYWALL_IGNORED_TAGS = frozenset({"script", "style", "noscript", "template"})
+_PAYWALL_METADATA_TAGS = frozenset({"base", "link", "meta"})
+_PAYWALL_BLOCK_TAGS = frozenset({
+    "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+    "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+    "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+    "table", "td", "th", "tr", "ul",
+})
+
+
+class _PaywallEvidenceParser(HTMLParser):
+    """Collect visible text and active, exact paywall attributes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.visible_text: list[str] = []
+        self.has_active_attribute = False
+        self._ignored_stack: list[str] = []
+
+    def _inspect_attributes(self, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name.lower() not in _PAYWALL_ATTRIBUTE_NAMES:
+                continue
+            normalized = value.strip().lower() if value is not None else None
+            if normalized not in _FALSE_PAYWALL_ATTRIBUTE_VALUES:
+                self.has_active_attribute = True
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self._ignored_stack:
+            if tag in _PAYWALL_IGNORED_TAGS:
+                self._ignored_stack.append(tag)
+            return
+        if tag in _PAYWALL_IGNORED_TAGS:
+            self._ignored_stack.append(tag)
+            return
+        if tag not in _PAYWALL_METADATA_TAGS:
+            self._inspect_attributes(attrs)
+        if tag in _PAYWALL_BLOCK_TAGS:
+            self.visible_text.append(" ")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if (
+            not self._ignored_stack
+            and tag not in _PAYWALL_IGNORED_TAGS
+            and tag not in _PAYWALL_METADATA_TAGS
+        ):
+            self._inspect_attributes(attrs)
+            if tag in _PAYWALL_BLOCK_TAGS:
+                self.visible_text.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._ignored_stack:
+            if tag in self._ignored_stack:
+                while self._ignored_stack.pop() != tag:
+                    pass
+            return
+        if tag in _PAYWALL_BLOCK_TAGS:
+            self.visible_text.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        if not self._ignored_stack:
+            self.visible_text.append(data)
+
+
+def _paywall_evidence(html: str) -> tuple[str, bool]:
+    """Return visible page text and whether an active paywall attribute exists."""
+    parser = _PaywallEvidenceParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        # Malformed upstream HTML must not break the fetch response.
+        return "", False
+    return " ".join("".join(parser.visible_text).split()), parser.has_active_attribute
+
+
 # A redirect via <meta http-equiv=refresh> or a JS location.href assignment.
 _META_REFRESH_RE = re.compile(
     r'<meta\b[^>]*?http-equiv=["\']refresh["\'][^>]*?content=["\'][^"\']*url=',
@@ -267,8 +358,12 @@ def detect_page_type(
     if _META_REFRESH_RE.search(low) or (_JS_REDIRECT_RE.search(low) and extracted_text_len < 500):
         return "redirect"
 
-    # Paywall phrases (strong, specific).
-    if any(m in low for m in _PAYWALL_MARKERS):
+    # Parse visible text and exact structural attributes. Raw-HTML prefilters are
+    # unsafe here because entities and inline tags can split a real signal.
+    visible_text, has_active_paywall_attribute = _paywall_evidence(html)
+    if any(marker in visible_text.lower() for marker in _PAYWALL_MARKERS):
+        return "paywall"
+    if has_active_paywall_attribute:
         return "paywall"
 
     # Forum / Q&A / docs markers (substring match in the raw HTML).
