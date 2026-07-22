@@ -99,7 +99,6 @@ If `hound` ever breaks (a failed update, a locked launcher), recover with `pytho
 
 Hound can run in Docker with HTTP mode, ideal for:
 - Running on a server
-- Integrating with Home Assistant
 - Isolated deployment
 
 ### Quick start with Docker Compose
@@ -135,10 +134,6 @@ For MCP clients that support HTTP (Claude Code, Open WebUI):
 ```
 http://localhost:8765/mcp
 ```
-
-### Home Assistant Integration
-
-A Home Assistant custom integration is included in `home-assistant/`. See [home-assistant/README.md](home-assistant/README.md) for installation and usage instructions.
 
 ---
 
