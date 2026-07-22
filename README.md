@@ -95,6 +95,53 @@ If `hound` ever breaks (a failed update, a locked launcher), recover with `pytho
 
 ---
 
+## 🐳 Docker
+
+Hound can run in Docker with HTTP mode, ideal for:
+- Running on a server
+- Integrating with Home Assistant
+- Isolated deployment
+
+### Quick start with Docker Compose
+
+```bash
+git clone https://github.com/dondai1234/master-fetch.git
+cd master-fetch
+docker-compose up -d
+```
+
+Hound will be available at `http://localhost:8765/mcp` as an HTTP MCP server.
+
+### Manual Docker build
+
+```bash
+docker build -t hound-mcp .
+docker run -p 8765:8765 hound-mcp
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOUND_HTTP_PORT` | 8765 | HTTP port for MCP server |
+| `HOUND_BROWSER_IDLE_TIMEOUT` | 300 | Seconds before browser closes (0 = never) |
+| `HTTP_PROXY` | - | Proxy for HTTP requests |
+| `HTTPS_PROXY` | - | Proxy for HTTPS requests |
+
+### Connecting to HTTP mode
+
+For MCP clients that support HTTP (Claude Code, Open WebUI):
+
+```
+http://localhost:8765/mcp
+```
+
+### Home Assistant Integration
+
+A Home Assistant custom integration is included in `home-assistant/`. See [home-assistant/README.md](home-assistant/README.md) for installation and usage instructions.
+
+---
+
 ## 🧰 The 6 tools
 
 | Tool | One-liner |
@@ -121,7 +168,7 @@ No API key, no account, no third-party service. `smart_search` runs **10 keyless
 - 🎯 **Cross-backend consensus**: a URL returned by several independent indexes gets a consensus boost: a free authority signal from merging, no extra fetches. Every result carries `relevance_score` (0–1), `fetch_relevance` (high/med/low), and `engines_consensus`.
 - 🔍 **`find_similar`**: pass `url=`; Hound fetches a page you like, derives a query, and reranks candidates against that source page. Exa's find-similar, local.
 - 🛡️ **Never dead**: a diversity quorum waits for at least 3 backends to contribute before returning, so a single backend's bias or rate-limit can't dominate. A backend that CAPTCHAs or rate-limits is circuit-broken for 60s and carried by the others. `engine_blocked` in the response reports which ones cooled down.
-- 📊 **Filters**: `site` / `exclude_sites` (domain include/exclude), `location` / `language` / `region` (geo), `page` (0–10), `freshness` (day | week | month | year). Default 6 results. A quality filter drops low-relevance results instead of padding to the max with garbage.
+- 📊 **Filters**: `site` / `exclude_sites` (domain include/exclusion), `location` / `language` / `region` (geo), `page` (0–10), `freshness` (day | week | month | year). Default 6 results. A quality filter drops low-relevance results instead of padding to the max with garbage.
 - 📈 **`related_queries`**: follow-up queries mined from result titles + snippets (no LLM). Search one to refine a broad query.
 
 Search is **100% HTTP**: it never touches the browser (the single Patchright browser is `smart_fetch`'s alone).
