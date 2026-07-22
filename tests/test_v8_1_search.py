@@ -151,6 +151,50 @@ def test_normalize_dedup_collapses_tracking_variants():
     assert a == b  # both tracking-only -> same canonical URL -> deduped across backends
 
 
+def test_normalize_github_repo_identity_casefolds_owner_and_repo_only():
+    assert _normalize_url("https://github.com/NousResearch/Hermes-Agent") == (
+        "https://github.com/nousresearch/hermes-agent"
+    )
+    # www.github.com gets the same GitHub path handling, but remains a distinct
+    # host: alias collapsing would be a separate host canonicalization policy.
+    assert _normalize_url("https://www.github.com/NousResearch/Hermes-Agent") == (
+        "https://www.github.com/nousresearch/hermes-agent"
+    )
+    assert _normalize_url("https://github.com/NousResearch/Hermes-Agent") != (
+        _normalize_url("https://www.github.com/NousResearch/Hermes-Agent")
+    )
+
+
+def test_normalize_github_preserves_case_after_repo_identity():
+    assert _normalize_url("https://github.com/NousResearch/Hermes-Agent/tree/Main") != (
+        _normalize_url("https://github.com/nousresearch/hermes-agent/tree/main")
+    )
+    assert _normalize_url("https://github.com/NousResearch/Hermes-Agent/blob/main/Docs/Readme.md") != (
+        _normalize_url("https://github.com/nousresearch/hermes-agent/blob/main/docs/readme.md")
+    )
+
+
+def test_normalize_github_skips_repo_casefolding_when_userinfo_is_present():
+    assert _normalize_url("https://User:Secret@github.com/NousResearch/Hermes-Agent") != (
+        _normalize_url("https://user:secret@github.com/nousresearch/hermes-agent")
+    )
+
+
+def test_normalize_github_keeps_ports_and_encoded_segments_conservative():
+    assert _normalize_url("https://github.com:443/NousResearch/Hermes-Agent") != (
+        _normalize_url("https://github.com/nousresearch/hermes-agent")
+    )
+    assert _normalize_url("https://github.com/%4EousResearch/Hermes-Agent") != (
+        _normalize_url("https://github.com/nousresearch/hermes-agent")
+    )
+
+
+def test_normalize_non_github_paths_remain_case_sensitive():
+    assert _normalize_url("https://example.com/Docs/Readme") != (
+        _normalize_url("https://example.com/docs/readme")
+    )
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 def _TR(title, href, body=""):

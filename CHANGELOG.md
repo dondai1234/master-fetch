@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed: GitHub repository case variants now deduplicate in smart_search
+
+`smart_search` now treats the owner and repository portions of ordinary GitHub
+URLs as case-insensitive when merging results from search backends. This combines
+consensus for the same repository when backends disagree only on owner/repo
+casing, while leaving branch and file-path casing unchanged. Known GitHub system
+routes such as `/topics` and `/settings` are excluded from repository-specific
+case folding. Credential-bearing URLs skip the GitHub-specific path rule, and
+other hosts retain the existing case-sensitive path behavior.
+
 ## [11.1.6] - 2026-07-21
 
 ### Fixed: smart_crawl does not bypass Cloudflare on protected sites
