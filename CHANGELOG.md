@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `detect_page_type()` no longer classifies a page as a paywall solely because
+  raw HTML contains the bare token `paywall`. Concrete visible subscription
+  prompts and active, exact paywall data attributes remain signals; false-like
+  values, foreign attribute names, and examples inside metadata, scripts,
+  styles, fallbacks, templates, or comments are ignored. Visible prompts remain
+  detectable across character references and inline formatting boundaries.
+
 ## [11.1.6] - 2026-07-21
 
 ### Fixed: smart_crawl does not bypass Cloudflare on protected sites

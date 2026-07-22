@@ -128,8 +128,96 @@ def test_page_type_article_with_many_links_not_list():
 
 
 def test_page_type_paywall():
-    html = "<main><p>Subscribe to continue reading this article.</p></main>"
+    html = "<main><p>Subscribe <strong>to continue</strong> reading this article.</p></main>"
     assert detect_page_type(html, "https://x.com", "text/html", 80) == "paywall"
+
+
+def test_page_type_paywall_phrase_remains_a_paywall():
+    html = "<main><p>This article is for subscribers.</p></main>"
+    assert detect_page_type(html, "https://x.com", "text/html", 80) == "paywall"
+
+
+def test_page_type_encoded_or_inline_split_paywall_phrase_is_detected():
+    html_values = (
+        "<article>subscr&#105;be to continue</article>",
+        "<article>Sub<strong>scribe</strong> to continue</article>",
+        "<article>Subscribe <em>to</em> <span>continue</span></article>",
+        "<article>This article is for sub<strong>scribers</strong></article>",
+        (
+            "<template><noscript>hidden</template></noscript>"
+            "<article>Subscribe to continue</article>"
+        ),
+    )
+    for html in html_values:
+        assert detect_page_type(html, "https://x.com", "text/html", 80) == "paywall"
+
+
+def test_page_type_does_not_join_words_across_block_boundaries():
+    html = "<article><p>Sub</p><p>scribe to continue.</p></article>"
+    assert detect_page_type(html, "https://x.com", "text/html", 80) == "article"
+
+
+def test_page_type_visible_paywall_detector_explanation_is_not_a_paywall():
+    html = "<article><p>The paywall detector labels subscription prompts.</p></article>"
+    assert detect_page_type(html, "https://x.com", "text/html", 80) == "article"
+
+
+def test_page_type_readme_login_paywall_link_is_not_a_paywall():
+    html = '<article><a href="/login/paywall">login/paywall</a><p>Project README.</p></article>'
+    assert detect_page_type(html, "https://github.com/dondai1234/master-fetch", "text/html", 80) == "article"
+
+
+def test_page_type_script_and_meta_paywall_mentions_are_not_a_paywall():
+    html = (
+        '<meta name="description" data-paywall="true" '
+        'content="subscribe to continue; paywall detector docs">'
+        '<link rel="alternate" data-content-gate="active">'
+        '<base data-subscription-wall="true">'
+        '<script>const marker = "<div data-paywall>";</script>'
+        '<article><p>Documentation.</p></article>'
+    )
+    assert detect_page_type(html, "https://x.com", "text/html", 80) == "article"
+
+
+def test_page_type_paywall_phrase_in_nonvisible_markup_is_not_a_paywall():
+    html = (
+        '<script>const prompt = "subscribe to continue";</script>'
+        '<style>.prompt::after { content: "subscribe to read"; }</style>'
+        '<noscript>Sign in to continue reading.</noscript>'
+        '<template><div data-paywall>Subscriber-only content.</div></template>'
+        '<!-- <div data-paywall="true">subscribe to continue</div> -->'
+        '<article><p>Documentation.</p></article>'
+    )
+    assert detect_page_type(html, "https://x.com", "text/html", 80) == "article"
+
+
+def test_page_type_disabled_or_prefixed_structural_markers_are_not_paywalls():
+    attributes = (
+        'data-paywall="false"',
+        "data-content-gate='off'",
+        "data-subscription-wall=0",
+        'data-paywall-state="open"',
+        'data-content-gate-config="enabled"',
+        'x-data-paywall="true"',
+        'aria-data-paywall="true"',
+        'class="data-paywall enabled"',
+        'title="data-content-gate=true"',
+    )
+    for attribute in attributes:
+        html = f"<article><div {attribute}>Public content.</div></article>"
+        assert detect_page_type(html, "https://x.com", "text/html", 80) == "article"
+
+
+def test_page_type_structural_paywall_markers_are_paywalls():
+    html_values = (
+        '<main><div data-paywall="true">Subscription required.</div></main>',
+        '<aside data-content-gate>Subscription required.</aside>',
+        "<section data-content-gate='yes'>Subscription required.</section>",
+        '<div data-paywall=enabled>Subscription required.</div>',
+        '<main data-subscription-wall="active">Subscription required.</main>',
+    )
+    for html in html_values:
+        assert detect_page_type(html, "https://x.com", "text/html", 80) == "paywall"
 
 
 def test_page_type_redirect_meta_refresh():
