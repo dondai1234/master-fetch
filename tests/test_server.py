@@ -13,6 +13,7 @@ from master_fetch.server import (
     _agent_hints, _apply_chunking, _is_cloudflare_from_response,
     _annotate_quality, MAX_CONTENT_CHARS, MIN_CHUNK_CHARS, MAX_BULK_URLS,
     _JS_SHELL_SIGNALS, _CF_CHALLENGE_SIGNALS, MAX_RESPONSE_BYTES,
+    _browser_deps_available,
 )
 
 
@@ -382,3 +383,126 @@ class TestConstants:
         assert "__cf_chl" in _CF_CHALLENGE_SIGNALS
         assert "challenge-platform" in _CF_CHALLENGE_SIGNALS
         assert "cf-mitigated" in _CF_CHALLENGE_SIGNALS
+
+
+# ─── Event-loop safety: browser availability check must never block ──
+# Regression test for issue #11: _browser_deps_available() called on the
+# asyncio event loop triggered `import patchright` synchronously, blocking
+# the loop for 1-3s and starving the MCP initialize handshake (-32001).
+# The fix: _browser_deps_available() reads only the cache (never imports).
+# The prewarm thread populates the cache via check_browser_available().
+
+from master_fetch.browser import check_browser_available, is_browser_available_cached
+import time as _time
+
+
+class TestBrowserDepsNonBlocking:
+    """Verify _browser_deps_available() never blocks the event loop."""
+
+    def test_returns_true_when_cache_unset(self):
+        """When cache is None (prewarm hasn't run), return True instantly.
+
+        This is the optimistic default: if patchright isn't installed, the
+        browser operation will raise ImportError and the tool handler catches
+        it. But the availability check itself never blocks.
+        """
+        import master_fetch.browser as bmod
+        import master_fetch.server as srv
+        original = bmod._browser_available
+        bmod._browser_available = None
+        srv._browser_import_error = None
+        try:
+            t0 = _time.monotonic()
+            result = srv._browser_deps_available()
+            elapsed = _time.monotonic() - t0
+            assert result is True
+            assert elapsed < 0.001  # < 1ms = no blocking import
+        finally:
+            bmod._browser_available = original
+
+    def test_returns_cached_true_instantly(self):
+        """When cache is True, return True instantly without re-importing."""
+        import master_fetch.browser as bmod
+        original = bmod._browser_available
+        bmod._browser_available = True
+        try:
+            t0 = _time.monotonic()
+            result = _browser_deps_available()
+            elapsed = _time.monotonic() - t0
+            assert result is True
+            assert elapsed < 0.001
+        finally:
+            bmod._browser_available = original
+
+    def test_returns_cached_false_instantly(self):
+        """When cache is False, return False and set error, instantly."""
+        import master_fetch.browser as bmod
+        import master_fetch.server as srv
+        original_avail = bmod._browser_available
+        original_err = bmod._browser_import_error
+        bmod._browser_available = False
+        bmod._browser_import_error = "patchright not found"
+        srv._browser_import_error = None
+        try:
+            t0 = _time.monotonic()
+            result = _browser_deps_available()
+            elapsed = _time.monotonic() - t0
+            assert result is False
+            assert srv._browser_import_error == "patchright not found"
+            assert elapsed < 0.001
+        finally:
+            bmod._browser_available = original_avail
+            bmod._browser_import_error = original_err
+
+    def test_is_browser_available_cached_reads_without_import(self):
+        """is_browser_available_cached() returns the cache or None, never imports."""
+        import master_fetch.browser as bmod
+        original = bmod._browser_available
+        bmod._browser_available = None
+        try:
+            assert is_browser_available_cached() is None
+        finally:
+            bmod._browser_available = original
+
+        bmod._browser_available = True
+        try:
+            assert is_browser_available_cached() is True
+        finally:
+            bmod._browser_available = original
+
+        bmod._browser_available = False
+        try:
+            assert is_browser_available_cached() is False
+        finally:
+            bmod._browser_available = original
+
+    def test_check_browser_available_caches_result(self):
+        """check_browser_available() populates the cache (first call does import)."""
+        import master_fetch.browser as bmod
+        original = bmod._browser_available
+        bmod._browser_available = None
+        try:
+            result = check_browser_available()
+            # After first call, cache must be populated (not None)
+            assert bmod._browser_available is not None
+            assert result == bmod._browser_available
+        finally:
+            bmod._browser_available = original
+
+    def test_prewarm_does_browser_check_in_thread(self):
+        """Verify _prewarm_stealthy offloads browser check to a worker thread.
+
+        This is the core regression test for issue #11: the old code called
+        _browser_deps_available() on the event loop before asyncio.to_thread,
+        which blocked the loop. The fix moves the entire check into the thread.
+        """
+        import inspect
+        from master_fetch.server import MasterFetchServer
+        src = inspect.getsource(MasterFetchServer._prewarm_stealthy)
+        # The _warm inner function must use asyncio.to_thread for the browser check
+        warm_body = src.split("async def _warm")[1] if "async def _warm" in src else src
+        assert "asyncio.to_thread" in warm_body, "prewarm must use to_thread for browser check"
+        # Must NOT call _browser_deps_available() on the event loop before to_thread
+        before_thread = warm_body.split("asyncio.to_thread")[0] if "asyncio.to_thread" in warm_body else warm_body
+        assert "_browser_deps_available" not in before_thread, \
+            "_browser_deps_available must not be called before to_thread (blocks event loop)"

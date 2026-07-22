@@ -1339,3 +1339,15 @@ def check_browser_available() -> bool:
 def browser_import_error() -> Optional[str]:
     """Get the import error if browser deps are unavailable."""
     return _browser_import_error
+
+
+def is_browser_available_cached() -> Optional[bool]:
+    """Read the cached browser availability WITHOUT triggering an import.
+
+    Returns True/False if check_browser_available() has been called at least
+    once (by the prewarm thread). Returns None if not yet checked.
+
+    This is safe to call on the asyncio event loop: it never blocks.
+    Use check_browser_available() for the first check (from a worker thread).
+    """
+    return _browser_available

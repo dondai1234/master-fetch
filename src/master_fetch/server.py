@@ -88,7 +88,7 @@ from pydantic import BaseModel, Field
 # Set when browser import fails (e.g. patchright not installable on Termux).
 # When set, hound runs in HTTP-only mode: fetch + search + crawl work via primp
 # + httpx + trafilatura, but stealthy browser escalation and screenshot are disabled.
-_scrapling_import_error: Optional[str] = None
+_browser_import_error: Optional[str] = None
 
 # Module-level type placeholders — needed because FastMCP evaluates string
 # annotations at tool registration time. Set to actual types on first fetch.
@@ -98,19 +98,29 @@ FollowRedirects: Any = None
 ImpersonateType: Any = None
 
 
-def _scrapling_available() -> bool:
+def _browser_deps_available() -> bool:
     """True if browser deps (patchright) are importable.
 
-    Replaces the old scrapling availability check. Browser deps are needed
-    for stealthy fetch, dynamic fetch, and screenshot. HTTP fetch, search,
-    and crawl work without them.
+    Non-blocking: reads the cache populated by the prewarm thread.
+    Never triggers a synchronous import on the event loop.
+
+    If the cache is not yet populated (prewarm thread hasn't finished),
+    returns True (optimistic). The actual browser operation will fail
+    gracefully if patchright isn't installed, and the error is caught
+    by the tool handler.
     """
-    from master_fetch.browser import check_browser_available, browser_import_error
-    global _scrapling_import_error
-    if check_browser_available():
+    from master_fetch.browser import is_browser_available_cached, browser_import_error
+    global _browser_import_error
+    cached = is_browser_available_cached()
+    if cached is True:
         return True
-    _scrapling_import_error = browser_import_error()
-    return False
+    if cached is False:
+        _browser_import_error = browser_import_error()
+        return False
+    # Cache not yet populated (prewarm thread still running or hasn't started).
+    # Optimistic: assume available. If wrong, the browser operation raises
+    # ImportError which the tool handler catches and reports cleanly.
+    return True
 
 
 async def _fallback_http_get(
@@ -1148,9 +1158,9 @@ class MasterFetchServer:
         after that many seconds of inactivity. When it is 0 (default), the
         browser is kept alive forever and no idle monitor is started.
         """
-        if not _scrapling_available():
+        if not _browser_deps_available():
             raise RuntimeError(
-                f"Browser unavailable: {_scrapling_import_error or 'patchright not importable'}. "
+                f"Browser unavailable: {_browser_import_error or 'patchright not importable'}. "
                 "Install browser deps: pip install hound-mcp[all] "
                 "(or pip install playwright patchright)."
             )
@@ -1206,26 +1216,30 @@ class MasterFetchServer:
         then relaunches on the next fetch. Idempotent: _ensure_auto_session
         reuses any existing session.
 
-        Robustness (v8.2): fully isolated — catches BaseException (so a
+        Robustness: fully isolated — catches BaseException (so a
         CancelledError or any launch failure can NEVER crash the server) and is
         capped at 30s so a hung browser launch can't hold the session-creation
         lock forever (a later real fetch can then take the lock and retry). On
         any failure the browser simply lazy-launches on the first stealthy fetch.
+
+        Event-loop safety: the browser availability check AND the patchright
+        import both run inside a worker thread. The old code called
+        _browser_deps_available() on the event loop first, which triggered
+        import patchright synchronously and blocked the loop for 1-3s,
+        starving server.run() so the MCP initialize handshake never got its
+        reply out (client reported -32001 REQUEST_TIMEOUT). Now the entire
+        check+import is off the event loop.
         """
         async def _warm():
-            if not _scrapling_available():
-                return  # HTTP-only mode, no browser to prewarm
-            # Run the (synchronous, ~5s) patchright import in a WORKER
-            # THREAD, not on the event loop. A bare import here
-            # freezes the single-threaded asyncio loop for the whole import, which
-            # starves `server.run` so the `initialize` handshake never gets its
-            # reply out — the MCP client sees a silent dead hang and reports
-            # "failed to start". asyncio.wait_for cannot interrupt a synchronous
-            # blocking call, so this matters even with the 30s cap below.
-            def _import_browser():
+            # Both the availability check AND the import run in the thread.
+            # check_browser_available() does import patchright and caches the
+            # result. After this, the cache-only reader returns instantly
+            # without touching the event loop.
+            def _check_and_import():
                 from master_fetch.browser import check_browser_available
-                check_browser_available()  # triggers import + cache
-            await asyncio.to_thread(_import_browser)
+                return check_browser_available()
+            if not await asyncio.to_thread(_check_and_import):
+                return  # HTTP-only mode, no browser to prewarm
             await self._ensure_auto_session("stealthy")
         try:
             await asyncio.wait_for(_warm(), timeout=30.0)
@@ -1510,10 +1524,10 @@ class MasterFetchServer:
         :param solve_cloudflare: (Stealthy) Auto-solve Cloudflare challenges.
         :param additional_args: (Stealthy) Extra Playwright context args.
         """
-        if not _scrapling_available():
+        if not _browser_deps_available():
             raise RuntimeError(
                 f"Browser sessions require browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'patchright not importable'}. "
+                f"{_browser_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
         session_id = session_id or uuid4().hex[:12]
@@ -1615,10 +1629,10 @@ class MasterFetchServer:
         url = validate_url(url)
         validate_css_selector(wait_selector)
 
-        if not _scrapling_available():
+        if not _browser_deps_available():
             raise RuntimeError(
                 f"Screenshot requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'patchright not importable'}. "
+                f"{_browser_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -1955,10 +1969,10 @@ class MasterFetchServer:
         validate_proxy(proxy)
         validate_css_selector(wait_selector)
 
-        if not _scrapling_available():
+        if not _browser_deps_available():
             raise RuntimeError(
                 f"Dynamic fetch requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'patchright not importable'}. "
+                f"{_browser_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -2087,10 +2101,10 @@ class MasterFetchServer:
         validate_headers(extra_headers)
         validate_proxy(proxy)
 
-        if not _scrapling_available():
+        if not _browser_deps_available():
             raise RuntimeError(
                 f"Stealthy fetch requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'patchright not importable'}. "
+                f"{_browser_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -2180,10 +2194,10 @@ class MasterFetchServer:
         validate_proxy(proxy)
         validate_css_selector(wait_selector)
 
-        if not _scrapling_available():
+        if not _browser_deps_available():
             raise RuntimeError(
                 f"Stealthy fetch requires browser deps which are unavailable: "
-                f"{_scrapling_import_error or 'patchright not importable'}. "
+                f"{_browser_import_error or 'patchright not importable'}. "
                 "Install with: pip install hound-mcp[all]"
             )
 
@@ -2631,7 +2645,7 @@ class MasterFetchServer:
 
         # Tier 2: Stealthy browser
         # Skip if browser deps are unavailable (HTTP-only mode)
-        if not _scrapling_available():
+        if not _browser_deps_available():
             result.duration_ms = elapsed
             result.escalation_path = "http(browser_unavailable)"
             if result.error:

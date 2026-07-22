@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [11.1.8] - 2026-07-22
+
+### Fixed: MCP server fails to start with -32001 REQUEST_TIMEOUT (issue #11)
+
+The MCP server intermittently failed to respond to the `initialize` handshake,
+ causing the client to time out with -32001 REQUEST_TIMEOUT. The server process
+ stayed alive but never replied.
+
+**Root cause:** `_prewarm_stealthy()` called `_browser_deps_available()` on the
+ asyncio event loop before any thread offload. This triggered `import patchright`
+ synchronously, blocking the single-threaded event loop for 1-3 seconds. Since
+ `server.run()` shares the same event loop, the MCP `initialize` handshake never
+ got processed, and the client timed out.
+
+The code already had a comment explaining this exact problem and an
+ `asyncio.to_thread()` call for the import, but the `_browser_deps_available()`
+ check at the top of `_warm()` was missed - it did the import on the event loop
+ before the thread offload.
+
+**Fix (three layers of defense):**
+
+1. **Moved browser check into the thread.** `_prewarm_stealthy()` now runs
+   `check_browser_available()` inside `asyncio.to_thread()`. The synchronous
+   `import patchright` never touches the event loop.
+
+2. **Made `_browser_deps_available()` non-blocking.** Previously, it called
+   `check_browser_available()` which triggers `import patchright` on first call.
+   Now it reads only the cache populated by the prewarm thread. If the cache is
+   not yet populated (prewarm hasn't finished), it returns True (optimistic).
+   The actual browser operation catches ImportError gracefully if patchright
+   isn't installed. This protects all 8 call sites, not just the prewarm.
+
+3. **Added `is_browser_available_cached()` to browser.py.** A cache-only reader
+   that returns None if not yet checked, True/False if cached. Never triggers
+   an import. Safe to call on the event loop at any time.
+
+Also renamed `_scrapling_available` -> `_browser_deps_available` and
+`_scrapling_import_error` -> `_browser_import_error` throughout (the `scrapling`
+name was a leftover from v10.x; scrapling was removed in v11.0.0).
+
+6 new tests in `TestBrowserDepsNonBlocking` verify: non-blocking when cache
+unset, cached True/False returned instantly, `is_browser_available_cached`
+reads without import, `check_browser_available` caches result, prewarm uses
+`asyncio.to_thread` (not the event loop) for the browser check.
+
 ## [11.1.7] - 2026-07-22
 
 ### Changed: agent-optimized tool descriptions
