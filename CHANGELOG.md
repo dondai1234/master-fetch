@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Changed: agent-optimized tool descriptions
+
+- `HOUND_INSTRUCTIONS` (connect-time orientation) rewritten from a flat tool
+  list to a structured guide with power-feature examples, optimal-workflow
+  decision tree, and anti-pattern guidance. Agents now see concrete examples:
+  `focus='embedding dimension'` on a 75-page paper returns only relevant
+  paragraphs in one call. Directives: "Don't search for something you already
+  have a URL for." and "Use focus= on each search result to target your
+  question." Net token change: -16 tokens (-0.6%), with dramatically better
+  agent guidance.
+- `mcp_smart_fetch` description front-loads `focus=` and `pages=` as POWER
+  FEATURES instead of burying them in parameter docs.
+- `mcp_smart_search` description now teaches agents to use `focus=` when
+  fetching search results.
+- `_agent_hints` next_action for truncated pages now suggests `focus=` first,
+  then `offset=`. Large PDFs (>20K chars) now get a next_action suggesting
+  `focus=` or `pages=`.
+- Pi extension descriptions mirrored to match new MCP defs.
+
 ### Fixed
 
 - Search `site` and `exclude_sites` filters now compare normalized hostnames by

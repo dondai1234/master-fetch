@@ -188,17 +188,42 @@ IDLE_CHECK_INTERVAL = 60  # How often to check for idle sessions (seconds)
 # the #1 workflow, the gotchas, and when to use each tool. Kept tight (~300
 # tokens) since it is paid once, not per-turn-per-tool.
 HOUND_INSTRUCTIONS = (
-    "Hound = web access. 4 tools (+ cache_clear, version).\n"
+    "Hound = keyless web access ($0, no API keys, no account). 4 tools + cache_clear + version.\n"
     "\n"
-    "smart_fetch(url) - get any page. Auto anti-bot (HTTP -> stealthy). Text + metadata + signals (content_ok, next_action, summary, page_type, content_age_days/is_stale, source_type/is_official, source/archived_at). Hard-block (404/bot/auth) -> clean error, not fake content.\n"
-    "  Narrow: css_selector. Long page: offset/next_offset to paginate, or focus='query' for only relevant blocks (post-cache; re-pass when paginating). actions=[{click:..},{scroll:N},{fill:{selector,text}},{press:Enter},{wait:ms},{wait_selector:..}] for click/form/scroll (forces stealthy, bypasses cache). PDFs -> structured markdown + table_of_contents section-map [{level,title,page,end_page}] -> pass pages='23-31' for one section. Scanned/CID -> auto-OCR with [all] (quality_score 0-1). include_links=true -> response.links = {citations,navigation,external,primary_source}. Bulk: urls=[...]. cache_ttl=0 forces fresh.\n"
-    "smart_search(query) - keyless web search (no API key). 10 backends in parallel (ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant + opt-in wikipedia,grokipedia), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content -> smart_fetch the matches. Each result: relevance_score + fetch_relevance (high/med/low) + engines_consensus. related_queries from result titles+snippets. Blocked backends circuit-broken 60s. NEVER answer from snippets alone. Filters in options: site/exclude_sites, location/language/region, page (0-10), freshness (day|week|month|year).\n"
-    "smart_crawl(url) - deep-crawl a site. Best-first same-domain walk; each page: markdown + content_ok + page_type. List pages -> structured link list. BIG SITES: options sitemap=true maps whole site from sitemap.xml in ONE fetch (URL list + lastmod); sitemap='auto' = use if present else BFS. discover_only=true = URL map only. focus='query' crawls relevant pages first + focus-filters each. crawl_urls=[...] fetches a chosen subset. Caps: max_pages (10), max_depth (2), max_total_chars, deadline_ms.\n"
-    "screenshot(url) - image capture. Multimodal agents only (content as images/canvas/visual layout). Text agents: use smart_fetch.\n"
+    "## Tools\n"
+    "smart_fetch(url) - get any page or PDF. Auto anti-bot (HTTP -> stealthy). Returns text + signals.\n"
+    "smart_search(query) - keyless web search. 10 backends in parallel. Returns URLs, not content.\n"
+    "smart_crawl(url) - deep-crawl a site. Best-first walk, sitemap mapping, focus filtering.\n"
+    "screenshot(url) - image capture for multimodal agents.\n"
     "\n"
-    "#1 workflow: smart_search -> smart_fetch matching results -> synthesize with URLs.\n"
+    "## Power features that save calls and tokens\n"
     "\n"
-    "Unbypassable live (no free tool beats): DataDome, Akamai, Cloudflare Turnstile. smart_fetch gives clean errors on hard-blocks; switch sources - don't retry same URL.\n"
+    "focus='query' on smart_fetch: extracts only BM25-relevant paragraphs from a long page or PDF.\n"
+    "  Example: smart_fetch(url, focus='embedding dimension') on a 75-page paper returns only paragraphs\n"
+    "  about embeddings. One call instead of ten. Works post-cache (no re-fetch). Re-pass same focus when paginating.\n"
+    "\n"
+    "pages='9' or pages='1-5,9-12' on smart_fetch: extracts specific PDF pages. PDFs return table_of_contents\n"
+    "  [{level,title,page,end_page}] - use page ranges to grab one section. Don't fetch 75 pages if you need one.\n"
+    "\n"
+    "Don't search for something you already have a URL for. Fetch directly with focus= to target the answer.\n"
+    "\n"
+    "## Optimal workflows\n"
+    "1. Have a URL + a specific question -> smart_fetch(url, focus='your question'). One call.\n"
+    "2. Have a PDF + know which page -> smart_fetch(url, pages='9'). One call.\n"
+    "3. Have a PDF + don't know which page -> smart_fetch(url, focus='your question'). BM25 finds it.\n"
+    "4. Need to find sources -> smart_search(query) -> smart_fetch the high-relevance results (use focus= on each).\n"
+    "5. Need a whole site -> smart_crawl(url, sitemap=true) maps all URLs -> crawl_urls=[...] to fetch the ones you need.\n"
+    "6. Content behind click/form/scroll -> smart_fetch(url, actions=[{click:'button'},{fill:{selector:'#q',text:'x'}}]).\n"
+    "\n"
+    "## Response signals\n"
+    "content_ok: True = real content. False = JS shell, login wall, or error. Check before trusting.\n"
+    "next_action: suggested next call (paginate, switch source, follow links). Empty = done.\n"
+    "page_type: article|docs|list|forum|qa|pdf|auth_wall|paywall. 'list' pages have links to follow.\n"
+    "content_age_days + is_stale: for current-state questions, seek newer sources if stale.\n"
+    "include_links=true on smart_fetch -> response.links = {citations,navigation,external,primary_source}.\n"
+    "\n"
+    "## Limits\n"
+    "DataDome, Akamai, Cloudflare Turnstile: unbypassable. smart_fetch returns clean errors. Switch sources.\n"
 )
 
 class ResponseModel(BaseModel):
@@ -530,7 +555,7 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     next_action = ""
     err = result.error or ""
     if result.is_truncated and result.next_offset:
-        next_action = f"paginate: call smart_fetch with offset={result.next_offset}"
+        next_action = f"page truncated. Use focus='query' to extract only relevant blocks, or offset={result.next_offset} to continue paginating"
     elif err == "robots_txt_disallowed":
         next_action = "blocked by robots.txt: set options.respect_robots=false to bypass"
     elif err.startswith("js_shell_detected"):
@@ -560,7 +585,13 @@ def _agent_hints(result: ResponseModel) -> tuple[str, str, bool]:
     # agent doesn't have to re-derive it. Precedence: page structure
     # (list/auth/paywall/redirect) > freshness.
     if not next_action and content_ok:
-        if result.page_type == "list":
+        if result.page_type == "pdf" and result.total_extracted_chars > 20000:
+            next_action = (
+                f"large PDF ({result.total_extracted_chars} chars extracted). "
+                "Use focus='query' to extract only relevant paragraphs, or "
+                "pages='X-Y' to fetch specific sections from the table_of_contents"
+            )
+        elif result.page_type == "list":
             cits = (result.links or {}).get("citations") or []
             top = [c.get("url", "") for c in cits[:3] if isinstance(c, dict) and c.get("url")]
             if top:
@@ -2840,7 +2871,7 @@ class MasterFetchServer:
     _TOOL_DEFS: list[dict] = [
         {
             "name": "mcp_smart_fetch",
-            "description": "Fetch a URL (or urls=[...] for parallel bulk). Auto HTTP -> stealthy escalation. Returns extracted text + metadata + signals: content_ok, next_action, summary, page_type, content_age_days/is_stale, source_type/is_official, source/archived_at. Hard-block (404/bot/auth) -> clean error, not fake content. PDFs -> structured markdown + ToC + page ranges + auto-OCR. Long pages: paginate with offset/next_offset or focus='query' for only relevant blocks. actions=[...] for click/form/scroll. include_links/include_media via options.",
+            "description": "Fetch any URL or PDF. Auto anti-bot (HTTP -> stealthy). POWER FEATURES: focus='query' extracts only BM25-relevant paragraphs (saves tokens - one call not ten on long pages/PDFs). pages='9' or pages='1-5,9-12' for specific PDF pages (use table_of_contents page/end_page ranges). Returns text + signals: content_ok, next_action, summary, page_type, content_age_days/is_stale, source_type/is_official, source/archived_at. Hard-block -> clean error. actions=[{click:..},{fill:{selector,text}},{scroll:N},{wait:ms},{wait_selector:css}] for click/form/scroll (forces stealthy, bypasses cache). urls=[...] for parallel bulk. include_links=true -> response.links (citations + primary_source). Long pages: offset/next_offset to paginate.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2892,7 +2923,7 @@ class MasterFetchServer:
         },
         {
             "name": "mcp_smart_search",
-            "description": "Keyless web search (no API key). 10 backends in parallel (ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant + opt-in wikipedia,grokipedia), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content -> smart_fetch the ones that match. Each result: relevance_score + fetch_relevance (high/med/low) + engines_consensus. related_queries from result titles+snippets. Blocked backends circuit-broken 60s. NEVER answer from snippets alone. Filters in options: site, exclude_sites, location, language, region, page, freshness.",
+            "description": "Keyless web search (no API key, no account). 10 backends in parallel (ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant + opt-in wikipedia,grokipedia), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content. smart_fetch the results that match (use focus= on each to target your question and save tokens). Each result: relevance_score + fetch_relevance (high/med/low) + engines_consensus. related_queries from result titles+snippets. Blocked backends circuit-broken 60s. NEVER answer from snippets alone. Filters in options: site, exclude_sites, location, language, region, page, freshness.",
             "inputSchema": {
                 "type": "object", "required": ["query"],
                 "properties": {

@@ -210,6 +210,7 @@ class TestAgentHints:
         summary, next_action, content_ok = _agent_hints(result)
         assert "truncated" in summary
         assert "offset=40000" in next_action
+        assert "focus=" in next_action  # v11.2: suggest focus= first
 
     def test_error_result_content_ok_false(self):
         result = _make_result(status=404, error="http_error_404")
@@ -237,7 +238,23 @@ class TestAgentHints:
         _, next_action, _ = _agent_hints(result)
         assert "stealthy" in next_action
 
-    def test_list_page_next_action(self):
+    def test_large_pdf_suggests_focus_or_pages(self):
+        result = _make_result(
+            page_type="pdf", total_extracted_chars=50000,
+            content=["A" * 100], status=200,
+        )
+        _, next_action, _ = _agent_hints(result)
+        assert "focus=" in next_action
+        assert "pages=" in next_action
+
+    def test_short_pdf_no_focus_hint(self):
+        result = _make_result(
+            page_type="pdf", total_extracted_chars=5000,
+            content=["A" * 100], status=200,
+        )
+        _, next_action, _ = _agent_hints(result)
+        assert "focus=" not in next_action
+
         result = _make_result(page_type="list", links={
             "citations": [{"url": "https://example.com/page1", "text": "P1"}]
         })

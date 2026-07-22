@@ -411,8 +411,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "web_fetch",
     label: "Web Fetch",
-    description: "Fetch a URL (or urls=[...] for parallel bulk). Auto HTTP -> stealthy escalation. Returns extracted text + metadata + signals: content_ok, next_action, summary, page_type, content_age_days/is_stale, source_type/is_official, source/archived_at. Hard-block (404/bot/auth) -> auto-recover from Internet Archive (source=archive.org, archived_at=snapshot date; archive_fallback=false in options to opt out). PDFs -> structured markdown + ToC + page ranges + auto-OCR. Long pages: paginate with offset/next_offset or focus='query' for only relevant blocks. actions=[...] for click/form/scroll. include_links/include_media via options.",
-    promptSnippet: "web_fetch(url|urls, extraction_type, css_selector, focus, actions, include_links, pages, offset) - anti-bot fetch + clean extraction; paginates with next_offset; dead-link recovery from Internet Archive.",
+    description: "Fetch any URL or PDF. Auto anti-bot (HTTP -> stealthy). POWER FEATURES: focus='query' extracts only BM25-relevant paragraphs (saves tokens - one call not ten on long pages/PDFs). pages='9' or pages='1-5,9-12' for specific PDF pages (use table_of_contents page/end_page ranges). Returns text + signals: content_ok, next_action, summary, page_type, content_age_days/is_stale, source_type/is_official, source/archived_at. Hard-block -> clean error. actions=[{click:..},{fill:{selector,text}},{scroll:N},{wait:ms},{wait_selector:css}] for click/form/scroll (forces stealthy, bypasses cache). urls=[...] for parallel bulk. include_links=true -> response.links (citations + primary_source). Long pages: offset/next_offset to paginate.",
+    promptSnippet: "web_fetch(url|urls, focus, pages, extraction_type, css_selector, actions, include_links, offset) - anti-bot fetch + clean extraction. Use focus='query' to extract only relevant paragraphs from long pages/PDFs (saves tokens). Use pages='9' for specific PDF pages.",
     parameters: Type.Object({
       url: Type.Optional(Type.String({ description: "URL to fetch" })),
       urls: Type.Optional(Type.Array(Type.String(), { description: "Multiple URLs (parallel; returns per-URL results)" })),
@@ -497,8 +497,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "web_search",
     label: "Web Search",
-    description: "Keyless web search (no API key). 10 backends in parallel (ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant + opt-in wikipedia,grokipedia), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content -> web_fetch the ones that match. Each result: relevance_score + fetch_relevance (high/med/low) + engines_consensus. related_queries from result titles+snippets. Blocked backends circuit-broken 60s. NEVER answer from snippets alone. Filters in options: site, exclude_sites, location, language, region, page, freshness.",
-    promptSnippet: "web_search(query) - keyless web search across 10 backends; returns ranked URLs (not content), related_queries, consensus. web_fetch the results that match.",
+    description: "Keyless web search (no API key, no account). 10 backends in parallel (ddg,brave,mojeek,yahoo,yandex,startpage,google,qwant + opt-in wikipedia,grokipedia), neural-reranked + cross-backend consensus. Returns URLs + ranking, NOT content. web_fetch the results that match (use focus= on each to target your question and save tokens). Each result: relevance_score + fetch_relevance (high/med/low) + engines_consensus. related_queries from result titles+snippets. Blocked backends circuit-broken 60s. NEVER answer from snippets alone. Filters in options: site, exclude_sites, location, language, region, page, freshness.",
+    promptSnippet: "web_search(query) - keyless web search across 10 backends; returns ranked URLs (not content). web_fetch the high-relevance results (use focus= to target your question on each).",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       options: Type.Optional(Type.Object({}, { additionalProperties: true, description: "max_results (1-50,6), cache_ttl (300), mode (auto|neural|find_similar), engines (list), site, exclude_sites, location, language, region, page, freshness, url (for find_similar)" })),
@@ -552,7 +552,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "web_crawl",
     label: "Web Crawl",
-    description: "Deep-crawl a site: best-first same-domain walk, each page as markdown + content_ok + page_type. List pages -> structured link list. sitemap=true (in options) maps whole site from sitemap.xml in one fetch; sitemap='auto' = use if present else BFS. discover_only=true = URL map only. focus='query' prioritizes relevant pages + focus-filters each. crawl_urls=[...] fetches a chosen subset. Caps: max_pages (10), max_depth (2), max_total_chars, deadline_ms. Reuses web_fetch anti-bot + cache.",
+    description: "Deep-crawl a site: best-first same-domain walk, each page as markdown + content_ok + page_type. List pages -> structured link list. BIG SITES: options sitemap=true maps whole site from sitemap.xml in one fetch; sitemap='auto' = use if present else BFS. discover_only=true = URL map only (pair with crawl_urls for two-phase crawl). focus='query' prioritizes relevant pages AND focus-filters each page's content. crawl_urls=[...] fetches a chosen subset (second-phase). Caps: max_pages (10), max_depth (2), max_total_chars, deadline_ms. Reuses web_fetch anti-bot + cache.",
     promptSnippet: "web_crawl(url, focus, options.sitemap, discover_only, crawl_urls, max_pages) - site crawl; sitemap=true maps a whole site in one fetch; crawl_urls fetches a chosen subset.",
     parameters: Type.Object({
       url: Type.String({ description: "Start URL (crawl stays on this domain)" }),
