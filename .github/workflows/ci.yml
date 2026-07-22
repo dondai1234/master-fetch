@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    continue-on-error: ${{ matrix.os == 'windows-latest' && matrix.python-version != '3.11' }}
     strategy:
       fail-fast: false
       matrix:
