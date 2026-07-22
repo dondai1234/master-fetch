@@ -109,7 +109,7 @@ cd master-fetch
 docker-compose up -d
 ```
 
-Hound will be available at `http://localhost:8765/mcp` as an HTTP MCP server.
+Hound will be available at `http://<your-host-ip>:8765/mcp` as an HTTP MCP server (use `localhost` if running on the same machine).
 
 ### Manual Docker build
 
@@ -129,11 +129,13 @@ docker run -p 8765:8765 hound-mcp
 
 ### Connecting to HTTP mode
 
-For MCP clients that support HTTP (Claude Code, Open WebUI):
+For MCP clients that support HTTP (Claude Code, Open WebUI), use your host's LAN IP:
 
 ```
-http://localhost:8765/mcp
+http://<your-host-ip>:8765/mcp
 ```
+
+(Or `localhost:8765/mcp` if running on the same machine.)
 
 ---
 
