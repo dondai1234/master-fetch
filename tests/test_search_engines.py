@@ -43,6 +43,12 @@ def test_normalize_url_adds_scheme_to_protocol_relative():
     assert normalize_url("//example.com/x") == "https://example.com/x"
 
 
+def test_metasearch_normalize_preserves_github_reserved_routes():
+    assert ms._normalize_url("https://github.com/Settings/Keys") == (
+        "https://github.com/Settings/Keys"
+    )
+
+
 def test_index_family_bing_group():
     # duckduckgo + yahoo share Bing's index -> same family
     assert _INDEX_FAMILY["duckduckgo"] == _INDEX_FAMILY["yahoo"] == "bing"
@@ -288,6 +294,24 @@ def test_metasearch_merges_github_repo_case_variants_into_consensus(monkeypatch)
         "https://github.com/NousResearch/hermes-agent",
     }
     assert set(res[0]["backends"]) == {"brave", "yahoo"}
+    assert status["brave"] == "ok" and status["yahoo"] == "ok"
+
+
+def test_metasearch_keeps_github_reserved_route_case_variants_distinct(monkeypatch):
+    _patch_engines(monkeypatch, {
+        "brave": _fake_engine_class(
+            "brave", [_TR("Python topics", "https://github.com/topics/Python")]
+        ),
+        "yahoo": _fake_engine_class(
+            "yahoo", [_TR("python topics", "https://github.com/topics/python")]
+        ),
+    })
+    res, status = asyncio.run(ms.metasearch("python", 6, engines=["brave", "yahoo"]))
+    assert {item["href"] for item in res} == {
+        "https://github.com/topics/Python",
+        "https://github.com/topics/python",
+    }
+    assert all(len(item["backends"]) == 1 for item in res)
     assert status["brave"] == "ok" and status["yahoo"] == "ok"
 
 

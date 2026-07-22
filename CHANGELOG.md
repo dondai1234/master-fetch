@@ -9,8 +9,9 @@
   `evilgithub.com` and `github.com.evil.test` while preserving real subdomains.
 - GitHub repository case variants now deduplicate in `smart_search`. Owner and
   repo name are treated as case-insensitive for `github.com` URLs, while branch
-  and file-path casing remains unchanged. Credential-bearing URLs skip the
-  GitHub-specific folding.
+  and file-path casing remains unchanged. Known GitHub system routes such as
+  `/topics` and `/settings` are excluded from repository-specific case folding.
+  Credential-bearing URLs skip the GitHub-specific folding.
 - `detect_page_type()` no longer classifies a page as a paywall solely because
   raw HTML contains the bare token `paywall`. Concrete visible subscription
   prompts and active, exact paywall data attributes remain signals; false-like
