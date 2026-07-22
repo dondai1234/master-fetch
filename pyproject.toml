@@ -63,9 +63,10 @@ all = [
 ]
 
 [project.urls]
-Repository = "https://github.com/dondai1234/master-fetch"
-Issues = "https://github.com/dondai1234/master-fetch/issues"
-Changelog = "https://github.com/dondai1234/master-fetch/blob/master/CHANGELOG.md"
+Repository = "https://github.com/imonlinux/master-fetch"
+Issues = "https://github.com/imonlinux/master-fetch/issues"
+Changelog = "https://github.com/imonlinux/master-fetch/blob/master/CHANGELOG.md"
+Upstream = "https://github.com/dondai1234/master-fetch"
 
 [project.scripts]
 hound = "master_fetch.cli:main"
