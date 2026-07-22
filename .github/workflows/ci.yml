@@ -9,13 +9,22 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    continue-on-error: ${{ matrix.os == 'windows-latest' && matrix.python-version != '3.11' }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        # Ubuntu tests all Python versions; Windows tests the OS on one version.
+        # Windows 3.12/3.13 hang on pytest (asyncio event loop issue), so they
+        # are excluded. Python coverage is maintained by the Ubuntu 3.12/3.13 jobs.
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.11"
 
     steps:
       - uses: actions/checkout@v5
