@@ -1,0 +1,37 @@
+# Hound MCP Docker Compose
+# Run: docker-compose up -d
+# Access HTTP MCP at: http://localhost:8765/mcp
+
+services:
+  hound:
+    build: .
+    container_name: hound-mcp
+    restart: unless-stopped
+    ports:
+      - "${HOUND_PORT:-8765}:8765"
+    environment:
+      - HOUND_HTTP_PORT=8765
+      - HOUND_BROWSER_IDLE_TIMEOUT=${HOUND_IDLE_TIMEOUT:-300}
+      # Optional: Set proxy if needed
+      # - HTTP_PROXY=http://proxy:3128
+      # - HTTPS_PROXY=http://proxy:3128
+    volumes:
+      # Persist cache across restarts
+      - hound-cache:/root/.hound-cache
+    # Resource limits for browser mode
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/mcp').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  hound-cache:
+    driver: local
