@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Hound MCP",
+        "description": "Enter the connection details for your Hound MCP server.",
+        "data": {
+          "name": "Integration Name",
+          "url": "Server URL",
+          "port": "HTTP Port",
+          "timeout": "Connection Timeout (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Hound MCP server. Verify the URL and port are correct."
+    }
+  },
+  "title": "Hound MCP Web Research"
+}
