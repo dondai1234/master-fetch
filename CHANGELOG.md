@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Search `site` and `exclude_sites` filters now compare normalized hostnames by
+  exact domain or subdomain boundary. This rejects lookalike hosts such as
+  `evilgithub.com` and `github.com.evil.test` while preserving real subdomains.
+
 ## [11.1.6] - 2026-07-21
 
 ### Fixed: smart_crawl does not bypass Cloudflare on protected sites
