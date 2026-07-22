@@ -7,6 +7,10 @@
 - Search `site` and `exclude_sites` filters now compare normalized hostnames by
   exact domain or subdomain boundary. This rejects lookalike hosts such as
   `evilgithub.com` and `github.com.evil.test` while preserving real subdomains.
+- GitHub repository case variants now deduplicate in `smart_search`. Owner and
+  repo name are treated as case-insensitive for `github.com` URLs, while branch
+  and file-path casing remains unchanged. Credential-bearing URLs skip the
+  GitHub-specific folding.
 
 ## [11.1.6] - 2026-07-21
 

@@ -272,6 +272,25 @@ def test_metasearch_dedup_and_backends_tracking(monkeypatch):
     assert status["brave"] == "ok" and status["yahoo"] == "ok"
 
 
+def test_metasearch_merges_github_repo_case_variants_into_consensus(monkeypatch):
+    _patch_engines(monkeypatch, {
+        "brave": _fake_engine_class(
+            "brave", [_TR("Hound", "https://github.com/nousresearch/hermes-agent")]
+        ),
+        "yahoo": _fake_engine_class(
+            "yahoo", [_TR("Hound", "https://github.com/NousResearch/hermes-agent")]
+        ),
+    })
+    res, status = asyncio.run(ms.metasearch("hound", 6, engines=["brave", "yahoo"]))
+    assert len(res) == 1
+    assert res[0]["href"] in {
+        "https://github.com/nousresearch/hermes-agent",
+        "https://github.com/NousResearch/hermes-agent",
+    }
+    assert set(res[0]["backends"]) == {"brave", "yahoo"}
+    assert status["brave"] == "ok" and status["yahoo"] == "ok"
+
+
 def test_metasearch_error_and_empty_status(monkeypatch):
     _patch_engines(monkeypatch, {
         "brave": _fake_engine_class("brave", [], exc=RuntimeError("boom")),

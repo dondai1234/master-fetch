@@ -786,6 +786,8 @@ _SEARCH_TRACKING_PARAMS = {
     "igshid", "si",  # YouTube/social share trackers
 }
 
+_GITHUB_REPO_HOSTS = {"github.com", "www.github.com"}
+
 
 def _normalize_url(url: str) -> str:
     """Normalize a URL for cross-backend dedup.
@@ -794,6 +796,13 @@ def _normalize_url(url: str) -> str:
     KEEPS real query params, so two results that differ only in a tracking tag
     collapse to one, while genuinely distinct pages (e.g. ?page=2 vs ?page=3)
     stay distinct. Also lowercases scheme+host and strips non-root trailing slash.
+    GitHub repository owner and name are case-insensitive, so their first two
+    nonempty path segments are lowercased for github.com and www.github.com;
+    later path segments remain unchanged because branches and file paths can be
+    case-sensitive. Credential-bearing URLs skip GitHub-specific path folding so
+    opaque userinfo is never part of a newly introduced canonical collision.
+    www.github.com retains its distinct host rather than adding a separate
+    host-alias canonicalization policy.
     """
     if not url:
         return ""
@@ -804,6 +813,13 @@ def _normalize_url(url: str) -> str:
     scheme = (p.scheme or "https").lower()
     host = p.netloc.lower()
     path = p.path.rstrip("/") if len(p.path) > 1 else p.path
+    if p.hostname in _GITHUB_REPO_HOSTS and p.username is None and p.password is None:
+        segments = path.split("/")
+        repo_segment_indexes = [i for i, segment in enumerate(segments) if segment][:2]
+        if len(repo_segment_indexes) == 2:
+            for i in repo_segment_indexes:
+                segments[i] = segments[i].lower()
+            path = "/".join(segments)
     if p.query:
         kept = [kv for kv in p.query.split("&")
                 if kv and kv.split("=", 1)[0].lower() not in _SEARCH_TRACKING_PARAMS]
