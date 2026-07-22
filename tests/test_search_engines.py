@@ -54,6 +54,39 @@ def test_default_engines_is_the_full_pool():
     assert "duckduckgo" in DEFAULT_ENGINES and "yandex" in DEFAULT_ENGINES
 
 
+@pytest.mark.parametrize("url, site", [
+    ("https://github.com/repo", "github.com"),
+    ("https://docs.github.com/en", "github.com"),
+    ("https://github.com:8443/repo", "github.com"),
+    ("https://DOCS.GITHUB.COM./en", "github.com."),
+    ("https://www.github.com/repo", "www.github.com"),
+])
+def test_site_filter_allows_exact_hosts_and_real_subdomains(url, site):
+    assert se._passes_site_filter(url, site, None)
+
+
+@pytest.mark.parametrize("url", [
+    "https://evilgithub.com/repo",
+    "https://github.com.evil.test/repo",
+    "https://notgithub.com/repo",
+])
+def test_site_filter_rejects_partial_domain_matches(url):
+    assert not se._passes_site_filter(url, "github.com", None)
+
+
+def test_site_filter_strips_only_a_true_www_prefix():
+    assert not se._passes_site_filter("https://github.com/repo", "wwgithub.com", None)
+
+
+def test_exclude_site_filter_blocks_only_exact_hosts_and_real_subdomains():
+    excluded = ["github.com"]
+    assert not se._passes_site_filter("https://github.com/repo", None, excluded)
+    assert not se._passes_site_filter("https://docs.github.com/repo", None, excluded)
+    assert se._passes_site_filter("https://evilgithub.com/repo", None, excluded)
+    assert se._passes_site_filter("https://github.com.evil.test/repo", None, excluded)
+    assert se._passes_site_filter("https://notgithub.com/repo", None, excluded)
+
+
 # ─── backend resolver ───────────────────────────────────────────────────────
 
 def test_resolve_backends_default_is_full_pool():
@@ -98,6 +131,23 @@ class _FakeMeta:
         return results, status
 
 
+class _DomainFilterFakeMeta:
+    async def __call__(self, query, max_results, *, region, timelimit, page, engines):
+        results = [
+            {"title": "GitHub", "href": "https://github.com/repo", "body": "b",
+             "backend": "brave", "backends": ["brave"]},
+            {"title": "GitHub Docs", "href": "https://docs.github.com/en", "body": "b",
+             "backend": "brave", "backends": ["brave"]},
+            {"title": "Evil prefix", "href": "https://evilgithub.com/repo", "body": "b",
+             "backend": "brave", "backends": ["brave"]},
+            {"title": "Evil suffix", "href": "https://github.com.evil.test/repo", "body": "b",
+             "backend": "brave", "backends": ["brave"]},
+            {"title": "Other prefix", "href": "https://notgithub.com/repo", "body": "b",
+             "backend": "brave", "backends": ["brave"]},
+        ]
+        return results, {"brave": "ok"}
+
+
 def test_multi_search_maps_params_and_results(monkeypatch):
     fake = _FakeMeta()
     monkeypatch.setattr(se, "_metasearch", fake)
@@ -138,6 +188,25 @@ def test_multi_search_exclude_sites_filter(monkeypatch):
     monkeypatch.setattr(se, "_metasearch", fake)
     ranked, _ = asyncio.run(multi_search("x", 6, exclude_sites=["other.com"]))
     assert not any("other.com" in r.url for r in ranked)
+
+
+def test_multi_search_site_filter_keeps_only_exact_hosts_and_subdomains(monkeypatch):
+    monkeypatch.setattr(se, "_metasearch", _DomainFilterFakeMeta())
+    ranked, _ = asyncio.run(multi_search("x", 6, site="github.com"))
+    assert [r.url for r in ranked] == [
+        "https://github.com/repo",
+        "https://docs.github.com/en",
+    ]
+
+
+def test_multi_search_exclude_filter_does_not_overblock_partial_domain_matches(monkeypatch):
+    monkeypatch.setattr(se, "_metasearch", _DomainFilterFakeMeta())
+    ranked, _ = asyncio.run(multi_search("x", 6, exclude_sites=["github.com"]))
+    assert [r.url for r in ranked] == [
+        "https://evilgithub.com/repo",
+        "https://github.com.evil.test/repo",
+        "https://notgithub.com/repo",
+    ]
 
 
 def test_multi_search_server_param_accepted_but_unused(monkeypatch):

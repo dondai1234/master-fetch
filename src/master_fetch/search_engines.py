@@ -102,12 +102,33 @@ def _strip_tags(s: str) -> str:
     return BeautifulSoup(s, "lxml").get_text(" ", strip=True)
 
 
+def _normalize_domain(value: str) -> str:
+    """Return a comparable hostname without a cosmetic leading ``www.``."""
+    value = value.strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value if "://" in value or value.startswith("//") else f"//{value}")
+        host = parsed.hostname or ""
+    except ValueError:
+        return ""
+    host = host.lower().rstrip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
+def _is_domain_or_subdomain(host: str, domain: str) -> bool:
+    return bool(domain) and (host == domain or host.endswith(f".{domain}"))
+
+
 def _passes_site_filter(url: str, site: Optional[str], exclude_sites: Optional[list[str]]) -> bool:
-    host = urlparse(url).netloc.lower()
-    if site and site.lower().lstrip("www.") not in host:
+    try:
+        host = _normalize_domain(urlparse(url).hostname or "")
+    except ValueError:
+        return False
+    if site and not _is_domain_or_subdomain(host, _normalize_domain(site)):
         return False
     for ex in exclude_sites or []:
-        if ex.lower().lstrip("www.") in host:
+        if _is_domain_or_subdomain(host, _normalize_domain(ex)):
             return False
     return True
 
