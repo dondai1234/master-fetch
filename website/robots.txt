@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Block crawling of nothing — all public
+Disallow:
+
+# Sitemap location (update domain if deploying elsewhere)
+Sitemap: https://hound-mcp.pages.dev/sitemap.xml

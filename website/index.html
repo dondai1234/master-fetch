@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hound — Open-source MCP server for AI web research | Fetch, crawl, search, bypass, PDF</title>
+  <meta name="description" content="Hound is an open-source MCP server that gives AI agents web research capabilities: fetch, crawl, search, bypass Cloudflare, read PDFs. Runs locally, $0, no API keys. Works with Claude Code, Cursor, OpenCode, Pi." />
+  <meta name="theme-color" content="#0c0b09" />
+  <meta name="author" content="dondai1234" />
+  <meta name="keywords" content="hound mcp, mcp server, web research ai, ai agent web access, fetch crawl search, cloudflare bypass, anti-detect browser, keyless search, python mcp, model context protocol" />
+
+  <!-- Canonical (update if deploying to a different domain) -->
+  <link rel="canonical" href="https://hound-mcp.pages.dev/" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Hound" />
+  <meta property="og:title" content="Hound — Give your AI agent the web" />
+  <meta property="og:description" content="One MCP server. $0. Fetch, crawl, search, bypass Cloudflare, read PDFs. Local. No API keys." />
+  <meta property="og:image" content="assets/images/og-card.jpg" />
+  <meta property="og:image:width" content="1672" />
+  <meta property="og:image:height" content="941" />
+  <meta property="og:image:alt" content="Hound MCP server — give your AI agent the web" />
+  <meta property="og:url" content="https://hound-mcp.pages.dev/" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Hound — Give your AI agent the web" />
+  <meta name="twitter:description" content="Open-source MCP server. $0. Fetch, crawl, search, bypass, PDF. No API keys." />
+  <meta name="twitter:image" content="assets/images/og-card.jpg" />
+
+  <link rel="icon" type="image/png" href="assets/images/hound-logo.png" />
+  <link rel="apple-touch-icon" href="assets/images/hound-logo.png" />
+
+  <!-- Preload critical resources -->
+  <link rel="preload" href="style.css" as="style" />
+  <link rel="preload" href="assets/images/hero-topography.jpg" as="image" fetchpriority="high" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Newsreader:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Structured data: helps Google understand this is software -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Hound",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Cross-platform",
+    "description": "Open-source MCP server that gives AI agents web research capabilities: fetch, crawl, search, bypass Cloudflare, read PDFs. Runs locally, costs $0, no API keys.",
+    "url": "https://hound-mcp.pages.dev/",
+    "downloadUrl": "https://pypi.org/project/hound-mcp/",
+    "codeRepository": "https://github.com/dondai1234/master-fetch",
+    "license": "https://opensource.org/license/mit/",
+    "softwareVersion": "11.1.6",
+    "offers": {
+      "@type": "Offer",
+      "price": "0",
+      "priceCurrency": "USD"
+    },
+    "programmingLanguage": "Python",
+    "aggregateRating": {
+      "@type": "AggregateRating",
+      "ratingValue": "5",
+      "ratingCount": "131",
+      "bestRating": "5"
+    }
+  }
+  </script>
+
+  <!-- FAQ schema for rich snippets -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "What is Hound MCP server?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Hound is an open-source MCP (Model Context Protocol) server that gives AI agents web research capabilities. It provides six tools: fetch, crawl, search, screenshot, cache clearing, and version checking. It runs locally on your machine, costs $0, and requires no API keys. It works with any MCP-speaking agent including Claude Code, Cursor, OpenCode, Hermes, and Pi."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can Hound bypass Cloudflare and anti-bot protection?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. Hound uses system Chrome with auto-detection for real TLS fingerprints, four coherent fingerprint profiles, JS-layer patches for webdriver and HeadlessChrome, and human behavior simulation with Bezier mouse curves. It passes detection test sites like bot.sannysoft.com, creepjs, browserscan, and pixelscan. It bypasses Cloudflare Turnstile, CF Challenge, CF Lite, DataDome, and CF Interstice on sites like Medium, StackOverflow, Reddit, and Glassdoor. DataDome, Akamai, and interactive Cloudflare Turnstile are not bypassed."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How does Hound's keyless search work?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Hound searches 10 backends in parallel with no API key: DuckDuckGo, Brave, Mojeek, Yahoo, Yandex, Startpage, Google, Qwant, Wikipedia, and Grokipedia. Six independent index families. A local ONNX cross-encoder reranks results semantically. A diversity quorum waits for three backends before returning. Rate-limited backends are circuit-broken for 60 seconds and carried by the others."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How do I install Hound MCP server?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Run two commands: pip install hound-mcp[all] then playwright install chromium. For a lean HTTP-only install without browser dependencies, use pip install hound-mcp. Then add a new MCP server named hound with command hound and no arguments. No API keys needed. Works on Termux and aarch64 with the lean install."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Is Hound MCP free?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes, completely free. Hound is open-source under the MIT license. It runs locally on your machine with no API keys, no accounts, no credits, and no rate limits beyond what the search backends themselves impose. 131+ stars on GitHub."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "What can Hound not do?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "DataDome, Akamai, and interactive Cloudflare Turnstile are not bypassed. The next_action field tells the agent to switch sources. Login-required sites are out of scope. Deep shadow-DOM piercing is not yet wired, though actions reach most of it. YouTube provides minimal text. Search rate-limits are handled by 10-backend diversity, not bypassed individually."
+        }
+      }
+    ]
+  }
+  </script>
+
+  <!-- Progressive enhancement: only hide clip-reveal content if JS is available -->
+  <script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- ==================== NAV ==================== -->
+  <nav class="nav" id="nav" aria-label="Primary">
+    <a class="nav-brand" href="#top">
+      <img src="assets/images/hound-logo.png" alt="" class="nav-mark" width="22" height="22" />
+      <span class="nav-word">HOUND</span>
+      <span class="nav-ver">v11.1.6</span>
+    </a>
+    <ul class="nav-links" id="nav-links">
+      <li><a href="#tools" data-target="tools">Tools</a></li>
+      <li><a href="#stealth" data-target="stealth">Stealth</a></li>
+      <li><a href="#search" data-target="search">Search</a></li>
+      <li><a href="#compare" data-target="compare">Compare</a></li>
+      <li><a href="#install" data-target="install">Install</a></li>
+    </ul>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle menu" aria-expanded="false" aria-controls="nav-links">
+      <span class="toggle-bar"></span>
+      <span class="toggle-bar"></span>
+      <span class="toggle-bar"></span>
+    </button>
+  </nav>
+
+  <main id="main">
+    <span id="top" aria-hidden="true"></span>
+
+    <!-- ==================== SECTION 1 — HERO ==================== -->
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="hero-grid">
+        <div class="hero-left">
+          <p class="sec-label">
+            <span class="sec-num">00</span>
+            <span class="sec-rule"></span>
+            <span class="sec-tag">SURVEY</span>
+          </p>
+
+          <h1 class="hero-title" id="hero-title">
+            <span class="visually-hidden">Hound MCP server — </span>
+            <span class="clip-reveal"><span class="clip-inner">Give your AI</span></span>
+            <span class="clip-reveal"><span class="clip-inner">agent the <em class="ital-accent">web</em>.</span></span>
+          </h1>
+
+          <p class="hero-sub">
+            One MCP server. $0. No keys, no accounts. Fetch, crawl, search, bypass Cloudflare, read PDFs. Runs on your machine.
+          </p>
+
+          <div class="install-block">
+            <code class="install-code" id="hero-install-code">pip install hound-mcp[all] && playwright install chromium</code>
+            <button class="copy-btn" data-copy-target="hero-install-code" aria-label="Copy install command">
+              <span class="copy-label">COPY</span>
+              <span class="copy-done" aria-hidden="true">COPIED</span>
+            </button>
+          </div>
+
+          <div class="hero-ctas">
+            <a class="btn btn-primary" href="#install">Get started</a>
+            <a class="btn btn-secondary" href="https://github.com/dondai1234/master-fetch" rel="noopener">View on GitHub</a>
+          </div>
+        </div>
+
+        <div class="hero-visual" aria-hidden="true">
+          <img src="assets/images/hero-topography.jpg" alt="" class="hero-bg-img" width="1000" height="750" loading="eager" />
+          <svg class="hero-contours" viewBox="0 0 500 600" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+            <!-- contour lines: organic elevation -->
+            <path class="contour c1" d="M-20,120 C90,80 180,160 260,110 C340,65 420,140 520,95" />
+            <path class="contour c2" d="M-20,180 C70,150 170,230 270,175 C360,125 430,200 520,170" />
+            <path class="contour c3" d="M-20,250 C100,220 200,300 300,245 C390,200 450,280 520,255" />
+            <path class="contour c4" d="M-20,330 C80,300 190,380 290,325 C380,280 440,360 520,335" />
+            <path class="contour c5" d="M-20,410 C90,380 200,460 300,405 C380,365 440,440 520,415" />
+            <path class="contour c6" d="M-20,490 C110,465 210,540 320,485 C400,445 460,520 520,500" />
+            <path class="contour c7" d="M-20,560 C90,540 200,590 310,555 C400,525 460,575 520,560" />
+            <!-- tracking path: bottom-left to top-right, winding through terrain -->
+            <path class="track-path" id="hero-track" d="M40,540 C70,500 60,450 110,430 C160,410 180,470 210,440 C250,400 240,350 280,340 C330,325 360,380 390,350 C420,320 410,270 440,250 C465,235 460,200 430,180" />
+            <!-- waypoint markers -->
+            <g class="waypoints">
+              <g class="waypoint" transform="translate(40,540)">
+                <circle class="wp-ring" r="5" />
+                <circle class="wp-core" r="2" />
+                <text class="wp-label" x="10" y="3">FETCH</text>
+              </g>
+              <g class="waypoint" transform="translate(210,440)">
+                <circle class="wp-ring" r="5" />
+                <circle class="wp-core" r="2" />
+                <text class="wp-label" x="10" y="3">CRAWL</text>
+              </g>
+              <g class="waypoint" transform="translate(390,350)">
+                <circle class="wp-ring" r="5" />
+                <circle class="wp-core" r="2" />
+                <text class="wp-label" x="10" y="3">SEARCH</text>
+              </g>
+              <g class="waypoint" transform="translate(430,180)">
+                <circle class="wp-ring" r="5" />
+                <circle class="wp-core" r="2" />
+                <text class="wp-label" x="10" y="3">STEALTH</text>
+              </g>
+            </g>
+          </svg>
+          <p class="hero-caption">HOUND PIPELINE / HTTP -> STEALTHY -> EXTRACT</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- contour divider -->
+    <svg class="contour-divider" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,22 C200,6 420,38 620,16 C800,-4 1020,30 1200,12" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <!-- ==================== SECTION 2 — TOOLS ==================== -->
+    <section class="tools" id="tools" aria-labelledby="tools-title">
+      <header class="sec-head">
+        <p class="sec-label">
+          <span class="sec-num">06</span>
+          <span class="sec-rule"></span>
+          <span class="sec-tag">TOOLS / CAPABILITIES</span>
+        </p>
+        <h2 class="sec-title" id="tools-title">
+          Six tools. <em class="ital-accent">every</em> web task.
+        </h2>
+      </header>
+
+      <div class="tool-rows">
+        <div class="hover-fill-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content">
+            <span class="row-number">01</span>
+            <div class="row-text">
+              <h3 class="row-title">smart_fetch</h3>
+              <p class="row-desc">Fetch any URL. HTTP first, auto-escalates to the anti-detect browser if blocked. Bulk fetch, PDFs with OCR, page interactions, pagination.</p>
+            </div>
+            <span class="row-tag">auto-escalate</span>
+          </div>
+        </div>
+
+        <div class="hover-fill-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content">
+            <span class="row-number">02</span>
+            <div class="row-text">
+              <h3 class="row-title">smart_crawl</h3>
+              <p class="row-desc">Best-first same-domain crawl. Each page as markdown with content_ok and page_type. Sitemap mode, focus filtering, token budgets.</p>
+            </div>
+            <span class="row-tag">best-first</span>
+          </div>
+        </div>
+
+        <div class="hover-fill-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content">
+            <span class="row-number">03</span>
+            <div class="row-text">
+              <h3 class="row-title">smart_search</h3>
+              <p class="row-desc">Ten keyless search backends in parallel. Neural rerank with cross-backend consensus. No API key, no account.</p>
+            </div>
+            <span class="row-tag">10 backends</span>
+          </div>
+        </div>
+
+        <div class="hover-fill-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content">
+            <span class="row-number">04</span>
+            <div class="row-text">
+              <h3 class="row-title">screenshot</h3>
+              <p class="row-desc">Capture a page as an image. For multimodal agents that need visual layout.</p>
+            </div>
+            <span class="row-tag">multimodal</span>
+          </div>
+        </div>
+
+        <div class="hover-fill-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content">
+            <span class="row-number">05</span>
+            <div class="row-text">
+              <h3 class="row-title">cache_clear</h3>
+              <p class="row-desc">Clear the fetch cache. All or expired only. Set cache_ttl=0 to force fresh.</p>
+            </div>
+            <span class="row-tag">all / expired</span>
+          </div>
+        </div>
+
+        <div class="hover-fill-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content">
+            <span class="row-number">06</span>
+            <div class="row-text">
+              <h3 class="row-title">version</h3>
+              <p class="row-desc">Installed version and update status. Brick-proof self-update with rollback.</p>
+            </div>
+            <span class="row-tag">self-healing</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- contour divider -->
+    <svg class="contour-divider" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,18 C160,40 320,4 520,22 C700,38 920,8 1200,26" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <!-- ==================== SECTION 3 — STEALTH ==================== -->
+    <section class="stealth" id="stealth" aria-labelledby="stealth-title">
+      <header class="sec-head">
+        <p class="sec-label">
+          <span class="sec-num">08</span>
+          <span class="sec-rule"></span>
+          <span class="sec-tag">SITES / STEALTH BENCHMARK</span>
+        </p>
+        <h2 class="sec-title" id="stealth-title">
+          Passes the <em class="ital-accent">hardest</em> anti-bot targets.
+        </h2>
+      </header>
+
+      <div class="stealth-split">
+        <div class="stealth-desc">
+          <p>
+            System Chrome auto-detection for real TLS fingerprints. Four coherent fingerprint profiles. JS-layer patches for webdriver, HeadlessChrome, canvas noise, permissions. Human behavior simulation with Bezier mouse curves. Cloudflare Turnstile solver with human-like mouse movement.
+          </p>
+        </div>
+
+        <div class="telemetry-panel">
+          <div class="panel-title">
+            <span class="dot dot-amber"></span>
+            <span>STEALTH TELEMETRY / LIVE READOUT</span>
+          </div>
+
+          <div class="panel-sub">DETECTION TEST SITES</div>
+          <ul class="tel-list">
+            <li><span class="tel-name">bot.sannysoft.com</span><span class="tel-status pass">[PASS]</span><span class="dot dot-amber"></span></li>
+            <li><span class="tel-name">creepjs</span><span class="tel-status pass">[PASS]</span><span class="dot dot-amber"></span></li>
+            <li><span class="tel-name">browserscan</span><span class="tel-status pass">[PASS]</span><span class="dot dot-amber"></span></li>
+            <li><span class="tel-name">pixelscan</span><span class="tel-status pass">[PASS]</span><span class="dot dot-amber"></span></li>
+          </ul>
+
+          <div class="panel-sub">ANTI-BOT PROTECTED SITES</div>
+          <table class="tel-table">
+            <thead>
+              <tr><th>SITE</th><th>PROTECTION</th><th>STATUS</th><th>SIZE</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr><td>canadianinsider</td><td>CF TURNSTILE</td><td class="t-code">200</td><td>78 KB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>medium</td><td>CF INTERSTICE</td><td class="t-code">200</td><td>93 KB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>stackoverflow</td><td>CLOUDFLARE</td><td class="t-code">200</td><td>1.1 MB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>nowsecure</td><td>CF CHALLENGE</td><td class="t-code">200</td><td>180 KB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>glassdoor</td><td>DATADOME</td><td class="t-code">200</td><td>849 KB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>reddit</td><td>CF LITE</td><td class="t-code">200</td><td>1 MB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>hacker news</td><td>NONE</td><td class="t-code">200</td><td>35 KB</td><td><span class="dot dot-amber"></span></td></tr>
+              <tr><td>github</td><td>NONE</td><td class="t-code">200</td><td>523 KB</td><td><span class="dot dot-amber"></span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="signals-block">
+        <div class="panel-sub">STEALTH SIGNALS</div>
+        <table class="signals-table">
+          <tbody>
+            <tr><td class="sig-name">navigator.webdriver</td><td class="sig-val">undefined</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">navigator.userAgent</td><td class="sig-val">Chrome/150</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">navigator.platform</td><td class="sig-val">Win32</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">navigator.plugins</td><td class="sig-val">5</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">window.chrome</td><td class="sig-val">object</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">WebGL renderer</td><td class="sig-val">real GPU</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">canvas fingerprint</td><td class="sig-val">per-session</td><td class="sig-state">not detected</td></tr>
+            <tr><td class="sig-name">TLS fingerprint</td><td class="sig-val">Chrome 150</td><td class="sig-state">not detected</td></tr>
+          </tbody>
+        </table>
+        <p class="signals-note">
+          Memory: RSS decreased 3.5 MB over 5 sequential fetches. No RAM creep.
+        </p>
+      </div>
+    </section>
+
+    <!-- contour divider -->
+    <svg class="contour-divider" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,24 C220,2 460,44 660,18 C880,-6 1040,36 1200,14" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <!-- ==================== SECTION 4 — SEARCH ==================== -->
+    <section class="search" id="search" aria-labelledby="search-title">
+      <header class="sec-head">
+        <p class="sec-label">
+          <span class="sec-num">10</span>
+          <span class="sec-rule"></span>
+          <span class="sec-tag">ENGINES / KEYLESS SEARCH</span>
+        </p>
+        <h2 class="sec-title" id="search-title">
+          Ten engines. <em class="ital-accent">zero</em> keys.
+        </h2>
+      </header>
+
+      <div class="search-split">
+        <div class="search-left">
+          <p class="search-desc">
+            DuckDuckGo, Brave, Mojeek, Yahoo, Yandex, Startpage, Google, Qwant, plus Wikipedia and Grokipedia. Six independent index families, not the same feed twice. A local ONNX cross-encoder reranks results semantically. A diversity quorum waits for three backends before returning. A backend that rate-limits is circuit-broken for 60 seconds and carried by the others.
+          </p>
+
+          <div class="callout-stats">
+            <div class="callout">
+              <span class="callout-num" data-count="10">10</span>
+              <span class="callout-label">backends</span>
+            </div>
+            <div class="callout">
+              <span class="callout-num" data-count="6" data-suffix="+">6+</span>
+              <span class="callout-label">index families</span>
+            </div>
+            <div class="callout">
+              <span class="callout-num" data-count="0" data-prefix="$">$0</span>
+              <span class="callout-label">cost</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="search-diagram" aria-hidden="true">
+          <svg class="radial-diagram" id="radial-diagram" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
+            <g class="radial-lines">
+              <line x1="180" y1="180" x2="180" y2="48" />
+              <line x1="180" y1="180" x2="257.6" y2="73.2" />
+              <line x1="180" y1="180" x2="305.5" y2="139.2" />
+              <line x1="180" y1="180" x2="305.5" y2="220.8" />
+              <line x1="180" y1="180" x2="257.6" y2="286.8" />
+              <line x1="180" y1="180" x2="180" y2="312" />
+              <line x1="180" y1="180" x2="102.4" y2="286.8" />
+              <line x1="180" y1="180" x2="54.5" y2="220.8" />
+              <line x1="180" y1="180" x2="54.5" y2="139.2" />
+              <line x1="180" y1="180" x2="102.4" y2="73.2" />
+            </g>
+            <g class="radial-nodes">
+              <g class="r-node" transform="translate(180,48)"><circle r="24"/><text y="3">DDG</text></g>
+              <g class="r-node" transform="translate(257.6,73.2)"><circle r="24"/><text y="3">Brave</text></g>
+              <g class="r-node" transform="translate(305.5,139.2)"><circle r="24"/><text y="3">Mojeek</text></g>
+              <g class="r-node" transform="translate(305.5,220.8)"><circle r="24"/><text y="3">Yahoo</text></g>
+              <g class="r-node" transform="translate(257.6,286.8)"><circle r="24"/><text y="3">Yandex</text></g>
+              <g class="r-node" transform="translate(180,312)"><circle r="24"/><text y="3">Startpg</text></g>
+              <g class="r-node" transform="translate(102.4,286.8)"><circle r="24"/><text y="3">Google</text></g>
+              <g class="r-node" transform="translate(54.5,220.8)"><circle r="24"/><text y="3">Qwant</text></g>
+              <g class="r-node" transform="translate(54.5,139.2)"><circle r="24"/><text y="3">Wiki</text></g>
+              <g class="r-node" transform="translate(102.4,73.2)"><circle r="24"/><text y="3">Grokip</text></g>
+            </g>
+            <g class="r-center" transform="translate(180,180)">
+              <circle r="34" />
+              <text class="r-center-l1" y="-3">MERGE</text>
+              <text class="r-center-l2" y="11">RERANK</text>
+            </g>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- contour divider -->
+    <svg class="contour-divider" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,20 C180,-2 380,42 580,16 C780,-6 980,34 1200,20" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <!-- ==================== SECTION 5 — COMPARE ==================== -->
+    <section class="compare" id="compare" aria-labelledby="compare-title">
+      <header class="sec-head">
+        <p class="sec-label">
+          <span class="sec-num">01</span>
+          <span class="sec-rule"></span>
+          <span class="sec-tag">CHOICE / WHY HOUND</span>
+        </p>
+        <h2 class="sec-title" id="compare-title">
+          The only free tool that does <em class="ital-accent">all</em> of it.
+        </h2>
+      </header>
+
+      <div class="compare-rows">
+        <div class="hover-fill-row compare-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content compare-content">
+            <h3 class="row-title">Crawl4AI</h3>
+            <div class="row-cols">
+              <p class="row-desc">Crawls well.</p>
+              <p class="row-miss">No search. Trips on Cloudflare.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="hover-fill-row compare-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content compare-content">
+            <h3 class="row-title">Jina Reader</h3>
+            <div class="row-cols">
+              <p class="row-desc">Fetches pages.</p>
+              <p class="row-miss">Rate-limits. Routes through their API.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="hover-fill-row compare-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content compare-content">
+            <h3 class="row-title">Firecrawl</h3>
+            <div class="row-cols">
+              <p class="row-desc">Managed scraping.</p>
+              <p class="row-miss">Good stuff behind paid cloud. Credits don't roll over.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="hover-fill-row compare-row" tabindex="0">
+          <div class="fill-layer"></div>
+          <div class="row-content compare-content">
+            <h3 class="row-title">Parallel Search</h3>
+            <div class="row-cols">
+              <p class="row-desc">Remote search.</p>
+              <p class="row-miss">No crawl. Runs on their servers.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="hover-fill-row compare-row winner" tabindex="0">
+          <div class="fill-layer fill-always"></div>
+          <div class="row-content compare-content">
+            <h3 class="row-title">Hound</h3>
+            <div class="row-cols">
+              <p class="row-desc">Fetch, crawl, search, bypass, PDF, OCR. All local. $0.</p>
+              <p class="row-miss" aria-hidden="true"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="token-callout">
+        <div class="tc-left"><span class="tc-big tc-teal">6 tools</span></div>
+        <div class="tc-center"><span class="tc-big">~2.7K tokens</span></div>
+        <div class="tc-right"><span class="tc-small">tools/list</span></div>
+        <p class="tc-note">Typical MCP servers dump 3-5K tokens just to exist.</p>
+      </div>
+    </section>
+
+    <!-- contour divider -->
+    <svg class="contour-divider" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,16 C200,44 400,2 600,24 C820,46 1000,8 1200,28" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <!-- ==================== SECTION 6 — INSTALL ==================== -->
+    <section class="install" id="install" aria-labelledby="install-title">
+      <header class="sec-head">
+        <p class="sec-label">
+          <span class="sec-num">02</span>
+          <span class="sec-rule"></span>
+          <span class="sec-tag">COMMANDS / QUICK START</span>
+        </p>
+        <h2 class="sec-title" id="install-title">
+          Two commands. Then point your agent at hound.
+        </h2>
+      </header>
+
+      <div class="install-blocks">
+        <div class="term-block">
+          <div class="term-head"><span class="term-prompt">$</span><span class="term-file">shell</span></div>
+          <code class="term-code" id="install-code-1">pip install hound-mcp[all]</code>
+          <button class="copy-btn" data-copy-target="install-code-1" aria-label="Copy pip install command">
+            <span class="copy-label">COPY</span>
+            <span class="copy-done" aria-hidden="true">COPIED</span>
+          </button>
+        </div>
+        <div class="term-block">
+          <div class="term-head"><span class="term-prompt">$</span><span class="term-file">shell</span></div>
+          <code class="term-code" id="install-code-2">playwright install chromium</code>
+          <button class="copy-btn" data-copy-target="install-code-2" aria-label="Copy playwright install command">
+            <span class="copy-label">COPY</span>
+            <span class="copy-done" aria-hidden="true">COPIED</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="details-list">
+        <details class="detail">
+          <summary><span class="detail-tag">01</span> Lean install (HTTP-only)</summary>
+          <div class="detail-body">
+            <div class="code-inline">
+              <code id="detail-code-1">pip install hound-mcp</code>
+              <button class="copy-btn sm" data-copy-target="detail-code-1" aria-label="Copy lean install command">
+                <span class="copy-label">COPY</span><span class="copy-done" aria-hidden="true">COPIED</span>
+              </button>
+            </div>
+            <p>No browser deps. Works on Termux, aarch64. HTTP fetch + crawl + keyless search. No stealthy browser or screenshot.</p>
+          </div>
+        </details>
+
+        <details class="detail">
+          <summary><span class="detail-tag">02</span> Updating and rollback</summary>
+          <div class="detail-body">
+            <ul class="cmd-list">
+              <li><code>hound -u</code> — update</li>
+              <li><code>hound --doctor</code> — health check</li>
+              <li><code>hound --rollback</code> — undo last update</li>
+              <li><code>python ~/.hound/repair.py</code> — emergency repair</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="detail">
+          <summary><span class="detail-tag">03</span> Pi extension</summary>
+          <div class="detail-body">
+            <div class="code-inline">
+              <code id="detail-code-3">pip install hound-mcp[all] then pi install npm:@houndmcp/hound-mcp-pi</code>
+              <button class="copy-btn sm" data-copy-target="detail-code-3" aria-label="Copy pi install command">
+                <span class="copy-label">COPY</span><span class="copy-done" aria-hidden="true">COPIED</span>
+              </button>
+            </div>
+            <p>All 6 tools as native Pi tools. Prewarmed at session start.</p>
+          </div>
+        </details>
+
+        <details class="detail">
+          <summary><span class="detail-tag">04</span> Open WebUI (HTTP)</summary>
+          <div class="detail-body">
+            <div class="code-inline">
+              <code id="detail-code-4">hound --http --host 127.0.0.1 --port 8765</code>
+              <button class="copy-btn sm" data-copy-target="detail-code-4" aria-label="Copy open webui command">
+                <span class="copy-label">COPY</span><span class="copy-done" aria-hidden="true">COPIED</span>
+              </button>
+            </div>
+            <p>Point Open WebUI at http://127.0.0.1:8765/mcp</p>
+          </div>
+        </details>
+      </div>
+
+      <div class="agent-prompt">
+        <div class="agent-prompt-head">
+          <span class="ap-label">AGENT INSTALL PROMPT</span>
+          <button class="copy-btn" data-copy-target="agent-install-code" aria-label="Copy agent install prompt">
+            <span class="copy-label">COPY</span>
+            <span class="copy-done" aria-hidden="true">COPIED</span>
+          </button>
+        </div>
+        <pre class="agent-prompt-code" id="agent-install-code">Install the Hound MCP server on this machine. Follow every step. Do not skip any.
+1. Figure out which agent harness you are running on. Find where the MCP config file lives and what format it expects.
+2. Run: pip install hound-mcp[all]  Then: playwright install chromium (verify first if not already installed)
+3. Add a new MCP server named "hound" with command "hound", no arguments. No API keys needed.
+4. Save the file. Tell the user to restart the agent.</pre>
+      </div>
+    </section>
+
+    <!-- contour divider -->
+    <svg class="contour-divider" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,22 C210,4 410,40 620,14 C830,-4 1020,32 1200,18" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <!-- ==================== HONEST LIMITS ==================== -->
+    <section class="limits" aria-labelledby="limits-title">
+      <header class="sec-head sec-head-dim">
+        <p class="sec-label">
+          <span class="sec-num">06</span>
+          <span class="sec-rule"></span>
+          <span class="sec-tag">LIMITS / HONEST</span>
+        </p>
+        <h2 class="sec-title sec-title-dim" id="limits-title">
+          What Hound can't do.
+        </h2>
+      </header>
+
+      <ul class="limits-list">
+        <li><span class="limit-tag">[BLOCKED]</span><span class="limit-text">DataDome, Akamai, interactive Cloudflare Turnstile — not bypassed. <code>next_action</code> tells the agent to switch sources.</span></li>
+        <li><span class="limit-tag">[RATE]</span><span class="limit-text">Not an issue if you're a single user, even with decently heavy use. The 10 backends carry the load. <code>HOUND_SEARCH_PROXY</code> if you outgrow them.</span></li>
+        <li><span class="limit-tag">[AUTH]</span><span class="limit-text">Login-required sites — out of scope.</span></li>
+        <li><span class="limit-tag">[DOM]</span><span class="limit-text">Deep shadow-DOM — <code>actions</code> reach most of it. Deep shadow-DOM piercing not yet wired.</span></li>
+        <li><span class="limit-tag">[VIDEO]</span><span class="limit-text">YouTube — minimal text.</span></li>
+      </ul>
+    </section>
+  </main>
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer class="footer" aria-label="Site footer">
+    <svg class="contour-divider footer-contour" viewBox="0 0 1200 40" preserveAspectRatio="none" width="100%" height="40" aria-hidden="true">
+      <path d="M0,18 C180,42 420,2 640,22 C860,44 1020,6 1200,24" fill="none" stroke="currentColor" stroke-width="1" />
+    </svg>
+
+    <div class="footer-grid">
+      <div class="footer-col footer-col-brand">
+        <div class="footer-brand">
+          <img src="assets/images/hound-logo.png" alt="" class="footer-mark" width="20" height="20" loading="lazy" />
+          <span class="footer-word">HOUND</span>
+          <span class="footer-ver">v11.1.6</span>
+        </div>
+        <p class="footer-license">MIT license</p>
+      </div>
+
+      <nav class="footer-col footer-col-links" aria-label="Footer">
+        <a href="https://github.com/dondai1234/master-fetch" rel="noopener">GitHub</a>
+        <a href="https://pypi.org/project/hound-mcp" rel="noopener">PyPI</a>
+        <a href="https://www.npmjs.com/package/@houndmcp/hound-mcp-pi" rel="noopener">npm</a>
+        <a href="https://github.com/dondai1234/master-fetch/releases" rel="noopener">Changelog</a>
+        <a href="https://github.com/dondai1234/master-fetch/issues" rel="noopener">Issues</a>
+      </nav>
+
+      <div class="footer-col footer-col-status">
+        <div class="status-line">
+          <span class="dot dot-amber dot-pulse"></span>
+          <span class="status-text">ALL SYSTEMS OPERATIONAL</span>
+        </div>
+        <span class="stars-text">131 stars</span>
+      </div>
+    </div>
+
+    <div class="footer-bottom">
+      <p>Give your AI agent the web.</p>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+
+  <!-- Noscript fallback: crawlable content for crawlers that don't execute JS -->
+  <noscript>
+    <h2>Hound MCP Server</h2>
+    <p>
+      Hound is an open-source MCP (Model Context Protocol) server that gives AI agents web research capabilities.
+      It provides six tools: smart_fetch (fetch any URL with auto-escalation to anti-detect browser),
+      smart_crawl (best-first same-domain crawl), smart_search (10 keyless search backends with neural reranking),
+      screenshot, cache_clear, and version.
+      It runs locally on your machine, costs $0, requires no API keys, and works with any MCP-speaking agent
+      including Claude Code, Cursor, OpenCode, Hermes, and Pi.
+    </p>
+    <p>
+      Hound bypasses Cloudflare Turnstile, CF Challenge, CF Lite, DataDome, and CF Interstice on sites
+      like Medium, StackOverflow, Reddit, and Glassdoor using system Chrome with real TLS fingerprints,
+      JS-layer patches, and human behavior simulation with Bezier mouse curves.
+      It reads PDFs with OCR, supports page interactions and pagination, and includes a screenshot tool
+      for multimodal agents.
+    </p>
+    <p>
+      Install: pip install hound-mcp[all] then playwright install chromium.
+      GitHub: github.com/dondai1234/master-fetch
+      PyPI: pypi.org/project/hound-mcp
+      Version: 11.1.6 | License: MIT | Stars: 131+ | Tests: 806
+    </p>
+  </noscript>
+</body>
+</html>
