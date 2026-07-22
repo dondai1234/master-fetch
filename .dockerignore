@@ -1,0 +1,62 @@
+# Docker ignore patterns for hound-mcp
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+
+# Python cache
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+
+# Virtual environments
+.venv
+venv
+env/
+ENV/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Documentation (not needed for runtime)
+docs
+*.md
+!README.md
+
+# Tests (not needed for runtime)
+tests
+.pytest_cache
+
+# Type stubs
+*.pyi
+.pyi/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker files (don't copy into image)
+docker-compose*.yml
+.dockerignore
+Dockerfile*
+
+# Development files
+*.log
+.env.*
+!.env.example
