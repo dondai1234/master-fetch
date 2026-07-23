@@ -13,7 +13,7 @@ from master_fetch.server import (
     _agent_hints, _apply_chunking, _is_cloudflare_from_response,
     _annotate_quality, MAX_CONTENT_CHARS, MIN_CHUNK_CHARS, MAX_BULK_URLS,
     _JS_SHELL_SIGNALS, _CF_CHALLENGE_SIGNALS, MAX_RESPONSE_BYTES,
-    _browser_deps_available,
+    _browser_deps_available, MasterFetchServer,
 )
 
 
@@ -26,6 +26,49 @@ def _make_result(**kwargs):
     )
     defaults.update(kwargs)
     return ResponseModel(**defaults)
+
+
+class TestMCPDispatch:
+
+    @pytest.mark.asyncio
+    async def test_smart_fetch_forwards_focus_and_actions(self):
+        server = MasterFetchServer()
+        server.smart_fetch = AsyncMock(return_value=_make_result())
+        actions = [{"click": "button.load-more"}]
+
+        await server._dispatch("mcp_smart_fetch", {
+            "url": "https://example.com",
+            "focus": "release notes",
+            "actions": actions,
+        })
+
+        call = server.smart_fetch.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["focus"] == "release notes"
+        assert kwargs["actions"] == actions
+
+    @pytest.mark.asyncio
+    async def test_top_level_focus_and_actions_override_options(self):
+        server = MasterFetchServer()
+        server.smart_fetch = AsyncMock(return_value=_make_result())
+        top_actions = [{"press": "Enter"}]
+
+        await server._dispatch("mcp_smart_fetch", {
+            "url": "https://example.com",
+            "focus": "top level",
+            "actions": top_actions,
+            "options": {
+                "focus": "legacy option",
+                "actions": [{"wait": 1000}],
+            },
+        })
+
+        call = server.smart_fetch.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["focus"] == "top level"
+        assert kwargs["actions"] == top_actions
 
 
 # ─── JS shell detection ───────────────────────────────────────────

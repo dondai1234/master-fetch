@@ -1030,25 +1030,40 @@ class BrowserSession:
             logger.info(f"Browser session started (stealthy={self._is_stealthy})")
         except Exception as e:
             logger.error(f"Browser session start failed: {e}")
-            await self._cleanup_playwright()
+            # start() can fail after a context/browser or temporary profile was
+            # created. close() also handles partially initialized sessions.
+            await self.close()
             raise
 
     async def close(self) -> None:
         """Close the browser and cleanup."""
-        if not self._is_alive:
+        if not any((
+            self._is_alive,
+            self._context is not None,
+            self._browser is not None,
+            self._playwright is not None,
+            self._user_data_dir is not None,
+        )):
             return
 
-        try:
-            if self._context:
+        if self._context:
+            try:
                 await self._context.close()
+            except Exception as e:
+                logger.debug(f"Error closing browser context: {e}")
+            finally:
                 self._context = None
-            if self._browser:
+        if self._browser:
+            try:
                 await self._browser.close()
+            except Exception as e:
+                logger.debug(f"Error closing browser: {e}")
+            finally:
                 self._browser = None
-        except Exception as e:
-            logger.debug(f"Error closing browser: {e}")
-        finally:
+
+        try:
             await self._cleanup_playwright()
+        finally:
             self._is_alive = False
 
             # Cleanup temp dir

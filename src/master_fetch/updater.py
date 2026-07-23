@@ -97,11 +97,11 @@ def _at_or_ahead(installed: str, target: str) -> bool:
 
 
 def _advanced(new_ver: str, target: str) -> bool:
-    """True if, after a pip run, the installed version reached the target."""
+    """True if a pinned pip run installed the requested target exactly."""
     if not new_ver or new_ver == "unknown":
         return False
     try:
-        return pad_version(new_ver) >= pad_version(target)
+        return pad_version(new_ver) == pad_version(target)
     except (ValueError, IndexError):
         return new_ver == target
 
@@ -485,7 +485,7 @@ def _advanced(new):
         return False
     np, tp = _pad(new), _pad(TARGET)
     if np and tp:
-        return np >= tp
+        return np == tp
     return new == TARGET
 
 _wait_parent_exit()
@@ -558,6 +558,7 @@ def do_update(target: str | None = None) -> None:
     None means the latest on PyPI. See the module docstring for the design."""
     from master_fetch import cli_ui as ui
     installed, latest, _is_current = check_version()
+    pinned_target = target is not None
     if target is None:
         target = latest
 
@@ -567,7 +568,12 @@ def do_update(target: str | None = None) -> None:
         print("  " + ui.warn("check your connection, then") + "  " + ui.cmd("hound -u"))
         return
 
-    if _at_or_ahead(installed, target):
+    # A pinned target is also the rollback mechanism, so an explicitly older
+    # version must not be treated as "up to date". Only an exact pinned match
+    # can return early; latest-version updates retain the at-or-ahead guard.
+    if _advanced(installed, target) or (
+        not pinned_target and _at_or_ahead(installed, target)
+    ):
         print(ui.branded(ui.ver(installed), ui.ok("up to date")))
         return
 

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [12.1.2] - 2026-07-23
+
+### Fixed
+
+- Forward the documented `focus` and `actions` arguments from the MCP tool
+  dispatcher to `smart_fetch` (previously silently dropped). Top-level values
+  take precedence over legacy `options` bag values.
+- Clean up partially created browser contexts, Playwright instances, and
+  temporary profiles when browser startup fails. `close()` now handles
+  partially initialized sessions; context and browser close independently.
+- Let `hound --rollback` install the recorded older version and verify that
+  the pinned target was installed exactly. Normal `hound -u` behavior is
+  unchanged.
+
 ## [12.1.1] - 2026-07-23
 
 ### Fixed

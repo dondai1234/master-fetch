@@ -10,7 +10,7 @@ import sys
 import pytest
 from unittest.mock import patch, MagicMock
 from master_fetch.cli import main, _run_repair
-from master_fetch.updater import check_version, pad_version, _at_or_ahead
+from master_fetch.updater import check_version, pad_version, _at_or_ahead, _advanced, _build_helper_source, do_update, rollback
 
 
 # ─── CLI self-heal structure ───────────────────────────────────────
@@ -109,3 +109,45 @@ class TestVersionComparison:
 
     def test_malformed_installed(self):
         assert _at_or_ahead("not-a-version", "11.1.6") is False
+
+
+class TestRollback:
+
+    def test_post_install_verification_requires_exact_target(self):
+        assert _advanced("11.1.10", "11.1.10") is True
+        assert _advanced("11.2.0", "11.1.10") is False
+
+    def test_windows_helper_verification_requires_exact_target(self):
+        source = _build_helper_source("11.1.10", "repair.py", 1234)
+        assert "return np == tp" in source
+
+    def test_do_update_installs_explicit_older_target(self):
+        import sys
+        versions = [
+            ("11.2.0", "11.2.0", True),
+            ("11.1.10", "11.2.0", False),
+            ("11.1.10", "11.2.0", False),
+        ]
+        with patch("master_fetch.updater.check_version", side_effect=versions), \
+             patch("master_fetch.updater._write_repair_script"), \
+             patch("master_fetch.updater._write_last_version") as write_last, \
+             patch("master_fetch.updater._other_hound_pids", return_value=[]), \
+             patch("master_fetch.updater._spawn_helper", return_value=True) as spawn_helper, \
+             patch("master_fetch.updater._run_pip", return_value=(0, "")) as run_pip:
+            do_update(target="11.1.10")
+
+        write_last.assert_called_once_with("11.2.0")
+        if sys.platform == "win32":
+            spawn_helper.assert_called_once()
+            assert spawn_helper.call_args.args[0] == "11.1.10"
+            run_pip.assert_not_called()
+        else:
+            assert "hound-mcp==11.1.10" in run_pip.call_args.args[0]
+
+    def test_rollback_uses_recorded_version(self):
+        with patch("master_fetch.updater._read_last_version", return_value="11.1.10"), \
+             patch("master_fetch.updater.check_version", return_value=("11.2.0", "11.2.0", True)), \
+             patch("master_fetch.updater.do_update") as update:
+            rollback()
+
+        update.assert_called_once_with(target="11.1.10")
