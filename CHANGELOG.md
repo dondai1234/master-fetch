@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [12.1.1] - 2026-07-23
+
+### Fixed
+
+- BYOK mention added to MCP tool description (`_TOOL_DEFS` in server.py) so
+  agents discover the BYOK search API feature from the tool description itself,
+  not just the README.
+
 ## [12.1.0] - 2026-07-23
 
 ### Added: Bring Your Own Key (BYOK) search API system
