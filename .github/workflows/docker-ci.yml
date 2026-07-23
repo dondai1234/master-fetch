@@ -1,0 +1,58 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.dockerignore'
+      - '.github/workflows/docker-ci.yml'
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --build-arg INSTALL_CHROME=true \
+            -t hound-mcp:test \
+            -f Dockerfile .
+
+      - name: Start container
+        run: |
+          docker run -d \
+            --name hound-test \
+            --shm-size=1gb \
+            -p 8765:8765 \
+            hound-mcp:test
+
+      - name: Wait for healthcheck
+        run: |
+          timeout 60 bash -c 'until docker inspect --format="{{.State.Health.Status}}" hound-test | grep -q "healthy\|starting"; do sleep 2; done'
+          echo "Container is healthy"
+
+      - name: Check MCP endpoint
+        run: |
+          sleep 5  # Give server time to fully start
+          curl -f http://localhost:8765/mcp || exit 1
+
+      - name: Run tests inside container
+        run: |
+          docker exec hound-test python -m pytest tests/ -v --tb=short -x
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop hound-test || true
+          docker rm hound-test || true

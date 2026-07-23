@@ -1,0 +1,65 @@
+# Hound MCP server — docker compose
+#
+#   docker compose up -d --build
+#
+# Then point any streamable-HTTP MCP client (Open WebUI ≥ 0.6.31, etc.) at:
+#   http://0.0.0.0:8765/mcp
+
+services:
+  hound:
+    build:
+      context: .
+      # Uncomment for real-Chrome stealth (bigger image, better anti-bot):
+      # args:
+      #   INSTALL_CHROME: "true"
+    image: hound-mcp:latest
+    container_name: hound
+
+    # ── Chromium essentials ──────────────────────────────────────────────
+    # Chromium renderers use /dev/shm heavily; Docker's 64MB default causes
+    # silent tab crashes on media-heavy pages. (Hound's stealthy tier passes
+    # --disable-dev-shm-usage, but the dynamic tier does not.)
+    shm_size: "1gb"
+    # Reap zombie Chromium processes (PID 1 init).
+    init: true
+
+    ports:
+      # Bound to loopback on purpose: Hound's HTTP endpoint has no
+      # authentication. Change to "8765:8765" only on a trusted network.
+      - "0.0.0.0:8765:8765"
+
+    # Stealthy fetches return anti-adblock overlays / 'CSS onerror' error pages → network-level ad-blocking
+    # (Pi-hole, AdGuard) is filtering the browser's subresources; give the container its own dns: entries.
+    dns:
+      - 1.1.1.1
+      - 9.9.9.9
+
+    volumes:
+      # Persist the fetch/search cache across restarts (optional).
+      - hound-cache:/home/hound/.hound
+
+    environment:
+      # Idle browser shutdown (seconds) — the warm stealthy browser closes
+      # after this much inactivity and relaunches on the next fetch.
+      # HOUND_BROWSER_IDLE_TIMEOUT: "300"
+      NO_COLOR: "1"
+
+    # ── Older Docker engines only ────────────────────────────────────────
+    # On Docker Engine < 24 (or hosts with unprivileged user namespaces
+    # disabled), Chromium's sandbox can fail to start under the default
+    # seccomp profile. Fix by supplying Playwright/Chrome's seccomp profile:
+    #   https://github.com/microsoft/playwright/blob/main/utils/docker/seccomp_profile.json
+    # security_opt:
+    #   - seccomp=./seccomp_profile.json
+
+    # Memory ceiling: bundled Chromium + ONNX reranker peak around 1.5-2GB
+    # under heavy crawls. Adjust to taste; 3g is a comfortable ceiling.
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
+    restart: unless-stopped
+
+volumes:
+  hound-cache:
