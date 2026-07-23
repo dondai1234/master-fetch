@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Forward the documented `focus` and `actions` arguments from the MCP tool dispatcher to `smart_fetch`.
+
 ## [11.2.0] - 2026-07-23
 
 ### Added: Six-signal search ranking

@@ -3077,6 +3077,8 @@ class MasterFetchServer:
             timeout = args.get("timeout") if args.get("timeout") is not None else options.get("timeout")
             pages = args.get("pages") if args.get("pages") is not None else options.get("pages")
             password = args.get("password") if args.get("password") is not None else options.get("password")
+            focus = args.get("focus") if args.get("focus") is not None else options.get("focus")
+            actions = args.get("actions") if args.get("actions") is not None else options.get("actions")
             kw = {k: v for k, v in options.items() if k in (
                 "proxy", "cookies", "extra_headers", "useragent",
                 "wait", "network_idle", "headless", "real_chrome", "respect_robots",
@@ -3091,6 +3093,8 @@ class MasterFetchServer:
                 timeout=timeout if timeout is not None else 30000,
                 pages=pages,
                 password=password,
+                focus=focus,
+                actions=actions,
                 cache_ttl=args.get("cache_ttl", DEFAULT_TTL),
                 force_fetcher=args.get("force_fetcher"),
                 offset=args.get("offset", 0), **kw,
