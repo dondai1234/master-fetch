@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Scope `smart_fetch` request context to each invocation and forward `focus`
+  through bulk URL fetches, preventing filters from leaking or being ignored.
+
 ## [12.3.0] - 2026-07-23
 
 ### Per-provider API optimization (critical for BYOK parity)
