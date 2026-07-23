@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [11.1.11] - 2026-07-23
+
+### Fixed: Agent efficiency guidance in tool descriptions
+
+Live head-to-head testing against Exa revealed that agents using Hound made 14 tool
+calls (76K tokens, 2min) for a multi-fact question where Exa needed 4 calls (45K
+tokens, 22sec). The root cause was not search quality or coverage - Hound found
+the same 2026 content Exa did. The problem was agent behavior: the agent did 7
+per-model searches instead of 1 broad search, fetched raw config.json files from
+HuggingFace to extract individual values, and re-fetched the same URLs with
+different focus/offset.
+
+Added EFFICIENCY sections to both smart_search and smart_fetch tool descriptions:
+
+- **smart_search**: "For multi-fact or comparison questions, do ONE broad search,
+  not one per fact. One good comparison source answers 10 sub-questions in a
+  single fetch with focus=. If results miss something, try related_queries or
+  rephrase ONCE, not N searches per sub-fact."
+- **smart_fetch**: "focus= is post-cache (re-filters cached content, no re-fetch) -
+  don't re-fetch the same URL with different focus/offset unless is_truncated=true.
+  Don't fetch raw files (config.json, raw GitHub) to extract individual values -
+  fetch the article/docs and use focus= instead."
+- Updated ANTI-PATTERN: "1-2 targeted fetches is enough, not every result."
+- Updated next_action hint: "For multi-fact questions, one comprehensive source
+  with focus= beats multiple per-fact searches."
+- Updated fetch_hint: "Use urls=[...] to bulk-fetch top results in one call."
+
+No content added to search results (search returns URLs + ranking, not content -
+content in search would passively waste tokens on every search call). The fix is
+purely in tool description guidance that steers agents toward efficient usage
+patterns.
+
 ## [11.1.10] - 2026-07-23
 
 ### Added: Docker support (PR #12 by @imonlinux)

@@ -208,7 +208,7 @@ def compute_fetch_hint(results: list[SearchResult]) -> str:
     med = sum(1 for r in results if r.fetch_relevance == "med")
     low = sum(1 for r in results if r.fetch_relevance == "low")
     return (f"{high} high, {med} med, {low} low. Ranked by relevance_score; "
-            f"smart_fetch what fits your need (high first, but a lower tier can be the right call).")
+            f"smart_fetch what fits your need (high first). Use urls=[...] to bulk-fetch top results in one call.")
 
 
 def _search_summary(query: str, results: list[SearchResult], engines_used: list[str],
@@ -235,9 +235,9 @@ def _search_next_action(results: list[SearchResult], engine_blocked: list[str],
                     "or set HOUND_SEARCH_PROXY for sustained heavy use.")
         return "No results. Rephrase (more specific / different terms) or try mode=neural for semantic matching."
     high = [r for r in results if r.fetch_relevance == "high"]
-    base = ("Results are ranked by relevance + cross-engine consensus (engines_consensus = how many independent indexes agree). "
-            "smart_fetch the ones that match what you actually need - the ranking is a hint, "
-            "not a directive; a lower-ranked result can be the right one, so trust your judgment.")
+    base = ("Results ranked by relevance + cross-engine consensus. smart_fetch the 1-2 that match your need "
+            "(use urls=[...] to bulk-fetch). For multi-fact questions, one comprehensive source with focus= beats "
+            "multiple per-fact searches. Don't fetch every result - 1-2 targeted fetches is enough.")
     if not high:
         base += " No 'high' matches - if none of these fit, rephrase (more specific) or try mode=neural."
     if engine_blocked:
