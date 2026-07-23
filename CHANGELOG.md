@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Clean up partially created browser contexts, Playwright instances, and temporary profiles when browser startup fails.
+
 ## [11.2.0] - 2026-07-23
 
 ### Added: Six-signal search ranking
