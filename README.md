@@ -61,7 +61,6 @@ Same prompt, three tools. Hound does the whole thing on its own, search + fetch 
 - 🐳 **Docker support**: multi-stage Dockerfile, docker-compose with shm_size 1gb, non-root user, healthcheck. By @imonlinux.
 - 🧪 **673 tests**.
 
-[457 more lines in file. Use offset=61.]
 
 ---
 
