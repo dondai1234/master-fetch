@@ -813,7 +813,7 @@ class BrowserSession:
 
     Manages a persistent browser context with page pooling. Supports:
     - Headless/headful mode
-    - Proxy (static or per-request)
+    - Proxy (fixed for the session lifetime)
     - Resource blocking (disable_resources, blocked_domains)
     - Wait strategies (load, domcontentloaded, networkidle)
     - Page actions (callable executed after navigation)
@@ -1107,10 +1107,16 @@ class BrowserSession:
     ) -> "Any":
         """Navigate to a URL and return a Response object.
 
-        Parameters override session defaults for this request only.
+        Parameters override session defaults for this request only. Proxy is
+        fixed at session startup and cannot be changed here.
         """
         if not self._is_alive:
             raise RuntimeError("Session not started")
+        if proxy is not None and proxy != self._proxy:
+            raise ValueError(
+                "Proxy is fixed when a browser session starts; "
+                "open a new session to use a different proxy"
+            )
 
         # Resolve per-request overrides
         actual_wait = wait if wait is not None else self._wait
