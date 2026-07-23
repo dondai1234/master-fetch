@@ -71,6 +71,50 @@ class TestMCPDispatch:
         assert kwargs["actions"] == top_actions
 
 
+class TestSmartFetchProxy:
+
+    @pytest.mark.asyncio
+    async def test_forced_stealthy_proxy_bypasses_direct_auto_session(self):
+        server = MasterFetchServer()
+        server._ensure_auto_session = AsyncMock(return_value="direct-session")
+        server.stealthy_fetch = AsyncMock(
+            return_value=_make_result(fetcher_used="stealthy")
+        )
+        server._finalize_result = AsyncMock(side_effect=lambda result, *args: result)
+
+        await server.smart_fetch(
+            "https://example.com",
+            force_fetcher="stealthy",
+            proxy="http://127.0.0.1:8080",
+            cache_ttl=0,
+        )
+
+        server._ensure_auto_session.assert_not_awaited()
+        assert server.stealthy_fetch.await_args.kwargs["session_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_auto_escalation_proxy_bypasses_direct_auto_session(self):
+        server = MasterFetchServer()
+        server._http_with_retry = AsyncMock(
+            return_value=_make_result(status=403, content=["Forbidden"])
+        )
+        server._ensure_auto_session = AsyncMock(return_value="direct-session")
+        server.stealthy_fetch = AsyncMock(
+            return_value=_make_result(fetcher_used="stealthy")
+        )
+        server._finalize_result = AsyncMock(side_effect=lambda result, *args: result)
+
+        with patch("master_fetch.server._browser_deps_available", return_value=True):
+            await server.smart_fetch(
+                "https://example.com",
+                proxy="http://127.0.0.1:8080",
+                cache_ttl=0,
+            )
+
+        server._ensure_auto_session.assert_not_awaited()
+        assert server.stealthy_fetch.await_args.kwargs["session_id"] is None
+
+
 # ─── JS shell detection ───────────────────────────────────────────
 
 class TestIsJsShell:

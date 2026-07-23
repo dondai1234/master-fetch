@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [12.2.0] - 2026-07-23
+
+### Fixed: BYOK search architecture (critical)
+
+The BYOK implementation had fundamental design flaws that defeated the
+entire purpose of bringing your own API keys:
+
+1. **Local keyless engines ran alongside BYOK engines** — the user's IP
+   was still hitting public search engines (DDG, Brave, etc.), causing
+   the exact rate limiting BYOK was supposed to prevent.
+2. **All BYOK providers fired simultaneously** — if a user had keys for
+   Serper + Tavily + Exa, all 3 burned credits on every search. Now only
+   one provider is used per search; others are tried sequentially on
+   failure.
+3. **No fallback to local engines** — if all BYOK providers were
+   exhausted, the search returned empty. Now it falls back to local
+   keyless engines as a last resort.
+4. **Quorum too high for BYOK mode** — with 1-3 engines, the quorum
+   threshold was set for 8+ engines, causing unnecessary latency.
+5. **`_resolve_backends(None)` included ALL backends** — local + BYOK +
+   specialized, instead of only the BYOK provider.
+6. **`find_similar` ignored BYOK** — now uses the BYOK provider when
+   configured.
+
+With this fix, when a BYOK key is configured:
+- Only the first BYOK provider fires (no local engines, no IP rate limiting)
+- If that provider's keys are exhausted, the next BYOK provider is tried
+- If all BYOK providers are exhausted, local keyless engines carry the search
+- No multi-query fan-out (BYOK provider is high quality, expansion unnecessary)
+- Quorum adjusts for the reduced engine count (lower latency)
+
+### Fixed: Stealthy proxy bypass (PR #20 by @LinasKo)
+
+When a user passed `proxy` to `smart_fetch` with `force_fetcher=stealthy` or
+auto-escalation, the request was routed through the shared prewarmed auto-session
+which was created without a proxy. Playwright fixes the proxy at context startup,
+so the per-request proxy was silently ignored.
+
+Fix: when a proxy is provided, bypass the shared auto-session (`session_id=None`)
+so `stealthy_fetch` constructs a one-off browser with the requested proxy.
+Additionally, `BrowserSession.fetch()` now raises `ValueError` if a different proxy
+is passed to an active session.
+
 ## [12.1.2] - 2026-07-23
 
 ### Fixed

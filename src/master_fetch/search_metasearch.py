@@ -835,21 +835,23 @@ def _reset_circuit_breaker() -> None:
 def _resolve_backends(engines: Optional[list[str]]) -> list[str]:
     """Map hound engine names (or 'auto'/None) to ddgs backend names, dropping dups/unknowns.
 
-    When engines is None, returns the default backend pool PLUS any BYOK
-    backends that have been registered (user-provided API keys).
+    When engines is None:
+    - If BYOK keys are configured, returns ONLY the first BYOK provider
+      (no local keyless engines, to avoid IP rate limiting).
+    - Otherwise, returns the default local backend pool.
     """
     if not engines:
-        # Default pool + any BYOK backends that are registered.
-        base = list(_DEFAULT_BACKENDS)
-        for name in _TEXT_ENGINES:
-            if name not in base and name not in (
-                # Already in _DEFAULT_BACKENDS if applicable.
-                "duckduckgo", "brave", "google", "startpage", "grokipedia",
-                "wikipedia", "yahoo", "mojeek", "yandex", "qwant",
-            ):
-                # Include BYOK + specialized API backends that were registered.
-                base.append(name)
-        return base
+        # BYOK mode: if user has configured API keys, use ONLY the first
+        # BYOK provider. No local keyless engines.
+        try:
+            from master_fetch.search_api_keys import get_byok_engines
+            byok_names = list(get_byok_engines().keys())
+            if byok_names:
+                return [byok_names[0]]
+        except Exception:
+            pass
+        # Normal mode: default local pool.
+        return list(_DEFAULT_BACKENDS)
     out: list[str] = []
     for e in engines:
         b = _HOUND_TO_BACKEND.get(e)
@@ -999,7 +1001,10 @@ async def metasearch(
     # backends are dead/captcha'd (don't wait the full deadline for them).
     min_engines = min(3, len(instances))
     soft_deadline = 4.0
-    quorum_results = max_results + 4  # a little extra for the neural reranker
+    # When fewer engines are running (BYOK mode with 1-3 engines), the +4
+    # padding for neural rerank candidates is unnecessary. A single BYOK
+    # provider returns clean results; we don't need extra from dead engines.
+    quorum_results = max_results if len(instances) <= 3 else max_results + 4
 
     async def _run(name: str, eng: BaseSearchEngine) -> tuple[str, list[Any]]:
         # Per-engine query: if a query_map is provided (v12 multi-query

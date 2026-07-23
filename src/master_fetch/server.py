@@ -2568,7 +2568,11 @@ class MasterFetchServer:
             return await self._finalize_result(result, url, extraction_type, css_selector, cache_ttl, offset, max_chars)
 
         else:  # stealthy ("dynamic" also routes here — Patchright handles everything)
-            ssid = await self._ensure_auto_session("stealthy")
+            # Playwright fixes the proxy when the browser context starts.
+            # The shared auto-session is direct, so a proxied request must use
+            # the one-off path where stealthy_fetch constructs the browser
+            # with the requested proxy.
+            ssid = None if proxy else await self._ensure_auto_session("stealthy")
             result = await self.stealthy_fetch(
                 url, extraction_type=extraction_type,
                 css_selector=css_selector, main_content_only=main_content_only,
@@ -2656,7 +2660,9 @@ class MasterFetchServer:
 
         errors.append(f"HTTP failed (status {result.status})")
         remaining = max(timeout - int((now() - start_time) * 1000), 5000)
-        ssid = await self._ensure_auto_session("stealthy")
+        # Playwright fixes the proxy when the browser context starts. Do not
+        # route a proxied request through the shared direct auto-session.
+        ssid = None if proxy else await self._ensure_auto_session("stealthy")
         result = await self.stealthy_fetch(
             url, extraction_type=extraction_type,
             css_selector=css_selector, main_content_only=main_content_only,

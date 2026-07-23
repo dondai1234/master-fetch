@@ -1056,11 +1056,20 @@ async def smart_search(
         _fs_intent = _detect_intent(derived_query)
         _fs_engines = list(engines) if engines else list(DEFAULT_ENGINES)
         _fs_specialized: list[str] = []
+        _fs_byok_names: list[str] = []
         if engines is None:
             _fs_specialized = _intent_backends(_fs_intent)
-            for b in _fs_specialized:
-                if b not in _fs_engines:
-                    _fs_engines.append(b)
+            try:
+                from master_fetch.search_api_keys import get_byok_engines
+                _fs_byok_names = list(get_byok_engines().keys())
+            except Exception:
+                pass
+            if _fs_byok_names:
+                _fs_engines = [_fs_byok_names[0]] + _fs_specialized
+            else:
+                for b in _fs_specialized:
+                    if b not in _fs_engines:
+                        _fs_engines.append(b)
         _fs_qmap = _generate_query_map(derived_query, _fs_intent, _fs_engines)
         for b in _fs_specialized:
             _fs_qmap[b] = derived_query
@@ -1112,23 +1121,32 @@ async def smart_search(
         sim_related = _related_queries(derived_query, results_list)
     else:
         _intent = _detect_intent(query)
-        _effective_engines = list(engines) if engines else list(DEFAULT_ENGINES)
         _specialized: list[str] = []
+        _byok_names: list[str] = []
         if engines is None:
             _specialized = _intent_backends(_intent)
-            for b in _specialized:
-                if b not in _effective_engines:
-                    _effective_engines.append(b)
-            # Include BYOK (Bring Your Own Key) engines when user has configured API keys.
-            # These become the PRIMARY search source; local engines are fallback.
+            # BYOK: when user has configured API keys, use ONLY the first BYOK
+            # provider + specialized backends. NO local keyless engines.
+            # The whole point of BYOK is to avoid IP rate limiting from scraping
+            # public search engines. Local engines run only as fallback when
+            # all BYOK providers are exhausted.
             try:
                 from master_fetch.search_api_keys import get_byok_engines
-                for byok_name in get_byok_engines():
-                    if byok_name not in _effective_engines:
-                        _effective_engines.append(byok_name)
+                _byok_names = list(get_byok_engines().keys())
             except Exception:
-                pass  # no BYOK keys configured, or module not available
-        _qmap = _generate_query_map(query, _intent, _effective_engines)
+                pass
+            if _byok_names:
+                _effective_engines = [_byok_names[0]] + _specialized
+            else:
+                _effective_engines = list(DEFAULT_ENGINES)
+                for b in _specialized:
+                    if b not in _effective_engines:
+                        _effective_engines.append(b)
+        else:
+            _effective_engines = list(engines)
+        # No multi-query fan-out in BYOK mode: the BYOK provider is a single
+        # high-quality source, query expansion is unnecessary.
+        _qmap = _generate_query_map(query, _intent, _effective_engines) if not _byok_names else {}
         for b in _specialized:
             _qmap[b] = query
         try:
@@ -1140,6 +1158,33 @@ async def smart_search(
             )
         except Exception as e:
             error = redact_api_key(str(e)[:200])
+
+        # BYOK fallback: if the first BYOK provider returned nothing, try the
+        # remaining providers. If all BYOK providers are exhausted, fall back
+        # to local keyless engines so the search never fails.
+        if _byok_names and not ranked:
+            error = ""
+            for next_byok in _byok_names[1:]:
+                try:
+                    ranked, reports = await multi_search(
+                        query, max_results, engines=[next_byok] + _specialized, site=site,
+                        exclude_sites=exclude_sites, region=region, freshness=freshness,
+                        page=page, server=server,
+                    )
+                    if ranked:
+                        break
+                except Exception as e:
+                    error = redact_api_key(str(e)[:200])
+                    continue
+            if not ranked:
+                try:
+                    ranked, reports = await multi_search(
+                        query, max_results, engines=list(DEFAULT_ENGINES), site=site,
+                        exclude_sites=exclude_sites, region=region, freshness=freshness,
+                        page=page, server=server,
+                    )
+                except Exception as e:
+                    error = redact_api_key(str(e)[:200])
 
         if not ranked and not error:
             blocked_any = bool([r for r in reports if r.blocked])

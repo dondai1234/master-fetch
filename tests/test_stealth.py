@@ -11,7 +11,7 @@ import pytest
 from master_fetch.browser import (
     DEFAULT_ARGS, HARMFUL_ARGS, STEALTH_ARGS,
     _FINGERPRINT_PROFILES, _generate_fingerprint_profile,
-    _build_stealth_init_script,
+    _build_stealth_init_script, StealthyBrowser,
 )
 
 
@@ -39,6 +39,20 @@ class TestBrowserArgs:
         for harmful in HARMFUL_ARGS:
             assert harmful not in STEALTH_ARGS
             assert harmful not in DEFAULT_ARGS
+
+
+class TestSessionProxy:
+
+    @pytest.mark.asyncio
+    async def test_active_session_rejects_different_proxy(self):
+        session = StealthyBrowser()
+        session._is_alive = True
+
+        with pytest.raises(ValueError, match="Proxy is fixed"):
+            await session.fetch(
+                "https://example.com",
+                proxy="http://127.0.0.1:8080",
+            )
 
 
 # ─── Fingerprint profiles ─────────────────────────────────────────

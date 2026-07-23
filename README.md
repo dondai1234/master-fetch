@@ -196,7 +196,9 @@ Same gray-area posture as SearXNG / ddgs; no search-engine ToS compliance is cla
 
 Hound's local keyless search works with zero configuration and never goes away. But some users have API keys from search providers, either from free tiers or paid plans. Hound respects that: bring your keys, and Hound makes them first-class citizens with the same reliability guarantees as its own keyless engines.
 
-When keys are configured, those providers become the **primary search source**. Hound's local engines run alongside them in parallel as automatic fallback: if every API key is exhausted or rate-limited, the local engines carry the search with zero interruption. The agent never sees an empty result set.
+When keys are configured, those providers become the **primary search source** and Hound's local keyless engines are **completely shut off**. This is the entire point of BYOK: avoid hitting public search engines from your IP. The local engines run only as a last-resort fallback when every API key is exhausted or rate-limited, so the search never fails.
+
+Hound uses **one provider per search**. If you have keys for multiple providers, Hound picks the first available one, and only switches to the next provider when the first is exhausted. This means your search capacity scales with how many keys you configure for a single provider, not with how many providers you stack.
 
 #### Supported providers
 
@@ -216,7 +218,7 @@ Add **multiple keys per provider**. Hound stacks them in a rotation pool per pro
 
 - 🔁 **Auto-rotation**: when a key hits a rate limit (HTTP 429), Hound switches to the next key for the **same provider** within milliseconds. The search completes without the agent ever knowing a key was rate-limited.
 - ⏳ **Per-key cooldown**: a rate-limited key enters a 60-second cooldown. An invalid key (401/403) enters a 300-second cooldown. Hound keeps trying the remaining keys in the pool.
-- 🛡️ **Graceful exhaustion**: only when **all keys for all providers** are exhausted does Hound fall back to its keyless local engines. The transition is seamless.
+- 🛡️ **Graceful exhaustion**: only when **all keys for all providers** are exhausted does Hound fall back to its keyless local engines. The transition is seamless: the agent gets results either way.
 - 📊 **Live key testing**: `hound keys test` makes a real API call per key and reports which are valid, rate-limited, or invalid. Know before you search.
 
 This means your search capacity scales with how many keys you configure, not with a single key's rate limit.
