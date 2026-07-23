@@ -48,7 +48,7 @@ async def _fetch_robots_txt(domain: str) -> str | None:
     """
     try:
         from master_fetch.fetcher import HTTPSession
-        async with HTTPSession(stealthy_headers=False, retries=1) as sess:
+        async with HTTPSession(impersonate="chrome", retries=1) as sess:
             response = await sess.get(
                 f"https://{domain}/robots.txt", timeout=_FETCH_TIMEOUT,
             )
