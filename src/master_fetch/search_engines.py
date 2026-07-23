@@ -227,6 +227,7 @@ async def multi_search(
         q, max_results, region=region, timelimit=timelimit,
         page=backend_page, engines=mapped,
         query_map=query_map,
+        site=site, exclude_sites=exclude_sites,
     )
 
     # Map to RawResult with cross-backend consensus + apply the final site filter.

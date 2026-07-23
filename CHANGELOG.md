@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+## [12.3.0] - 2026-07-23
+
+### Per-provider API optimization (critical for BYOK parity)
+
+Each BYOK provider now uses its full native API parameter set so that search
+quality matches the provider's own standalone MCP server:
+
+**Exa** (critical fix):
+- Added `contents: {highlights: true}` to every request. Without this, Exa
+  returned results with title+URL only, no snippet text. Now returns rich
+  highlight snippets that are 10x more token-efficient than full text.
+- Added `includeDomains` / `excludeDomains` (native domain filters).
+- Added `startPublishedDate` for time-filtered searches.
+- Highlights are parsed from the top-level `highlights` field (not nested
+  under `contents` as the request parameter name suggests).
+
+**Serper**:
+- Added `tbs` time filter from hound's `freshness` parameter.
+- Added `page` for pagination.
+- Region now parsed to `gl` (country) + `hl` (language) separately.
+- `site:` / `-site:` operators re-applied to query (Serper uses Google's
+  query syntax, not native domain filter params).
+- Date field now enriches snippets.
+
+**Tavily**:
+- Changed `search_depth` from "basic" to "advanced" (higher quality results).
+- Added `include_domains` / `exclude_domains` (native domain filters).
+- Added `time_range` from hound's `freshness` parameter.
+- Long content now truncated to 400 chars for compact ranking.
+
+**Firecrawl**:
+- Added `includeDomains` / `excludeDomains` (native domain filters).
+- Added `tbs` time filter from hound's `freshness` parameter.
+
+**TinyFish**:
+- Added `after_date` for time-filtered searches.
+- `site:` / `-site:` operators re-applied to query (no native domain filter
+  params via GET).
+
+### Infrastructure changes
+
+- `metasearch()` now accepts and passes `site` / `exclude_sites` to engine
+  `search()` calls, so BYOK engines can use native domain filter API params.
+- `multi_search()` passes `site` / `exclude_sites` through to `metasearch()`.
+- `_build_request()` signature extended with keyword-only params for
+  `site`, `exclude_sites`, `timelimit`, `region`, `page`.
+- 23 new adversarial tests covering per-provider parameter mapping.
+
 ## [12.2.0] - 2026-07-23
 
 ### Fixed: BYOK search architecture (critical)

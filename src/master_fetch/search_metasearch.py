@@ -949,6 +949,8 @@ async def metasearch(
     page: int = 1,
     engines: Optional[list[str]] = None,
     query_map: dict[str, str] | None = None,
+    site: Optional[str] = None,
+    exclude_sites: Optional[list[str]] = None,
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     """Run the backends in PARALLEL and return (results, per-backend-status).
 
@@ -1013,6 +1015,7 @@ async def metasearch(
         q = (query_map or {}).get(name, query)
         res = await asyncio.to_thread(
             eng.search, q, region, safesearch, timelimit, page,
+            site=site, exclude_sites=exclude_sites,
         )
         return name, (res or [])
 

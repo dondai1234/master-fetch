@@ -220,11 +220,17 @@ class BaseBYOKEngine(BaseSearchEngine):
     def result_type(self) -> type:
         return TextResult
 
-    def _build_request(self, query: str, key: str) -> tuple[dict[str, Any], dict[str, str]]:
+    def _build_request(self, query: str, key: str, *,
+        site: str | None = None,
+        exclude_sites: list[str] | None = None,
+        timelimit: str | None = None,
+        region: str = "us-en",
+        page: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         """Build (body/params, headers) for the API request using this key.
 
-        Returns (data, headers) where data is the JSON body for POST
-        or query params for GET, and headers includes auth.
+        Subclasses map hound's generic params (site, exclude_sites, timelimit,
+        region, page) to each provider's native API parameters.
         """
         raise NotImplementedError
 
@@ -263,7 +269,14 @@ class BaseBYOKEngine(BaseSearchEngine):
             tried_keys.add(key)
 
             try:
-                data, headers = self._build_request(clean_query, key)
+                data, headers = self._build_request(
+                    clean_query, key,
+                    site=kwargs.get("site"),
+                    exclude_sites=kwargs.get("exclude_sites"),
+                    timelimit=timelimit,
+                    region=region,
+                    page=page,
+                )
             except Exception as ex:
                 last_error = f"{type(ex).__name__}: {ex}"
                 pool.mark_invalid(key)
@@ -320,15 +333,47 @@ class BaseBYOKEngine(BaseSearchEngine):
 # ─── Serper (Google SERP API) ───────────────────────────────────────────────
 
 class SerperEngine(BaseBYOKEngine):
+    """Serper.dev - Google SERP API.
+
+    Maps hound params to Serper's native API:
+    - timelimit (d/w/m/y) -> tbs (qdr:d/qdr:w/qdr:m/qdr:y)
+    - page -> page (pagination, 10 results per page)
+    - gl/hl already sent
+    """
     name = "serper"
     provider = "serper"
     provider_name = "serper"
     search_url = "https://google.serper.dev/search"
     search_method = "POST"
 
-    def _build_request(self, query: str, key: str) -> tuple[dict[str, Any], dict[str, str]]:
+    _TBS_MAP = {"d": "qdr:d", "w": "qdr:w", "m": "qdr:m", "y": "qdr:y"}
+
+    def _build_request(self, query: str, key: str, *,
+        site: str | None = None,
+        exclude_sites: list[str] | None = None,
+        timelimit: str | None = None,
+        region: str = "us-en",
+        page: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        body: dict[str, Any] = {"q": query, "num": _API_LIMIT}
+        # Parse region (format: "us-en" -> gl="us", hl="en")
+        parts = region.split("-", 1)
+        body["gl"] = parts[0] if parts else "us"
+        body["hl"] = parts[1] if len(parts) > 1 else "en"
+        if page > 1:
+            body["page"] = page
+        if timelimit and timelimit in self._TBS_MAP:
+            body["tbs"] = self._TBS_MAP[timelimit]
+        # Serper supports domain filtering via query operator, not native params.
+        # The site:/-site: prefixes are already in the query (applied by multi_search)
+        # and stripped by BaseBYOKEngine.search(). For Serper, we re-apply them
+        # since Serper's API passes the query directly to Google.
+        if site:
+            body["q"] = f"site:{site} {body['q']}"
+        for ex in exclude_sites or []:
+            body["q"] = f"-site:{ex} {body['q']}"
         return (
-            {"q": query, "num": _API_LIMIT, "gl": "us", "hl": "en"},
+            body,
             {"X-API-KEY": key, "Content-Type": "application/json"},
         )
 
@@ -341,6 +386,12 @@ class SerperEngine(BaseBYOKEngine):
             snippet = r.get("snippet", "")
             if not title or not link:
                 continue
+            # Rich snippet from date + source if available.
+            date = r.get("date", "")
+            if date and snippet:
+                snippet = f"{date} - {snippet}"
+            elif date:
+                snippet = date
             results.append(TextResult(title=title, href=link, body=snippet))
         return results
 
@@ -348,15 +399,43 @@ class SerperEngine(BaseBYOKEngine):
 # ─── Tavily (AI search API) ─────────────────────────────────────────────────
 
 class TavilyEngine(BaseBYOKEngine):
+    """Tavily - AI search API optimized for LLM consumption.
+
+    Maps hound params to Tavily's native API:
+    - timelimit (d/w/m/y) -> time_range (day/week/month/year)
+    - site -> include_domains
+    - exclude_sites -> exclude_domains
+    - Uses search_depth="advanced" for higher quality results
+    """
     name = "tavily"
     provider = "tavily"
     provider_name = "tavily"
     search_url = "https://api.tavily.com/search"
     search_method = "POST"
 
-    def _build_request(self, query: str, key: str) -> tuple[dict[str, Any], dict[str, str]]:
+    _TIME_RANGE_MAP = {"d": "day", "w": "week", "m": "month", "y": "year"}
+
+    def _build_request(self, query: str, key: str, *,
+        site: str | None = None,
+        exclude_sites: list[str] | None = None,
+        timelimit: str | None = None,
+        region: str = "us-en",
+        page: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        body: dict[str, Any] = {
+            "query": query,
+            "max_results": _API_LIMIT,
+            "search_depth": "advanced",
+            "topic": "general",
+        }
+        if site:
+            body["include_domains"] = [site]
+        if exclude_sites:
+            body["exclude_domains"] = list(exclude_sites)
+        if timelimit and timelimit in self._TIME_RANGE_MAP:
+            body["time_range"] = self._TIME_RANGE_MAP[timelimit]
         return (
-            {"query": query, "max_results": _API_LIMIT, "search_depth": "basic", "topic": "general"},
+            body,
             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
 
@@ -371,6 +450,10 @@ class TavilyEngine(BaseBYOKEngine):
                 continue
             if not title:
                 title = url[:60]
+            # Tavily's content is a substantial snippet (not full page text).
+            # Cap it to keep results compact for ranking.
+            if content and len(content) > 400:
+                content = content[:400] + "..."
             results.append(TextResult(title=title, href=url, body=content))
         return results
 
@@ -378,15 +461,49 @@ class TavilyEngine(BaseBYOKEngine):
 # ─── Exa (Neural search API) ─────────────────────────────────────────────────
 
 class ExaEngine(BaseBYOKEngine):
+    """Exa - Neural/semantic search API.
+
+    Maps hound params to Exa's native API:
+    - site -> includeDomains
+    - exclude_sites -> excludeDomains
+    - timelimit (d/w/m/y) -> startPublishedDate (ISO 8601 date)
+    - contents: {highlights: true} requests snippet text (CRITICAL - without
+      this, Exa returns only title+url with no snippet/body)
+    """
     name = "exa"
     provider = "exa"
     provider_name = "exa"
     search_url = "https://api.exa.ai/search"
     search_method = "POST"
 
-    def _build_request(self, query: str, key: str) -> tuple[dict[str, Any], dict[str, str]]:
+    # Days per timelimit unit.
+    _DAYS_MAP = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+    def _build_request(self, query: str, key: str, *,
+        site: str | None = None,
+        exclude_sites: list[str] | None = None,
+        timelimit: str | None = None,
+        region: str = "us-en",
+        page: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        body: dict[str, Any] = {
+            "query": query,
+            "numResults": _API_LIMIT,
+            "type": "auto",
+            # CRITICAL: without contents.highlights, Exa returns no snippets.
+            # Highlights are 10x more token-efficient than full text.
+            "contents": {"highlights": True},
+        }
+        if site:
+            body["includeDomains"] = [site]
+        if exclude_sites:
+            body["excludeDomains"] = list(exclude_sites)
+        if timelimit and timelimit in self._DAYS_MAP:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self._DAYS_MAP[timelimit])
+            body["startPublishedDate"] = cutoff.strftime("%Y-%m-%d")
         return (
-            {"query": query, "numResults": _API_LIMIT, "type": "auto"},
+            body,
             {"x-api-key": key, "Content-Type": "application/json"},
         )
 
@@ -399,14 +516,21 @@ class ExaEngine(BaseBYOKEngine):
             if not url:
                 continue
             if not title:
-                # Fallback: use domain as title.
                 try:
                     from urllib.parse import urlparse
                     title = urlparse(url).hostname or url[:60]
                 except Exception:
                     title = url[:60]
-            # Build snippet from available metadata.
+            # Build rich snippet from highlights + metadata.
+            # Exa returns highlights at the TOP LEVEL of each result (not
+            # nested under contents), as a list of relevant text snippets.
+            highlights = r.get("highlights") or []
             parts: list[str] = []
+            if isinstance(highlights, list) and highlights:
+                # Join first 2 highlights for a compact snippet.
+                joined = " ... ".join(str(h)[:200] for h in highlights[:2])
+                if joined:
+                    parts.append(joined[:400])
             published = r.get("publishedDate", "")
             if published:
                 parts.append(f"Published: {published[:10]}")
@@ -421,15 +545,37 @@ class ExaEngine(BaseBYOKEngine):
 # ─── Firecrawl (Web search API) ──────────────────────────────────────────────
 
 class FirecrawlEngine(BaseBYOKEngine):
+    """Firecrawl - Web search + scrape API.
+
+    Maps hound params to Firecrawl v2's native API:
+    - site -> includeDomains
+    - exclude_sites -> excludeDomains
+    - timelimit (d/w/m/y) -> tbs (qdr:d/qdr:w/qdr:m/qdr:y)
+    """
     name = "firecrawl"
     provider = "firecrawl"
     provider_name = "firecrawl"
     search_url = "https://api.firecrawl.dev/v2/search"
     search_method = "POST"
 
-    def _build_request(self, query: str, key: str) -> tuple[dict[str, Any], dict[str, str]]:
+    _TBS_MAP = {"d": "qdr:d", "w": "qdr:w", "m": "qdr:m", "y": "qdr:y"}
+
+    def _build_request(self, query: str, key: str, *,
+        site: str | None = None,
+        exclude_sites: list[str] | None = None,
+        timelimit: str | None = None,
+        region: str = "us-en",
+        page: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        body: dict[str, Any] = {"query": query, "limit": _API_LIMIT}
+        if site:
+            body["includeDomains"] = [site]
+        if exclude_sites:
+            body["excludeDomains"] = list(exclude_sites)
+        if timelimit and timelimit in self._TBS_MAP:
+            body["tbs"] = self._TBS_MAP[timelimit]
         return (
-            {"query": query, "limit": _API_LIMIT},
+            body,
             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
 
@@ -439,7 +585,6 @@ class FirecrawlEngine(BaseBYOKEngine):
         raw_data = data.get("data", data)
         results_list: list[dict[str, Any]] = []
         if isinstance(raw_data, dict):
-            # v2 format: data.web
             results_list = raw_data.get("web") or raw_data.get("results") or []
         elif isinstance(raw_data, list):
             results_list = raw_data
@@ -453,7 +598,6 @@ class FirecrawlEngine(BaseBYOKEngine):
                 continue
             if not title:
                 title = url[:60]
-            # Build snippet from description + highlights.
             parts: list[str] = []
             if description:
                 parts.append(description[:300])
@@ -469,15 +613,40 @@ class FirecrawlEngine(BaseBYOKEngine):
 # ─── TinyFish (Web search API) ───────────────────────────────────────────────
 
 class TinyFishEngine(BaseBYOKEngine):
+    """TinyFish - Web search API for AI agents.
+
+    Maps hound params to TinyFish's native API:
+    - timelimit (d/w/m/y) -> after_date (ISO 8601 date)
+    - region -> location
+    """
     name = "tinyfish"
     provider = "tinyfish"
     provider_name = "tinyfish"
     search_url = "https://api.search.tinyfish.ai"
     search_method = "GET"
 
-    def _build_request(self, query: str, key: str) -> tuple[dict[str, Any], dict[str, str]]:
+    _DAYS_MAP = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+    def _build_request(self, query: str, key: str, *,
+        site: str | None = None,
+        exclude_sites: list[str] | None = None,
+        timelimit: str | None = None,
+        region: str = "us-en",
+        page: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        params: dict[str, Any] = {"query": query, "limit": _API_LIMIT}
+        if timelimit and timelimit in self._DAYS_MAP:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self._DAYS_MAP[timelimit])
+            params["after_date"] = cutoff.strftime("%Y-%m-%d")
+        # TinyFish doesn't have native include/exclude domain params via GET,
+        # so re-apply site:/-site: operators in the query.
+        if site:
+            params["query"] = f"site:{site} {params['query']}"
+        for ex in exclude_sites or []:
+            params["query"] = f"-site:{ex} {params['query']}"
         return (
-            {"query": query, "limit": _API_LIMIT},
+            params,
             {"X-API-Key": key},
         )
 

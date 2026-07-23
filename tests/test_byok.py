@@ -312,6 +312,54 @@ class TestSerperEngine:
         assert data["q"] == "test query"
         assert headers["X-API-KEY"] == "my-key"
 
+    def test_build_request_timelimit_maps_to_tbs(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        for tl, expected_tbs in [("d", "qdr:d"), ("w", "qdr:w"), ("m", "qdr:m"), ("y", "qdr:y")]:
+            data, _ = eng._build_request("q", "k", timelimit=tl)
+            assert data["tbs"] == expected_tbs
+
+    def test_build_request_no_tbs_without_timelimit(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        data, _ = eng._build_request("q", "k")
+        assert "tbs" not in data
+
+    def test_build_request_site_reapplied(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        data, _ = eng._build_request("query", "k", site="example.com")
+        assert "site:example.com" in data["q"]
+
+    def test_build_request_exclude_sites_reapplied(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        data, _ = eng._build_request("query", "k", exclude_sites=["spam.com", "ads.com"])
+        assert "-site:spam.com" in data["q"]
+        assert "-site:ads.com" in data["q"]
+
+    def test_build_request_region_parsed(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        data, _ = eng._build_request("q", "k", region="gb-en")
+        assert data["gl"] == "gb"
+        assert data["hl"] == "en"
+
+    def test_build_request_page_passed(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        data, _ = eng._build_request("q", "k", page=3)
+        assert data["page"] == 3
+
+    def test_parse_date_enriched_snippet(self):
+        from master_fetch.search_api_keys import SerperEngine
+        eng = SerperEngine()
+        data = {"organic": [
+            {"title": "R1", "link": "https://example.com", "snippet": "Content", "date": "3 days ago"},
+        ]}
+        results = eng._parse_results(data)
+        assert "3 days ago" in results[0].body
+
 
 class TestTavilyEngine:
     """Tavily engine: POST, Bearer auth, results[] with content."""
@@ -345,6 +393,34 @@ class TestTavilyEngine:
         data, headers = eng._build_request("test", "my-key")
         assert data["query"] == "test"
         assert headers["Authorization"] == "Bearer my-key"
+        assert data["search_depth"] == "advanced"
+
+    def test_build_request_timelimit_maps_to_time_range(self):
+        from master_fetch.search_api_keys import TavilyEngine
+        eng = TavilyEngine()
+        for tl, tr in [("d", "day"), ("w", "week"), ("m", "month"), ("y", "year")]:
+            data, _ = eng._build_request("q", "k", timelimit=tl)
+            assert data["time_range"] == tr
+
+    def test_build_request_include_domains(self):
+        from master_fetch.search_api_keys import TavilyEngine
+        eng = TavilyEngine()
+        data, _ = eng._build_request("q", "k", site="example.com")
+        assert data["include_domains"] == ["example.com"]
+
+    def test_build_request_exclude_domains(self):
+        from master_fetch.search_api_keys import TavilyEngine
+        eng = TavilyEngine()
+        data, _ = eng._build_request("q", "k", exclude_sites=["spam.com"])
+        assert data["exclude_domains"] == ["spam.com"]
+
+    def test_parse_truncates_long_content(self):
+        from master_fetch.search_api_keys import TavilyEngine
+        eng = TavilyEngine()
+        long_content = "x" * 600
+        data = {"results": [{"title": "T", "url": "https://example.com", "content": long_content}]}
+        results = eng._parse_results(data)
+        assert len(results[0].body) <= 404  # 400 + "..."
 
 
 class TestExaEngine:
@@ -376,6 +452,57 @@ class TestExaEngine:
         assert data["query"] == "test"
         assert data["numResults"] == 10
         assert headers["x-api-key"] == "my-key"
+
+    def test_build_request_contents_highlights_always_present(self):
+        """CRITICAL: without contents.highlights, Exa returns no snippets."""
+        from master_fetch.search_api_keys import ExaEngine
+        eng = ExaEngine()
+        data, _ = eng._build_request("q", "k")
+        assert "contents" in data
+        assert data["contents"].get("highlights") is True
+
+    def test_build_request_include_domains(self):
+        from master_fetch.search_api_keys import ExaEngine
+        eng = ExaEngine()
+        data, _ = eng._build_request("q", "k", site="example.com")
+        assert data["includeDomains"] == ["example.com"]
+
+    def test_build_request_exclude_domains(self):
+        from master_fetch.search_api_keys import ExaEngine
+        eng = ExaEngine()
+        data, _ = eng._build_request("q", "k", exclude_sites=["spam.com"])
+        assert data["excludeDomains"] == ["spam.com"]
+
+    def test_build_request_start_published_date(self):
+        from master_fetch.search_api_keys import ExaEngine
+        eng = ExaEngine()
+        data, _ = eng._build_request("q", "k", timelimit="d")
+        assert "startPublishedDate" in data
+        assert len(data["startPublishedDate"]) == 10  # YYYY-MM-DD
+
+    def test_parse_highlights_from_contents(self):
+        """Verify that Exa highlights are extracted from the top-level field."""
+        from master_fetch.search_api_keys import ExaEngine
+        eng = ExaEngine()
+        data = {"results": [
+            {"title": "R1", "url": "https://example.com",
+             "highlights": ["key snippet text", "second snippet", "third snippet"]},
+        ]}
+        results = eng._parse_results(data)
+        assert "key snippet text" in results[0].body
+        assert "second snippet" in results[0].body  # first 2 joined
+        assert "third snippet" not in results[0].body  # third excluded
+
+    def test_parse_falls_back_to_metadata_without_highlights(self):
+        from master_fetch.search_api_keys import ExaEngine
+        eng = ExaEngine()
+        data = {"results": [
+            {"title": "R1", "url": "https://example.com",
+             "publishedDate": "2026-01-15", "author": "Jane"},
+        ]}
+        results = eng._parse_results(data)
+        assert "2026-01-15" in results[0].body
+        assert "Jane" in results[0].body
 
 
 class TestFirecrawlEngine:
@@ -417,6 +544,24 @@ class TestFirecrawlEngine:
         assert data["query"] == "test"
         assert headers["Authorization"] == "Bearer my-key"
 
+    def test_build_request_include_domains(self):
+        from master_fetch.search_api_keys import FirecrawlEngine
+        eng = FirecrawlEngine()
+        data, _ = eng._build_request("q", "k", site="example.com")
+        assert data["includeDomains"] == ["example.com"]
+
+    def test_build_request_exclude_domains(self):
+        from master_fetch.search_api_keys import FirecrawlEngine
+        eng = FirecrawlEngine()
+        data, _ = eng._build_request("q", "k", exclude_sites=["spam.com"])
+        assert data["excludeDomains"] == ["spam.com"]
+
+    def test_build_request_timelimit_maps_to_tbs(self):
+        from master_fetch.search_api_keys import FirecrawlEngine
+        eng = FirecrawlEngine()
+        data, _ = eng._build_request("q", "k", timelimit="d")
+        assert data["tbs"] == "qdr:d"
+
 
 class TestTinyFishEngine:
     """TinyFish engine: GET, X-API-Key, results[] with snippet."""
@@ -439,6 +584,25 @@ class TestTinyFishEngine:
         assert data["query"] == "test"
         assert headers["X-API-Key"] == "my-key"
         assert eng.search_method == "GET"
+
+    def test_build_request_after_date(self):
+        from master_fetch.search_api_keys import TinyFishEngine
+        eng = TinyFishEngine()
+        data, _ = eng._build_request("q", "k", timelimit="d")
+        assert "after_date" in data
+        assert len(data["after_date"]) == 10  # YYYY-MM-DD
+
+    def test_build_request_site_reapplied(self):
+        from master_fetch.search_api_keys import TinyFishEngine
+        eng = TinyFishEngine()
+        data, _ = eng._build_request("query", "k", site="example.com")
+        assert "site:example.com" in data["query"]
+
+    def test_build_request_exclude_sites_reapplied(self):
+        from master_fetch.search_api_keys import TinyFishEngine
+        eng = TinyFishEngine()
+        data, _ = eng._build_request("query", "k", exclude_sites=["spam.com"])
+        assert "-site:spam.com" in data["query"]
 
 
 # ─── Engine search() with mocked HTTP ──────────────────────────────────────
