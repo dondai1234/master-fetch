@@ -122,10 +122,11 @@ docker run -p 8765:8765 hound-mcp
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HOUND_HTTP_PORT` | 8765 | HTTP port for MCP server |
 | `HOUND_BROWSER_IDLE_TIMEOUT` | 300 | Seconds before browser closes (0 = never) |
-| `HTTP_PROXY` | - | Proxy for HTTP requests |
-| `HTTPS_PROXY` | - | Proxy for HTTPS requests |
+| `HOUND_SEARCH_PROXY` | - | Proxy for all search backends (http/https/socks5/socks5h) |
+| `HOUND_SEARCH_DEADLINE` | 8 | Search deadline in seconds |
+| `HTTP_PROXY` | - | Proxy for HTTP fetch requests |
+| `HTTPS_PROXY` | - | Proxy for HTTPS fetch requests |
 
 ### Connecting to HTTP mode
 
