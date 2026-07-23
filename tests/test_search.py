@@ -10,12 +10,101 @@ real search results.
 import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
+from master_fetch import search as search
 from master_fetch import search_engines as se
 from master_fetch.search_engines import (
     _passes_site_filter, _normalize_domain, _is_domain_or_subdomain,
     RawResult, EngineReport, multi_search, normalize_url,
     DEFAULT_ENGINES, _INDEX_FAMILY,
 )
+
+
+@pytest.fixture
+def smart_search_cache(monkeypatch):
+    """In-memory cache and deterministic search backend for cache-key tests."""
+    cache = {}
+    live_regions = []
+
+    async def fake_get_cached(query, cache_type, css_selector, **kwargs):
+        return cache.get((query, cache_type))
+
+    async def fake_set_cached(query, cache_type, content, status, css_selector, ttl):
+        cache[(query, cache_type)] = {"content": content}
+
+    async def fake_multi_search(query, max_results, **kwargs):
+        region = kwargs["region"]
+        live_regions.append(region)
+        return [RawResult(
+            title=f"Result for {region}",
+            url=f"https://{region}.example.test/",
+            snippet="regional result",
+            source="brave",
+            position=1,
+        )], [EngineReport(name="brave", ok=True)]
+
+    async def fake_ensure_reranker():
+        return None
+
+    monkeypatch.setattr(search, "get_cached", fake_get_cached)
+    monkeypatch.setattr(search, "set_cached", fake_set_cached)
+    monkeypatch.setattr(search, "multi_search", fake_multi_search)
+    monkeypatch.setattr(search, "ensure_reranker", fake_ensure_reranker)
+    monkeypatch.setattr(
+        search, "_rank",
+        lambda query, ranked, mode: (ranked, [1.0] * len(ranked), "merge", ""),
+    )
+    return cache, live_regions
+
+
+class TestSmartSearchRegionCache:
+
+    @pytest.mark.asyncio
+    async def test_explicit_regions_use_distinct_cache_entries(self, smart_search_cache):
+        cache, live_regions = smart_search_cache
+
+        us = await search.smart_search(
+            None, "regional cache test", engines=["brave"], region="us-en",
+        )
+        gb = await search.smart_search(
+            None, "regional cache test", engines=["brave"], region="gb-en",
+        )
+
+        assert us.cached is False
+        assert gb.cached is False
+        assert [us.results[0].title, gb.results[0].title] == [
+            "Result for us-en", "Result for gb-en",
+        ]
+        assert live_regions == ["us-en", "gb-en"]
+        assert len(cache) == 2
+
+    @pytest.mark.asyncio
+    async def test_same_normalized_explicit_region_uses_cached_result(self, smart_search_cache):
+        cache, live_regions = smart_search_cache
+
+        first = await search.smart_search(
+            None, "regional cache test", engines=["brave"], region="GB-EN",
+        )
+        second = await search.smart_search(
+            None, "regional cache test", engines=["brave"], region="gb-en",
+        )
+
+        assert first.cached is False
+        assert second.cached is True
+        assert second.results[0].title == "Result for GB-EN"
+        assert live_regions == ["GB-EN"]
+        assert len(cache) == 1
+
+    @pytest.mark.asyncio
+    async def test_omitted_region_keeps_existing_cache_key(self, smart_search_cache):
+        cache, _ = smart_search_cache
+
+        await search.smart_search(
+            None, "regional cache test", engines=["brave"],
+        )
+
+        assert list(cache) == [
+            ("regional cache test", "search:v12:6:::::0:brave::auto:regional cache test"),
+        ]
 
 
 # ─── Hostname boundary filtering (PR #7) ──────────────────────────

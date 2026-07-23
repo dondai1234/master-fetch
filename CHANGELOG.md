@@ -4,6 +4,8 @@
 
 - Scope `smart_fetch` request context to each invocation and forward `focus`
   through bulk URL fetches, preventing filters from leaking or being ignored.
+- Include an explicit normalized `region` in the `smart_search` cache identity
+  so searches for different regions cannot reuse each other's cached results.
 
 ## [12.3.0] - 2026-07-23
 
