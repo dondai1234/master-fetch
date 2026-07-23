@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Let `hound --rollback` install the recorded older version and verify that the pinned target was installed exactly.
+
 ## [11.2.0] - 2026-07-23
 
 ### Added: Six-signal search ranking
