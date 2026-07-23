@@ -9,7 +9,7 @@ against real ResponseModel objects. No mocks of the functions themselves.
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from master_fetch.server import (
-    ResponseModel, _is_js_shell, _detect_content_issue, _is_cacheable,
+    ResponseModel, BulkResponseModel, _is_js_shell, _detect_content_issue, _is_cacheable,
     _agent_hints, _apply_chunking, _is_cloudflare_from_response,
     _annotate_quality, MAX_CONTENT_CHARS, MIN_CHUNK_CHARS, MAX_BULK_URLS,
     _JS_SHELL_SIGNALS, _CF_CHALLENGE_SIGNALS, MAX_RESPONSE_BYTES,
@@ -113,6 +113,53 @@ class TestSmartFetchProxy:
 
         server._ensure_auto_session.assert_not_awaited()
         assert server.stealthy_fetch.await_args.kwargs["session_id"] is None
+
+
+class TestSmartFetchFocusContext:
+    @staticmethod
+    def _long_content_result():
+        return _make_result(content=[
+            "## Apples\nalpha fruit\n\n"
+            "## Bananas\nyellow fruit\n\n"
+            "## Carrots\norange vegetable"
+        ])
+
+    @pytest.mark.asyncio
+    async def test_bulk_fetch_forwards_focus_to_each_result(self):
+        server = MasterFetchServer()
+        server._http_with_retry = AsyncMock(return_value=self._long_content_result())
+
+        result = await server.smart_fetch(
+            "https://example.com",
+            urls=["https://example.com"],
+            focus="bananas",
+            cache_ttl=0,
+        )
+
+        assert isinstance(result, BulkResponseModel)
+        content = result.results[0].content[0]
+        assert "[Focus: 'bananas'" in content
+        assert "## Bananas" in content
+        assert "## Apples" not in content
+
+    @pytest.mark.asyncio
+    async def test_no_focus_call_does_not_inherit_previous_focus(self):
+        server = MasterFetchServer()
+        server._http_with_retry = AsyncMock(
+            side_effect=[self._long_content_result(), self._long_content_result()]
+        )
+
+        focused = await server.smart_fetch(
+            "https://example.com/first", focus="bananas", cache_ttl=0
+        )
+        unfiltered = await server.smart_fetch(
+            "https://example.com/second", cache_ttl=0
+        )
+
+        assert "[Focus: 'bananas'" in focused.content[0]
+        assert "[Focus:" not in unfiltered.content[0]
+        assert "## Apples" in unfiltered.content[0]
+        assert "## Bananas" in unfiltered.content[0]
 
 
 # ─── JS shell detection ───────────────────────────────────────────

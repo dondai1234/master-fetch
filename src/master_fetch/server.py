@@ -19,6 +19,8 @@ import json
 import logging
 import os
 import sys
+import inspect
+from functools import wraps
 from uuid import uuid4
 import asyncio
 import contextvars
@@ -731,6 +733,33 @@ _FOCUS: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("_focus",
 # Opt-in: populate ResponseModel.media with the page's image URLs (multimodal).
 _INCLUDE_MEDIA: contextvars.ContextVar[bool] = contextvars.ContextVar("_include_media", default=False)
 _INCLUDE_LINKS: contextvars.ContextVar[bool] = contextvars.ContextVar("_include_links", default=False)
+
+
+def _smart_fetch_request_context(func):
+    """Scope smart_fetch request options to one invocation and its child tasks."""
+    signature = inspect.signature(func)
+
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        values = signature.bind(*args, **kwargs)
+        values.apply_defaults()
+        options = values.arguments
+        tokens = [
+            (_PDF_PAGES, _PDF_PAGES.set(options["pages"] if isinstance(options["pages"], str) else None)),
+            (_PDF_PASSWORD, _PDF_PASSWORD.set(options["password"] if isinstance(options["password"], str) else None)),
+            (_FOCUS, _FOCUS.set(options["focus"] if isinstance(options["focus"], str) and options["focus"].strip() else None)),
+            (_INCLUDE_MEDIA, _INCLUDE_MEDIA.set(bool(options["include_media"]))),
+            (_INCLUDE_LINKS, _INCLUDE_LINKS.set(bool(options["include_links"]))),
+        ]
+        try:
+            return await func(*args, **kwargs)
+        finally:
+            for variable, token in reversed(tokens):
+                variable.reset(token)
+
+    return wrapped
+
+
 def _extract_pdf_response(body: bytes, raw_ct: str, total_size: int, url: str,
                           extraction_type: str, fetcher_used: str, duration_ms: float) -> ResponseModel:
     """Build a ResponseModel from a PDF body using the flagship extractor."""
@@ -2303,6 +2332,7 @@ class MasterFetchServer:
             retry_count=max_retries + 1,
         )
 
+    @_smart_fetch_request_context
     async def smart_fetch(
         self,
         url: Annotated[str, Field(description="Single URL to fetch.")],
@@ -2367,6 +2397,7 @@ class MasterFetchServer:
                 headless, real_chrome, wait, proxy, timeout, network_idle,
                 solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
                 useragent, cookies, max_content_chars, include_media, include_links,
+                focus,
             )
 
         # Validate all inputs
@@ -2384,17 +2415,9 @@ class MasterFetchServer:
             max_content_chars = min(max_content_chars, 200000)
         mc = max_content_chars if isinstance(max_content_chars, int) else MAX_CONTENT_CHARS
 
-        # PDF options flow down to _translate_response via contextvars (task-local,
-        # safe under concurrent bulk fetches) and into the cache key so a
-        # pages-subset extraction doesn't collide with a full-PDF cache entry.
-        _PDF_PAGES.set(pages if isinstance(pages, str) else None)
-        _PDF_PASSWORD.set(password if isinstance(password, str) else None)
-        # focus: set only when provided (truthy) so bulk-mode inner calls inherit
-        # the parent's focus via the gather context copy instead of resetting it.
-        if isinstance(focus, str) and focus.strip():
-            _FOCUS.set(focus)
-        _INCLUDE_MEDIA.set(bool(include_media))
-        _INCLUDE_LINKS.set(bool(include_links))
+        # Request options flow to lower-level fetchers through ContextVars. The
+        # decorator scopes them to this call so sequential requests cannot leak
+        # state into one another while concurrent bulk tasks remain isolated.
         # actions produce post-interaction content unique to the action sequence;
         # bypass the cache so a plain (pre-action) cached copy is never served.
         if actions:
@@ -2503,6 +2526,7 @@ class MasterFetchServer:
         solve_cloudflare, block_webrtc, hide_canvas, extra_headers,
         useragent, cookies, max_chars: int = MAX_CONTENT_CHARS,
         include_media: bool = False, include_links: bool = False,
+        focus: Optional[str] = None,
     ) -> BulkResponseModel:
         """Fetch multiple URLs in parallel through the smart fetch pipeline."""
         if len(urls) > MAX_BULK_URLS:
@@ -2524,6 +2548,7 @@ class MasterFetchServer:
                     useragent=useragent, cookies=cookies,
                     max_content_chars=max_chars,
                     include_media=include_media, include_links=include_links,
+                    focus=focus,
                 )
             except Exception as e:
                 return _with_agent_hints(ResponseModel(
