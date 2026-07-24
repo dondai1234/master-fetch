@@ -838,6 +838,63 @@ class TestPoolManagement:
         _refresh_pools()
         assert _POOLS["serper"].size == 2
 
+    def test_refresh_pools_removes_deleted_keys_and_keeps_config_order(self, monkeypatch):
+        import master_fetch.search_api_keys as api_keys
+        api_keys._POOLS["serper"] = api_keys.KeyPool(["key1", "key2", "key3"])
+        monkeypatch.setattr(api_keys, "load_byok_keys", lambda: {"serper": ["key3", "key1"]})
+
+        api_keys._refresh_pools()
+
+        assert api_keys._POOLS["serper"]._keys == ["key3", "key1"]
+        assert "key2" not in api_keys._POOLS["serper"]._state
+
+    def test_refresh_pools_rotates_safely_when_next_key_is_deleted(self, monkeypatch):
+        import master_fetch.search_api_keys as api_keys
+        pool = api_keys.KeyPool(["key1", "key2", "key3"])
+        api_keys._POOLS["serper"] = pool
+        assert pool.get_key() == "key1"  # key2 is next in the rotation
+        monkeypatch.setattr(api_keys, "load_byok_keys", lambda: {"serper": ["key1", "key3"]})
+
+        api_keys._refresh_pools()
+
+        assert pool.get_key() == "key3"
+
+    def test_refresh_pools_rotates_safely_when_current_key_is_deleted(self, monkeypatch):
+        import master_fetch.search_api_keys as api_keys
+        pool = api_keys.KeyPool(["key1", "key2", "key3"])
+        api_keys._POOLS["serper"] = pool
+        assert pool.get_key() == "key1"
+        monkeypatch.setattr(api_keys, "load_byok_keys", lambda: {"serper": ["key2", "key3"]})
+
+        api_keys._refresh_pools()
+
+        assert pool._keys == ["key2", "key3"]
+        assert pool.get_key() == "key2"
+
+    def test_refresh_pools_preserves_retained_key_cooldown(self, monkeypatch):
+        import master_fetch.search_api_keys as api_keys
+        pool = api_keys.KeyPool(["key1", "key2"])
+        pool.mark_invalid("key2")
+        cooldown_until = pool._state["key2"]["rate_limited_until"]
+        api_keys._POOLS["serper"] = pool
+        monkeypatch.setattr(api_keys, "load_byok_keys", lambda: {"serper": ["key2", "key3"]})
+
+        api_keys._refresh_pools()
+
+        assert pool._state == {
+            "key2": {"rate_limited_until": cooldown_until, "error": "invalid"},
+            "key3": {},
+        }
+
+    def test_refresh_pools_removes_provider_without_keys(self, monkeypatch):
+        import master_fetch.search_api_keys as api_keys
+        api_keys._POOLS["serper"] = api_keys.KeyPool(["key1"])
+        monkeypatch.setattr(api_keys, "load_byok_keys", lambda: {})
+
+        api_keys._refresh_pools()
+
+        assert "serper" not in api_keys._POOLS
+
     def test_reset_clears_all_pools(self):
         from master_fetch.search_api_keys import _POOLS, _reset_byok_pools
         _POOLS["test"] = MagicMock()

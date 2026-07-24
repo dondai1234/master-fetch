@@ -6,6 +6,8 @@
   through bulk URL fetches, preventing filters from leaking or being ignored.
 - Include an explicit normalized `region` in the `smart_search` cache identity
   so searches for different regions cannot reuse each other's cached results.
+- Reconcile in-memory BYOK key pools with configuration changes so removed and
+  reordered keys take effect without restart while retained key state survives.
 
 ## [12.3.0] - 2026-07-23
 

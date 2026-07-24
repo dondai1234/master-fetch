@@ -164,23 +164,32 @@ def _get_pool(provider: str) -> KeyPool | None:
 
 
 def _refresh_pools() -> None:
-    """Reload keys from config (env vars + config file). Rebuilds pools.
+    """Reload keys from config and reconcile pools with the configured keys.
 
-    Called lazily by _register_byok_backends() so new keys added via CLI
-    are picked up without restarting the server.
+    Called lazily by _register_byok_backends() so key additions, removals, and
+    reordered keys from the CLI are picked up without restarting the server.
     """
     all_keys = load_byok_keys()
     for provider in BYOK_PROVIDERS:
         keys = all_keys.get(provider, [])
         if keys:
             if provider in _POOLS:
-                # Update existing pool's keys (preserve state for existing keys).
+                # Keep state for retained keys, but make both pool membership and
+                # order exactly match the current configuration. Preserve the next
+                # surviving key in the old rotation where possible.
                 old_pool = _POOLS[provider]
-                new_keys = [k for k in keys if k not in old_pool._keys]
-                if new_keys:
-                    old_pool._keys.extend(new_keys)
-                    for k in new_keys:
-                        old_pool._state.setdefault(k, {})
+                old_keys = old_pool._keys
+                next_key = None
+                if old_keys:
+                    for offset in range(len(old_keys)):
+                        candidate = old_keys[(old_pool._idx + offset) % len(old_keys)]
+                        if candidate in keys:
+                            next_key = candidate
+                            break
+                old_state = old_pool._state
+                old_pool._keys = list(keys)
+                old_pool._state = {key: old_state.get(key, {}) for key in keys}
+                old_pool._idx = old_pool._keys.index(next_key) if next_key else 0
             else:
                 _POOLS[provider] = KeyPool(keys)
         else:
