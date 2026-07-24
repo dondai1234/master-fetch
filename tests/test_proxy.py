@@ -371,3 +371,104 @@ class TestMetasearchProxyIntegration:
         pool.mark_failed("http://p1:80")
         from master_fetch.search_metasearch import _get_search_proxy
         assert _get_search_proxy() is None
+
+
+# ─── Crawl proxy integration ───────────────────────────────────────
+
+class TestCrawlProxyIntegration:
+    """Verify crawl fetches rotate through the proxy pool."""
+
+    def test_crawl_fetch_one_passes_proxy_to_smart_fetch(self, monkeypatch, tmp_path):
+        """fetch_one in crawl.py should call get_next_proxy and pass it to smart_fetch."""
+        config_file = tmp_path / "proxies.json"
+        config_file.write_text(json.dumps({"proxies": ["http://crawl-p1:80", "http://crawl-p2:80"]}))
+        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
+        reset_pool()
+
+        received_proxies = []
+
+        async def mock_smart_fetch(self, url=None, **kwargs):
+            from master_fetch.server import ResponseModel
+            received_proxies.append(kwargs.get("proxy"))
+            return ResponseModel(
+                url=url or "", status=200, content=["<html>ok</html>"],
+                fetcher_used="http",
+            )
+
+        from master_fetch.server import MasterFetchServer
+        monkeypatch.setattr(MasterFetchServer, "smart_fetch", mock_smart_fetch)
+
+        server = MasterFetchServer()
+        import asyncio
+        result = asyncio.run(server.smart_crawl(
+            "https://example.com/", max_pages=1, cache_ttl=0,
+        ))
+
+        assert len(received_proxies) > 0
+        assert received_proxies[0] in ["http://crawl-p1:80", "http://crawl-p2:80"]
+        reset_pool()
+
+    def test_crawl_no_proxies_passes_none(self, monkeypatch, tmp_path):
+        """When no proxies configured, crawl passes None (direct connection)."""
+        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: tmp_path / "none.json")
+        monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
+        reset_pool()
+
+        received_proxies = []
+
+        async def mock_smart_fetch(self, url=None, **kwargs):
+            from master_fetch.server import ResponseModel
+            received_proxies.append(kwargs.get("proxy"))
+            return ResponseModel(
+                url=url or "", status=200, content=["<html>ok</html>"],
+                fetcher_used="http",
+            )
+
+        from master_fetch.server import MasterFetchServer
+        monkeypatch.setattr(MasterFetchServer, "smart_fetch", mock_smart_fetch)
+
+        server = MasterFetchServer()
+        import asyncio
+        asyncio.run(server.smart_crawl(
+            "https://example.com/", max_pages=1, cache_ttl=0,
+        ))
+
+        assert all(p is None for p in received_proxies)
+        reset_pool()
+
+    def test_crawl_rotates_proxies_across_pages(self, monkeypatch, tmp_path):
+        """Multiple crawl page fetches should rotate through different proxies."""
+        config_file = tmp_path / "proxies.json"
+        config_file.write_text(json.dumps({"proxies": [
+            "http://c1:80", "http://c2:80", "http://c3:80",
+        ]}))
+        monkeypatch.setattr("master_fetch.search_proxy._config_path", lambda: config_file)
+        monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
+        reset_pool()
+
+        received_proxies = []
+
+        async def mock_smart_fetch(self, url=None, **kwargs):
+            from master_fetch.server import ResponseModel
+            received_proxies.append(kwargs.get("proxy"))
+            return ResponseModel(
+                url=url or "", status=200, content=[
+                    '<html><body><a href="/page2">2</a><a href="/page3">3</a></body></html>'
+                ],
+                fetcher_used="http",
+            )
+
+        from master_fetch.server import MasterFetchServer
+        monkeypatch.setattr(MasterFetchServer, "smart_fetch", mock_smart_fetch)
+
+        server = MasterFetchServer()
+        import asyncio
+        asyncio.run(server.smart_crawl(
+            "https://example.com/", max_pages=3, cache_ttl=0,
+        ))
+
+        assert len(received_proxies) >= 2
+        unique_proxies = set(received_proxies)
+        assert len(unique_proxies) > 1, f"Expected rotation but got {received_proxies}"
+        reset_pool()

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [12.4.1] - 2026-07-24
+
+### Crawl proxy rotation
+
+Proxy rotation now applies to `smart_crawl` as well as search. Each page fetch in a crawl pulls the next proxy from the pool, spreading crawl traffic across all your IPs so crawling a site doesn't rate-limit your real address. Sitemap discovery fetches also use the pool.
+
+- `fetch_one` in `crawl.py` passes `proxy=get_next_proxy()` to `smart_fetch`
+- Sitemap discovery's HTTP client uses the pool
+- Health tracking: successful fetch marks proxy healthy, connection error cools it 60s
+- 3 new adversarial tests for crawl proxy integration (763 total pass)
+
 ## [12.4.0] - 2026-07-24
 
 ### Smart proxy rotation for local search
