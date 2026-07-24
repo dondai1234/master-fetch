@@ -20,7 +20,7 @@ One MCP server · one warm browser · zero accounts · runs on your machine
 pip install hound-mcp[all] && playwright install chromium
 ```
 
-[Install](#-install) · [The 6 tools](#-the-6-tools) · [Search](#-local-keyless-search) · [Comparison](#-comparison-free-tools) · [Honest limits](#-honest-limits)
+[Install](#-install) · [The 6 tools](#-the-6-tools) · [Search](#-local-keyless-search) · [Comparison](#-comparison-free-tools) · [Gotchas](#-known-gotchas) · [Honest limits](#-honest-limits)
 
 </div>
 
@@ -551,6 +551,20 @@ Then in Open WebUI add an MCP server with URL `http://127.0.0.1:8765/mcp`. Stdio
 
 ---
 
+## ⚠️ Known gotchas
+
+Things that might surprise you if you don't know them:
+
+| Gotcha | What to know |
+|---|---|
+| **Proxy rotation covers search + crawl, not individual `web_fetch`** | `smart_fetch` (web_fetch) accepts a `proxy` parameter but doesn't auto-pull from the pool. Only `smart_search` and `smart_crawl` rotate through your configured proxies. If an agent makes standalone `web_fetch` calls, those go through your real IP. |
+| **Webshare free tier has a 1GB/month bandwidth cap** | 10 free proxies share 1GB/month total, not per-proxy. Search results are tiny (~50KB/search), but crawl pages are 100-500KB each. ~2000 crawled pages/month hits the cap. For heavier use, upgrade to a paid Webshare plan or add more proxies from other providers. |
+| **API keys and proxy credentials are stored in plaintext** | `~/.hound/search_keys.json` and `~/.hound/search_proxies.json` are plain JSON. If you're on a shared machine, set file permissions or use environment variables instead of the config files. |
+| **`robots.txt` is off by default** | Hound checks robots.txt only when `respect_robots=True` is passed to `smart_fetch`. This is intentional: many sites disallow all non-Googlebot agents, and respecting that by default would make the tool useless for research. The feature exists for users who want compliance. |
+| **Playwright browser is not installed by `pip install`** | `hound-mcp[all]` installs Python dependencies, but the Chromium binary requires a separate `python -m playwright install chromium`. `hound doctor` checks for this and reports if it's missing. Without it, Hound falls back to HTTP-only fetching (no stealth browser, no JS rendering, no CAPTCHA solving). |
+| **Cache serves content for 1 hour by default** | `cache_ttl` defaults to 3600 seconds. For fresh content, pass `cache_ttl=0` to force a live fetch. Cached responses show `duration_ms: 0` in the output. |
+| **Search engine scraping is gray-area** | Same legal posture as SearXNG / ddgs. No search-engine ToS compliance is claimed. Hound is a research tool, not a mass crawler. |
+
 ## ⚠️ Honest limits
 
 No free tool can do everything. Hound is upfront about what it can't:
@@ -558,7 +572,7 @@ No free tool can do everything. Hound is upfront about what it can't:
 | Limit | What happens instead |
 |-------|----------------------|
 | **DataDome / Akamai / Cloudflare Turnstile (interactive)** | Not bypassed. `next_action` tells the agent to switch sources instead of retrying. |
-| **Search rate-limits / CAPTCHAs** | Solved by diversity: 10 keyless backends run in parallel; a backend that rate-limits/CAPTCHAs is carried by the others, and a diversity quorum waits for 3 to contribute so no single backend dominates. Search is never dead. `engine_blocked` reports cooled-down backends; `HOUND_SEARCH_PROXY` is a power-user rotating-proxy escape hatch for per-IP throttling (the one thing no scraper can escape from one IP). |
+| **Search rate-limits / CAPTCHAs** | Solved by diversity: 10 keyless backends run in parallel; a backend that rate-limits/CAPTCHAs is circuit-opened for a cooldown so the others carry it. `hound proxy add` (v12.4.0+) adds up to 20 rotating proxies that cycle per search call, keeping your real IP untouched. |
 | **Neural / find_similar search** | Need `hound-mcp[all]` (the ONNX reranker runs on the same `onnxruntime` as OCR; model downloads once). Lean installs get cross-backend consensus + engine-position ranking. |
 | **Sites requiring login** | Out of scope (Hound does page interaction, not authenticated sessions). |
 | **Deep shadow-DOM / hard SPAs** | `actions` (scroll, click, `wait_selector`) reach most of it; deep shadow-DOM piercing not yet wired. |
