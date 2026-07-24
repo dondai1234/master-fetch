@@ -1,6 +1,6 @@
 {
   "name": "master-fetch",
-  "version": "11.1.6",
+  "version": "12.4.0",
   "private": true,
   "description": "Hound MCP - keyless web research for AI agents. Free, no API key.",
   "pi": {
