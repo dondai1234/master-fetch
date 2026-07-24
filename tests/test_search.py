@@ -421,104 +421,62 @@ class TestEngineConfig:
 
 # ─── Proxy validation (HOUND_SEARCH_PROXY) ─────────────────────────────────
 class TestSearchProxyValidation:
-    """Verify _PROXY is stripped and validated at import time.
+    """Verify proxy validation through the ProxyPool system.
 
-    A bad proxy used to silently kill every search backend: httpx crashed at
-    construction (ValueError), primp crashed at construction (BuilderError), and
-    metasearch() returned 0 results with no explanation. Now the proxy is
-    stripped + scheme-validated, and if all engines fail to construct, a
-    MetaSearchException is raised.
+    The old static _PROXY (set at import time) was replaced by per-call
+    rotation via _get_search_proxy(). Validation is now in search_proxy.py.
+    These tests verify the end-to-end behavior is preserved.
     """
 
-    def test_whitespace_stripped(self):
+    def test_whitespace_stripped(self, monkeypatch, tmp_path):
         """Leading/trailing whitespace is stripped so httpx doesn't crash."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = " http://proxy:8080 "
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY == "http://proxy:8080"
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
-            # Reload api_backends so MetaBlockedException references
-            # stay in sync after search_metasearch reload.
-            try:
-                import master_fetch.api_backends as _ab
-                importlib.reload(_ab)
-            except Exception:
-                pass
+        monkeypatch.setenv("HOUND_SEARCH_PROXY", " http://proxy:8080 ")
+        monkeypatch.setattr("master_fetch.search_proxy._config_path",
+                             lambda: tmp_path / "none.json")
+        from master_fetch.search_proxy import reset_pool, get_next_proxy
+        reset_pool()
+        assert get_next_proxy() == "http://proxy:8080"
+        reset_pool()
 
-    def test_whitespace_only_nulled(self):
-        """Whitespace-only proxy becomes None, not a crash-inducing string."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = "   "
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY is None
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
-            # Reload api_backends so MetaBlockedException references
-            # stay in sync after search_metasearch reload.
-            try:
-                import master_fetch.api_backends as _ab
-                importlib.reload(_ab)
-            except Exception:
-                pass
+    def test_whitespace_only_nulled(self, monkeypatch, tmp_path):
+        """Whitespace-only proxy becomes None (no proxy, direct connection)."""
+        monkeypatch.setenv("HOUND_SEARCH_PROXY", "   ")
+        monkeypatch.setattr("master_fetch.search_proxy._config_path",
+                             lambda: tmp_path / "none.json")
+        from master_fetch.search_proxy import reset_pool, get_next_proxy
+        reset_pool()
+        assert get_next_proxy() is None
+        reset_pool()
 
-    def test_invalid_scheme_rejected(self):
+    def test_invalid_scheme_rejected(self, monkeypatch, tmp_path):
         """Unknown scheme (not http/https/socks5/socks5h) is rejected."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = "garbage://proxy"
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY is None
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
-            # Reload api_backends so MetaBlockedException references
-            # stay in sync after search_metasearch reload.
-            try:
-                import master_fetch.api_backends as _ab
-                importlib.reload(_ab)
-            except Exception:
-                pass
+        monkeypatch.setenv("HOUND_SEARCH_PROXY", "garbage://proxy")
+        monkeypatch.setattr("master_fetch.search_proxy._config_path",
+                             lambda: tmp_path / "none.json")
+        from master_fetch.search_proxy import reset_pool, get_next_proxy
+        reset_pool()
+        assert get_next_proxy() is None
+        reset_pool()
 
-    def test_valid_socks5_accepted(self):
+    def test_valid_socks5_accepted(self, monkeypatch, tmp_path):
         """socks5 scheme is accepted (primp supports it natively)."""
-        import os, importlib
-        os.environ["HOUND_SEARCH_PROXY"] = "socks5://192.0.2.1:1080"
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        try:
-            assert m._PROXY == "socks5://192.0.2.1:1080"
-        finally:
-            os.environ.pop("HOUND_SEARCH_PROXY", None)
-            importlib.reload(m)
-            # Reload api_backends so MetaBlockedException references
-            # stay in sync after search_metasearch reload.
-            try:
-                import master_fetch.api_backends as _ab
-                importlib.reload(_ab)
-            except Exception:
-                pass
+        monkeypatch.setenv("HOUND_SEARCH_PROXY", "socks5://192.0.2.1:1080")
+        monkeypatch.setattr("master_fetch.search_proxy._config_path",
+                             lambda: tmp_path / "none.json")
+        from master_fetch.search_proxy import reset_pool, get_next_proxy
+        reset_pool()
+        assert get_next_proxy() == "socks5://192.0.2.1:1080"
+        reset_pool()
 
-    def test_no_proxy_env(self):
+    def test_no_proxy_env(self, monkeypatch, tmp_path):
         """Unset env var -> None (direct connection)."""
-        import os, importlib
-        os.environ.pop("HOUND_SEARCH_PROXY", None)
-        import master_fetch.search_metasearch as m
-        importlib.reload(m)
-        assert m._PROXY is None
-        # Reload api_backends to sync class references after reload.
-        try:
-            import importlib as _il, master_fetch.api_backends as _ab
-            _il.reload(_ab)
-        except Exception:
-            pass
+        monkeypatch.delenv("HOUND_SEARCH_PROXY", raising=False)
+        monkeypatch.setattr("master_fetch.search_proxy._config_path",
+                             lambda: tmp_path / "none.json")
+        from master_fetch.search_proxy import reset_pool, get_next_proxy
+        reset_pool()
+        assert get_next_proxy() is None
+        reset_pool()
 
     def test_all_engines_construction_failure_raises(self):
         """If every engine fails to construct (bad deps, etc), raise an error

@@ -868,6 +868,16 @@ def doctor() -> None:
     rows.append(f"{bw_mark} {'browser deps':<22} {ui.dim(_short(browser_detail, 30))}")
     # BYOK search API keys (non-blocking, info-only)
     rows.append(f"  {'byok search keys':<22} {ui.dim(_short(byok_detail, 30))}")
+    # Search proxy rotation (non-blocking, info-only)
+    proxy_detail = "none (direct connection)"
+    try:
+        from master_fetch.search_proxy import load_proxies
+        proxies = load_proxies()
+        if proxies:
+            proxy_detail = f"{len(proxies)} proxy(s) configured (rotating)"
+    except Exception:
+        proxy_detail = "check failed"
+    rows.append(f"  {'search proxies':<22} {ui.dim(_short(proxy_detail, 30))}")
     print(ui.panel(rows, 64))
     # Verdict + fixes (outside the panel)
     if missing:

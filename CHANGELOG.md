@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [12.4.0] - 2026-07-24
+
+### Smart proxy rotation for local search
+
+Add multiple proxies and Hound rotates through them automatically per search call. Each search uses the next proxy in the pool, spreading traffic across all IPs so no single address gets rate-limited. Unhealthy proxies (connection errors) are auto-cooled for 60s. If all proxies are down, Hound falls back to direct connection.
+
+- **CLI**: `hound proxy add/list/remove/clear` (mirrors `hound keys`)
+- **Config file**: `~/.hound/search_proxies.json` (persists across restarts)
+- **Env var**: `HOUND_SEARCH_PROXY` now supports comma-separated multiple proxies (backward-compatible with single proxy)
+- **Max 20 proxies**, rotation is per-search-call (all engines in one search share one IP)
+- **`hound doctor`** shows proxy pool status
+- **README** documents free proxy sources: Webshare (highly recommended, 100% success rate) and ProxyScrape (no signup, ~10% hit rate)
+
+### New module
+
+- `search_proxy.py`: `ProxyPool` class with round-robin rotation + health tracking, config file management, env var parsing, validation, redaction
+
+### Tests
+
+- 51 new adversarial tests in `tests/test_proxy.py` (rotation, health, config, env vars, merging, redaction, metasearch integration)
+- Updated 5 old proxy validation tests in `tests/test_search.py` for new architecture
+- 760 total tests pass
+
 ## [12.3.1] - 2026-07-24
 
 ### Community bug fixes by @robbyczgw-cla

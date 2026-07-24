@@ -187,29 +187,55 @@ Scraping public engines from your IP can be rate-limited or CAPTCHA'd. No keyles
 | 4 | **202 / 429 / 503 / 403 + Retry-After** | DDG's HTTP 202 soft rate-limit is detected; `Retry-After` honored. |
 | 5 | **Fingerprint rotation** | A pool of real Chrome / Edge / Firefox / Safari TLS profiles, picked per request. |
 | 6 | **Diverse pool + consensus** | 10 backends across 6+ index families run in parallel: no single engine is a bottleneck, and agreement across independent indexes is a free authority signal. |
-| 7 | **`HOUND_SEARCH_PROXY`** | Route all engine requests through your own rotating / residential proxy: the bulletproof path for heavy use. |
+| 7 | **`HOUND_SEARCH_PROXY` + rotation pool** | Route engine requests through one or more proxies. Add up to 20 and Hound rotates per search call: the bulletproof path for heavy use. |
 
 Same gray-area posture as SearXNG / ddgs; no search-engine ToS compliance is claimed.
 </details>
 
-#### Free proxy sources for local search
+#### Smart proxy rotation
 
-If you're using local keyless search (no BYOK keys) and your IP gets rate-limited, `HOUND_SEARCH_PROXY` lets you route engine requests through a proxy. You don't need to pay for one. Here are free platforms tested with Hound:
+Local keyless search scrapes public engines from your IP. Sustained use can get rate-limited. Hound's proxy rotation lets you add multiple proxies and cycles through them automatically: each search call uses the next proxy, spreading traffic across all IPs. Unhealthy proxies (connection errors) are auto-cooled for 60s and skipped. If all proxies are down, Hound falls back to direct connection so search never fails.
 
-| Platform | Signup | Format | Tested result |
-|---|---|---|---|
-| **[ProxyScrape](https://proxyscrape.com/free-proxy-list)** | None | `protocol://ip:port` ready to paste | 2,000+ proxies, ~10% return real results, refreshed every minute |
-| **[Webshare](https://www.webshare.io/)** | Free account (no card) | `http://user:pass@ip:port` | 10 dedicated proxies, **100% success rate** across 6 countries |
+**Setup in 30 seconds:**
 
 ```bash
-# ProxyScrape: grab working proxies (no signup needed)
-curl -sL "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text" | grep "^socks5://" | head -10
+# Add proxies (supports http, https, socks5, socks5h + auth)
+hound proxy add "http://user:pass@31.59.20.176:6754"
+hound proxy add "socks5://1.2.3.4:1080"
+hound proxy add "http://1.2.3.4:8080" "socks5://5.6.7.8:1080"  # bulk add
 
-# Set one as your search proxy
-export HOUND_SEARCH_PROXY="socks5://1.2.3.4:1080"
+# List configured proxies (credentials redacted)
+hound proxy list
+
+# Remove by index or clear all
+hound proxy remove 0
+hound proxy clear
 ```
 
-Free proxies from public lists are shared and short-lived. SOCKS5 proxies outperform HTTP for search engines because they tunnel HTTPS reliably. Webshare's 10 free dedicated proxies are more reliable because they're yours alone, not shared with other scrapers already rate-limited by Google and Bing.
+Or set via env var (comma-separated):
+```bash
+export HOUND_SEARCH_PROXY="http://p1:8080,socks5://p2:1080,http://user:pass@p3:3128"
+```
+
+Max 20 proxies. Config persists in `~/.hound/search_proxies.json`. Rotation is per-search-call (not per-engine), so all engines in one search share one IP, and the next search rotates to the next proxy. `hound doctor` shows your proxy pool status.
+
+**Free proxy sources tested with Hound:**
+
+| Platform | Signup | Tested result | Recommended |
+|---|---|---|---|
+| **[Webshare](https://www.webshare.io/)** | Free account (no card) | 10 dedicated proxies, **100% success rate**, 6 countries | **Highly recommended** |
+| **[ProxyScrape](https://proxyscrape.com/free-proxy-list)** | None | 2,000+ proxies, ~10% work, refreshed every minute | Quick start, no account |
+
+Webshare's 10 free proxies are dedicated (yours alone, not shared with other scrapers), which is why they achieve 100% success. ProxyScrape's public list is shared and short-lived, but requires no signup. SOCKS5 outperforms HTTP for search engines because it tunnels HTTPS reliably.
+
+```bash
+# ProxyScrape: grab working SOCKS5 proxies (no signup needed)
+curl -sL "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text" | grep "^socks5://" | head -5
+
+# Add them to Hound's rotation pool
+# (paste each one: hound proxy add "socks5://ip:port")
+```
+
 
 ### 🔑 Bring Your Own Key (BYOK)
 
