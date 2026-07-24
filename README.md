@@ -192,6 +192,25 @@ Scraping public engines from your IP can be rate-limited or CAPTCHA'd. No keyles
 Same gray-area posture as SearXNG / ddgs; no search-engine ToS compliance is claimed.
 </details>
 
+#### Free proxy sources for local search
+
+If you're using local keyless search (no BYOK keys) and your IP gets rate-limited, `HOUND_SEARCH_PROXY` lets you route engine requests through a proxy. You don't need to pay for one. Here are free platforms tested with Hound:
+
+| Platform | Signup | Format | Tested result |
+|---|---|---|---|
+| **[ProxyScrape](https://proxyscrape.com/free-proxy-list)** | None | `protocol://ip:port` ready to paste | 2,000+ proxies, ~10% return real results, refreshed every minute |
+| **[Webshare](https://www.webshare.io/)** | Free account (no card) | `http://user:pass@ip:port` | 10 dedicated proxies, **100% success rate** across 6 countries |
+
+```bash
+# ProxyScrape: grab working proxies (no signup needed)
+curl -sL "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text" | grep "^socks5://" | head -10
+
+# Set one as your search proxy
+export HOUND_SEARCH_PROXY="socks5://1.2.3.4:1080"
+```
+
+Free proxies from public lists are shared and short-lived. SOCKS5 proxies outperform HTTP for search engines because they tunnel HTTPS reliably. Webshare's 10 free dedicated proxies are more reliable because they're yours alone, not shared with other scrapers already rate-limited by Google and Bing.
+
 ### 🔑 Bring Your Own Key (BYOK)
 
 Hound's local keyless search works with zero configuration and never goes away. But some users have API keys from search providers, either from free tiers or paid plans. Hound respects that: bring your keys, and Hound makes them first-class citizens with the same reliability guarantees as its own keyless engines.
