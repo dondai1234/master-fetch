@@ -996,6 +996,9 @@ async def smart_search(
                 error="find_similar requires a url (pass url=, or the URL as query).",
                 next_action="Pass url= with a page URL to find pages similar to it (or pass the URL as the query).")
 
+    # Preserve an explicit region for cache identity before deriving the
+    # location/language default used by search engines.
+    cache_region = str(region).strip().lower() if region is not None else None
     # region derives from location/language if not given (e.g. "US" -> "us-en").
     if region is None:
         loc = (location or "US").lower()
@@ -1003,7 +1006,13 @@ async def smart_search(
         region = f"{loc}-{lang}" if len(loc) == 2 else "us-en"
 
     cache_query = find_sim_url or query
-    cache_type = (f"search:v12:{max_results}:{site or ''}:{','.join(exclude_sites or [])}:"f"{location or ''}:{language or ''}:{page or 0}:{','.join(engines or [])}:"f"{freshness or ''}:{mode}:{cache_query}")
+    cache_type = (f"search:v12:{max_results}:{site or ''}:{','.join(exclude_sites or [])}:"
+                  f"{location or ''}:{language or ''}:{page or 0}:{','.join(engines or [])}:"
+                  f"{freshness or ''}:{mode}:{cache_query}")
+    # An explicit region is passed through to the engines, so keep it in the
+    # cache identity. Omitted regions retain the existing cache key behavior.
+    if cache_region is not None:
+        cache_type = f"{cache_type}:region={cache_region}"
     if cache_ttl > 0:
         cached = await get_cached(cache_query, cache_type, None, ttl=cache_ttl)
         if cached and cached.get("content"):
