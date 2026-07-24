@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
-- Scope `smart_fetch` request context to each invocation and forward `focus`
-  through bulk URL fetches, preventing filters from leaking or being ignored.
-- Include an explicit normalized `region` in the `smart_search` cache identity
-  so searches for different regions cannot reuse each other's cached results.
-- Reconcile in-memory BYOK key pools with configuration changes so removed and
-  reordered keys take effect without restart while retained key state survives.
+## [12.3.1] - 2026-07-24
+
+### Community bug fixes by @robbyczgw-cla
+
+- **Focus context isolation** (#27): `smart_fetch` request context (focus, PDF pages, password, include_media, include_links) is now scoped to each invocation via a decorator that resets ContextVars in `finally`. Prevents focus from leaking between sequential calls. Focus is also forwarded through bulk URL fetches.
+- **Region cache identity** (#28): Explicit `region` is now included in the `smart_search` cache identity so searches for different regions cannot reuse each other's cached results.
+- **BYOK key pool reconciliation** (#29): Removed and reordered BYOK keys take effect without restart. Pool membership and order exactly match current configuration while retained key cooldown state survives.
 
 ## [12.3.0] - 2026-07-23
 
